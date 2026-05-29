@@ -1,174 +1,406 @@
-# ASP.NET MVC Interview Questions
+# 🌐 ASP.NET MVC Interview Questions — Complete Guide
 
-## MVC Pattern & Architecture
-
-**Q1: What is the MVC pattern and how does ASP.NET Core implement it?**
-
-MVC (Model-View-Controller) separates an application into three concerns:
-- **Model**: Represents data and business logic.
-- **View**: Renders the UI (Razor templates in ASP.NET).
-- **Controller**: Handles HTTP requests, coordinates between Model and View, returns responses.
-
-In ASP.NET Core MVC, incoming requests are routed to a controller action. The action interacts with services/models, then returns an `IActionResult` — which could be a `ViewResult`, `JsonResult`, `RedirectResult`, etc. The framework uses dependency injection, middleware, and filters extensively.
-
-**Q2: What is the difference between ASP.NET MVC and ASP.NET Core MVC?**
-
-ASP.NET MVC (5 and earlier) runs only on Windows with the full .NET Framework and IIS. ASP.NET Core MVC is cross-platform, runs on .NET Core/.NET 5+, has a unified framework for MVC and Web API, uses a built-in DI container, features a modular middleware pipeline, and is significantly faster. Core MVC also merges Web API into the same framework — `[ApiController]` and `[Controller]` are in the same namespace.
-
-**Q3: How does routing work in ASP.NET Core MVC?**
-
-ASP.NET Core supports two routing styles:
-- **Conventional routing**: Defined in `Program.cs` via `app.MapControllerRoute()`. URL templates like `{controller}/{action}/{id?}` map to controller/action pairs.
-- **Attribute routing**: Decorating controllers and actions with `[Route]`, `[HttpGet]`, `[HttpPost]`, etc. Gives fine-grained control over URL structure.
-
-Attribute routing takes precedence and is preferred for APIs. Route parameters can have constraints: `[Route("products/{id:int:min(1)}")]`.
+> **50+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
+> Use `Ctrl+F` / `Cmd+F` to jump to any topic.
 
 ---
 
-## Controllers & Actions
+## 📋 Table of Contents
+1. [MVC Pattern & Routing](#1-mvc-pattern--routing)
+2. [Controllers & Actions](#2-controllers--actions)
+3. [Model Binding & Validation](#3-model-binding--validation)
+4. [Filters](#4-filters)
+5. [Dependency Injection](#5-dependency-injection)
+6. [Middleware](#6-middleware)
+7. [Authentication & Authorization](#7-authentication--authorization)
+8. [Views & Razor](#8-views--razor)
+9. [Performance & Caching](#9-performance--caching)
+10. [Error Handling & Testing](#10-error-handling--testing)
 
-**Q4: What is the difference between `IActionResult` and specific result types like `OkObjectResult`?**
+---
 
-`IActionResult` is the interface all action results implement — it decouples the action method from the specific HTTP response. Returning `IActionResult` lets you return different response types based on conditions (e.g., `Ok()`, `NotFound()`, `BadRequest()`). Returning a concrete type like `OkObjectResult` directly is fine but less flexible. For Web APIs, `ActionResult<T>` combines both — it enables OpenAPI schema generation while still allowing multiple return types.
+# 1. MVC Pattern & Routing
 
-**Q5: What does `[ApiController]` attribute do?**
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/overview
+> 📚 Routing: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/routing
 
-`[ApiController]` enables a set of conventions for API controllers:
-- Automatic HTTP 400 response when `ModelState.IsValid` is false (no manual check needed).
-- Binding source inference: `[FromBody]` for complex types, `[FromRoute]` for route data, `[FromQuery]` for query strings.
-- Problem Details responses (RFC 7807) for error responses.
-- Requires attribute routing (conventional routing not allowed).
+---
 
-**Q6: What is model binding in ASP.NET Core MVC?**
+## 1.1 Routing — Conventional vs Attribute
 
-Model binding automatically maps HTTP request data (route values, query strings, form data, JSON body) to action method parameters. The framework tries each binding source in order. You can be explicit with attributes: `[FromBody]`, `[FromRoute]`, `[FromQuery]`, `[FromHeader]`, `[FromForm]`, `[FromServices]`. Custom model binders can be registered for non-standard types.
+### Q1. What are the two routing styles in ASP.NET Core and when do you use each?
 
-**Q7: What is model validation and how does it work?**
+**Answer:**
+Conventional routing is defined in `Program.cs` via templates like `{controller}/{action}/{id?}`. Attribute routing uses `[Route]`, `[HttpGet]`, etc. on controllers/actions. Attribute routing is preferred for APIs — it's explicit and co-located with the code. Conventional routing is common in MVC apps with Razor views.
 
-Model validation uses Data Annotation attributes (`[Required]`, `[Range]`, `[MaxLength]`, `[EmailAddress]`, etc.) or `IValidatableObject` for complex rules. After binding, the framework populates `ModelState`. You check `ModelState.IsValid` in MVC controllers; with `[ApiController]` this check is automatic. FluentValidation is a popular alternative that keeps validation rules separate from the model class.
+❌ **Wrong — mixing conventional routes in an API project, ambiguous URLs:**
+```csharp
+// Program.cs — conventional routing on a Web API
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
+// API URLs become /Products/GetById/5 — not RESTful, not explicit
+```
 
+✅ **Correct — attribute routing on API controllers:**
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase {
+    [HttpGet("{id:int}")]               // GET api/products/5
+    public async Task<IActionResult> GetById(int id) { ... }
+
+    [HttpPost]                          // POST api/products
+    public async Task<IActionResult> Create([FromBody] CreateProductDto dto) { ... }
+
+    [HttpDelete("{id:int}")]            // DELETE api/products/5
+    public async Task<IActionResult> Delete(int id) { ... }
+}
+```
+
+---
+
+## 1.2 Route Constraints
+
+### Q2. How do route constraints prevent invalid requests from reaching your controller?
+
+**Answer:**
+Route constraints (`{id:int}`, `{slug:alpha}`, `{date:datetime}`) validate route values before the action is invoked, returning 404 automatically for invalid formats rather than requiring manual checks in the action.
+
+❌ **Wrong — no constraint, manual validation inside the action:**
+```csharp
+[HttpGet("{id}")]
+public IActionResult Get(string id) {
+    if (!int.TryParse(id, out int numericId))
+        return BadRequest("ID must be an integer");
+    // Unnecessary — the route should enforce this
+    ...
+}
+```
+
+✅ **Correct — constraint enforced at routing level:**
+```csharp
+[HttpGet("{id:int:min(1)}")]   // must be int AND >= 1
+public async Task<IActionResult> Get(int id) {
+    var product = await _service.GetByIdAsync(id);
+    return product is null ? NotFound() : Ok(product);
+}
+```
+
+---
+
+# 2. Controllers & Actions
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/controllers/actions
+> 📚 ApiController: https://learn.microsoft.com/en-us/aspnet/core/web-api/
+
+---
+
+## 2.1 [ApiController] Attribute
+
+### Q3. What does `[ApiController]` do and why should you use it?
+
+**Answer:**
+`[ApiController]` enables: automatic 400 responses when ModelState is invalid, binding source inference, Problem Details error format (RFC 7807), and requires attribute routing. Removes boilerplate validation checks from every action.
+
+❌ **Wrong — manually checking ModelState in every action without [ApiController]:**
+```csharp
+[Controller]
+public class ProductsController : ControllerBase {
+    [HttpPost]
+    public IActionResult Create([FromBody] CreateProductDto dto) {
+        if (!ModelState.IsValid)         // repeated in EVERY action
+            return BadRequest(ModelState);
+        // logic...
+    }
+}
+```
+
+✅ **Correct — [ApiController] handles validation automatically:**
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase {
+    [HttpPost]
+    public async Task<ActionResult<ProductDto>> Create([FromBody] CreateProductDto dto) {
+        // If dto fails validation, 400 is returned automatically — no manual check needed
+        var product = await _service.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
+    }
+}
+```
+
+---
+
+## 2.2 ActionResult<T>
+
+### Q4. What is `ActionResult<T>` and why is it preferred over `IActionResult` for APIs?
+
+**Answer:**
+`ActionResult<T>` allows returning either a typed result `T` (for 200 OK) or any `IActionResult` (for 404, 400, etc.). It enables OpenAPI/Swagger to infer the response schema automatically, which `IActionResult` alone cannot.
+
+❌ **Wrong — `IActionResult` loses response type information for OpenAPI:**
+```csharp
+[HttpGet("{id}")]
+public async Task<IActionResult> GetById(int id) {
+    var product = await _service.GetByIdAsync(id);
+    return product is null ? NotFound() : Ok(product);
+    // Swagger shows response as 'any' — no schema generated
+}
+```
+
+✅ **Correct — `ActionResult<T>` provides both flexibility and schema:**
+```csharp
+[HttpGet("{id:int}")]
+[ProducesResponseType<ProductDto>(StatusCodes.Status200OK)]
+[ProducesResponseType(StatusCodes.Status404NotFound)]
+public async Task<ActionResult<ProductDto>> GetById(int id) {
+    var product = await _service.GetByIdAsync(id);
+    return product is null ? NotFound() : product; // implicit Ok() wrapping
+}
+```
+
+---
+
+# 3. Model Binding & Validation
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/models/model-binding
+> 📚 Validation: https://learn.microsoft.com/en-us/aspnet/core/mvc/models/validation
+
+---
+
+## 3.1 Model Validation with Data Annotations
+
+### Q5. How do you validate request models in ASP.NET Core?
+
+**Answer:**
+Use Data Annotations on the DTO class. The framework validates and populates `ModelState`. With `[ApiController]`, invalid models return 400 automatically. For complex rules, use `IValidatableObject` or FluentValidation.
+
+❌ **Wrong — no validation on DTO, validating manually in the action:**
+```csharp
+[HttpPost]
+public IActionResult Create([FromBody] CreateProductDto dto) {
+    if (string.IsNullOrEmpty(dto.Name)) return BadRequest("Name required");
+    if (dto.Price <= 0) return BadRequest("Price must be positive");
+    // Duplicated validation logic, not reusable
+}
+```
+
+✅ **Correct — validation attributes on the DTO, automatic enforcement:**
 ```csharp
 public class CreateProductDto {
     [Required]
-    [MaxLength(100)]
-    public string Name { get; set; }
+    [MaxLength(100, ErrorMessage = "Name cannot exceed 100 characters")]
+    public string Name { get; set; } = string.Empty;
 
-    [Range(0.01, 10000)]
+    [Range(0.01, 99999.99, ErrorMessage = "Price must be between 0.01 and 99,999.99")]
     public decimal Price { get; set; }
+
+    [Url]
+    public string? ImageUrl { get; set; }
+}
+
+[HttpPost]
+public async Task<ActionResult<ProductDto>> Create([FromBody] CreateProductDto dto) {
+    // [ApiController] returns 400 automatically if dto is invalid
+    var product = await _service.CreateAsync(dto);
+    return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
 }
 ```
 
 ---
 
-## Filters
+# 4. Filters
 
-**Q8: What are ASP.NET Core MVC filters and what are the different types?**
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/controllers/filters
 
-Filters run code at specific stages in the request processing pipeline. Types and their order of execution:
-1. **Authorization filters** (`IAuthorizationFilter`): Run first, before any other filter. Short-circuit if unauthorized.
-2. **Resource filters** (`IResourceFilter`): Run before model binding — useful for caching.
-3. **Action filters** (`IActionFilter`): Run before and after the action method — used for logging, validation.
-4. **Exception filters** (`IExceptionFilter`): Handle unhandled exceptions thrown by actions or other filters.
-5. **Result filters** (`IResultFilter`): Run before and after the action result is executed.
+---
 
-**Q9: How do you implement a custom action filter?**
+## 4.1 Action Filters for Cross-Cutting Concerns
 
+### Q6. How do you implement a reusable action filter for logging or timing?
+
+**Answer:**
+Implement `IActionFilter` (or `IAsyncActionFilter`) and register globally or per controller. Filters run as part of the MVC pipeline and have access to `ActionExecutingContext` / `ActionExecutedContext`.
+
+❌ **Wrong — manual timing code in every action method:**
 ```csharp
-public class LogActionFilter : IActionFilter {
-    private readonly ILogger<LogActionFilter> _logger;
-
-    public LogActionFilter(ILogger<LogActionFilter> logger) {
-        _logger = logger;
+[HttpGet("{id}")]
+public async Task<IActionResult> GetById(int id) {
+    var sw = Stopwatch.StartNew();
+    try {
+        var result = await _service.GetByIdAsync(id);
+        return result is null ? NotFound() : Ok(result);
+    } finally {
+        _logger.LogInformation("GetById took {ms}ms", sw.ElapsedMilliseconds);
+        // copied to every action — maintenance nightmare
     }
+}
+```
 
-    public void OnActionExecuting(ActionExecutingContext context) {
-        _logger.LogInformation("Executing {Action}", context.ActionDescriptor.DisplayName);
-    }
+✅ **Correct — reusable action filter registered globally:**
+```csharp
+public class TimingFilter : IAsyncActionFilter {
+    private readonly ILogger<TimingFilter> _logger;
+    public TimingFilter(ILogger<TimingFilter> logger) => _logger = logger;
 
-    public void OnActionExecuted(ActionExecutedContext context) {
-        _logger.LogInformation("Executed {Action}", context.ActionDescriptor.DisplayName);
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next) {
+        var sw = Stopwatch.StartNew();
+        await next();
+        _logger.LogInformation("{Action} took {ms}ms",
+            context.ActionDescriptor.DisplayName, sw.ElapsedMilliseconds);
     }
 }
 
-// Register globally
-builder.Services.AddControllersWithViews(options => {
-    options.Filters.Add<LogActionFilter>();
+// Program.cs — applied to all controllers:
+builder.Services.AddControllers(options => options.Filters.Add<TimingFilter>());
+builder.Services.AddScoped<TimingFilter>();
+```
+
+---
+
+# 5. Dependency Injection
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection
+
+---
+
+## 5.1 Service Lifetimes
+
+### Q7. What are the three DI lifetimes and what happens if you misuse them?
+
+**Answer:**
+Transient = new instance per injection. Scoped = one per HTTP request. Singleton = one for the application. Injecting a Scoped service into a Singleton is a "captive dependency" — the singleton holds a stale request-scoped object. ASP.NET Core detects this in development.
+
+❌ **Wrong — scoped DbContext injected into singleton (captive dependency):**
+```csharp
+// DbContext is Scoped — registered once per request
+builder.Services.AddDbContext<AppDbContext>(options => ...);
+
+// BAD: Singleton captures the first-request DbContext forever
+builder.Services.AddSingleton<IProductCache>(sp => {
+    var db = sp.GetRequiredService<AppDbContext>(); // captured scoped service
+    return new ProductCache(db);
 });
-// Or per controller/action via attribute
+```
+
+✅ **Correct — use IServiceScopeFactory in singletons to create scopes on demand:**
+```csharp
+builder.Services.AddSingleton<IProductCache>(sp => {
+    var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+    return new ProductCache(scopeFactory); // creates a new scope when needed
+});
+
+public class ProductCache : IProductCache {
+    private readonly IServiceScopeFactory _scopeFactory;
+    public ProductCache(IServiceScopeFactory sf) => _scopeFactory = sf;
+
+    public async Task<Product?> GetAsync(int id) {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        return await db.Products.FindAsync(id);
+    }
+}
 ```
 
 ---
 
-## Dependency Injection
+# 6. Middleware
 
-**Q10: How does ASP.NET Core's built-in DI work?**
-
-Services are registered in `Program.cs` using `builder.Services`. The three lifetimes are:
-- **Transient** (`AddTransient`): New instance for every injection — good for lightweight, stateless services.
-- **Scoped** (`AddScoped`): One instance per HTTP request — most services (DbContext, repositories).
-- **Singleton** (`AddSingleton`): One instance for the application lifetime — configuration, caches.
-
-Controllers are instantiated per request, so constructor injection works naturally.
-
-**Q11: What happens if you inject a scoped service into a singleton?**
-
-This is called a "captive dependency" and is a bug. The singleton will hold a reference to a scoped instance that was created for one request, and reuse it for all future requests — leading to stale data and concurrency issues. ASP.NET Core detects this at development time and throws an `InvalidOperationException` when scope validation is enabled (default in development).
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/
 
 ---
 
-## Middleware
+## 6.1 Middleware Order
 
-**Q12: What is middleware in ASP.NET Core and how does the pipeline work?**
+### Q8. Why does middleware order in ASP.NET Core matter?
 
-Middleware is a series of components assembled into a pipeline. Each component can process the request, pass it to the next component, and process the response on the way back. Registered in `Program.cs` via `app.Use*()` methods. Order matters — authentication before authorization, static files before routing, etc.
+**Answer:**
+Middleware executes in registration order on the way in, and in reverse order on the way out. Exception handling must come early to catch errors from later middleware. Authentication before authorization. Static files before routing to short-circuit expensive pipeline for static assets.
 
+❌ **Wrong — authorization before authentication (user is never authenticated):**
 ```csharp
-app.UseExceptionHandler("/Error");    // Early — catches errors from below
-app.UseHttpsRedirection();
-app.UseStaticFiles();
 app.UseRouting();
-app.UseAuthentication();              // After routing
-app.UseAuthorization();               // After authentication
+app.UseAuthorization();    // runs before authentication — always sees unauthenticated user
+app.UseAuthentication();   // too late
 app.MapControllers();
 ```
 
-**Q13: How do you write a custom middleware?**
-
+✅ **Correct — proper middleware order:**
 ```csharp
-public class RequestTimingMiddleware {
-    private readonly RequestDelegate _next;
-
-    public RequestTimingMiddleware(RequestDelegate next) => _next = next;
-
-    public async Task InvokeAsync(HttpContext context) {
-        var sw = Stopwatch.StartNew();
-        await _next(context);
-        sw.Stop();
-        context.Response.Headers["X-Response-Time"] = $"{sw.ElapsedMilliseconds}ms";
-    }
-}
-
-// Register
-app.UseMiddleware<RequestTimingMiddleware>();
+app.UseExceptionHandler("/error");   // catch errors from everything below
+app.UseHttpsRedirection();
+app.UseStaticFiles();                // short-circuit before routing
+app.UseRouting();
+app.UseAuthentication();             // who are you?
+app.UseAuthorization();              // what can you do?
+app.MapControllers();
 ```
 
 ---
 
-## Authentication & Authorization
+## 6.2 Custom Middleware
 
-**Q14: What is the difference between authentication and authorization in ASP.NET Core?**
+### Q9. How do you write and register custom middleware?
 
-Authentication establishes *who* the user is — validates credentials and creates a `ClaimsPrincipal`. Authorization determines *what* the user can do — evaluates the claims/roles against policies. Middleware order: `UseAuthentication()` must come before `UseAuthorization()`.
+**Answer:**
+Implement a class with `InvokeAsync(HttpContext context)` and a `RequestDelegate _next` constructor parameter. Call `await _next(context)` to pass to the next component.
 
-**Q15: What are the authorization approaches in ASP.NET Core?**
+❌ **Wrong — modifying the response after `_next` has already written to it:**
+```csharp
+public async Task InvokeAsync(HttpContext context) {
+    await _next(context);
+    context.Response.Headers["X-Custom"] = "value"; // may fail — headers already sent
+    context.Response.StatusCode = 200;               // invalid after body is written
+}
+```
 
-- **Role-based**: `[Authorize(Roles = "Admin")]` — simple but coarse.
-- **Claims-based**: Checks for specific claims in the user's identity.
-- **Policy-based**: Flexible — define requirements and handlers. `[Authorize(Policy = "MinimumAge")]`. Policies can combine multiple requirements with custom logic.
-- **Resource-based**: Pass the resource to `IAuthorizationService.AuthorizeAsync()` for per-object authorization (e.g., "can this user edit this specific document?").
+✅ **Correct — set headers before calling next:**
+```csharp
+public class SecurityHeadersMiddleware {
+    private readonly RequestDelegate _next;
+    public SecurityHeadersMiddleware(RequestDelegate next) => _next = next;
 
-**Q16: How do you implement JWT authentication in ASP.NET Core?**
+    public async Task InvokeAsync(HttpContext context) {
+        context.Response.OnStarting(() => {
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            context.Response.Headers["X-Frame-Options"] = "DENY";
+            return Task.CompletedTask;
+        });
+        await _next(context);
+    }
+}
 
+app.UseMiddleware<SecurityHeadersMiddleware>();
+```
+
+---
+
+# 7. Authentication & Authorization
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/security/authentication/
+> 📚 JWT: https://learn.microsoft.com/en-us/aspnet/core/security/authentication/jwt-authn
+
+---
+
+## 7.1 JWT Authentication
+
+### Q10. How do you configure JWT Bearer authentication in ASP.NET Core?
+
+**Answer:**
+Register the JWT bearer scheme in `Program.cs` with `TokenValidationParameters`. Always validate issuer, audience, lifetime, and signing key. Store the key in configuration — never hardcode it.
+
+❌ **Wrong — disabling validation, accepting any token:**
+```csharp
+options.TokenValidationParameters = new TokenValidationParameters {
+    ValidateIssuer = false,      // anyone can forge issuer
+    ValidateAudience = false,    // wrong audience accepted
+    ValidateLifetime = false,    // expired tokens accepted
+    ValidateIssuerSigningKey = false // unsigned tokens accepted!
+};
+```
+
+✅ **Correct — full validation with key from configuration:**
 ```csharp
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options => {
@@ -177,104 +409,249 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
+            ValidIssuer = config["Jwt:Issuer"],
+            ValidAudience = config["Jwt:Audience"],
             IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+                Encoding.UTF8.GetBytes(config["Jwt:Key"]!)),
+            ClockSkew = TimeSpan.FromSeconds(30) // tight tolerance
         };
     });
 ```
 
 ---
 
-## Views & Razor
+## 7.2 Policy-Based Authorization
 
-**Q17: What is Razor and what are Tag Helpers?**
+### Q11. How does policy-based authorization work in ASP.NET Core?
 
-Razor is a templating syntax that mixes C# with HTML using `@` prefix. Tag Helpers are server-side components that look like HTML attributes or elements — they process on the server and render HTML. Examples: `asp-action`, `asp-controller` on `<a>` tags; `asp-for` on `<input>` tags for model binding; `<form asp-action="...">`. They're strongly typed and provide IntelliSense, unlike HTML helpers.
+**Answer:**
+Define requirements and handlers. Policies compose multiple requirements. More flexible than role-based auth — supports resource-based decisions, custom claim checks, and async external lookups.
 
-**Q18: What is the difference between `ViewData`, `ViewBag`, and `TempData`?**
-
-- **ViewData**: `Dictionary<string, object>` — persists only for the current request's view.
-- **ViewBag**: Dynamic wrapper over ViewData — same lifetime, just syntactic sugar.
-- **TempData**: Survives one redirect (stored in session or cookie) — used for post-redirect-get pattern to show success/error messages after a redirect.
-
-**Q19: What are Partial Views and View Components?**
-
-Partial Views are reusable Razor template fragments rendered synchronously. View Components are more powerful — they have their own logic (like mini controllers) and can be async. Use View Components when the rendered content requires service calls or business logic (e.g., a cart summary widget, notification badge). They're invoked via `@await Component.InvokeAsync("CartSummary")`.
-
----
-
-## Performance & Caching
-
-**Q20: What caching options are available in ASP.NET Core MVC?**
-
-- **Response Caching**: Cache entire HTTP responses via `[ResponseCache]` attribute or `app.UseResponseCaching()`.
-- **Output Caching** (.NET 7+): More powerful replacement for response caching with tag-based invalidation.
-- **In-memory cache** (`IMemoryCache`): Cache objects in process memory — fast but not shared across instances.
-- **Distributed cache** (`IDistributedCache`): Backed by Redis, SQL Server, or Azure Cache — works in multi-server deployments.
-- **Hybrid Cache** (.NET 9): Combines in-memory and distributed cache with stampede protection.
-
-**Q21: How do you handle concurrency issues with `IMemoryCache`?**
-
-Use `GetOrCreateAsync` with a lock or `Lazy<Task>` wrapper to prevent cache stampede (multiple threads simultaneously computing the same value on cache miss). In .NET 9, `HybridCache.GetOrCreateAsync` handles stampede protection automatically.
-
----
-
-## Error Handling
-
-**Q22: What are the options for global exception handling in ASP.NET Core MVC?**
-
-- **Exception Handler Middleware**: `app.UseExceptionHandler("/Error")` — redirects to an error page.
-- **Exception Filter**: Implement `IExceptionFilter` or extend `ExceptionFilterAttribute` — catches exceptions from MVC actions.
-- **Problem Details**: Configure `builder.Services.AddProblemDetails()` for RFC 7807-compliant error responses for APIs.
-- **.NET 8 IExceptionHandler**: Implement `IExceptionHandler` interface and register with `AddExceptionHandler<T>()` — cleaner than middleware for structured error handling.
-
----
-
-## Minimal APIs vs MVC
-
-**Q23: When would you choose Minimal APIs over MVC controllers?**
-
-Minimal APIs (introduced in .NET 6) are better for microservices and simple CRUD APIs — less ceremony, faster startup, and slightly better performance. MVC controllers are better when you need filters, complex routing, views, model binding customization, or when the team is already familiar with the MVC conventions. In practice many apps use both — Minimal APIs for simple endpoints, MVC for complex features.
-
----
-
-## Testing
-
-**Q24: How do you unit test an ASP.NET Core MVC controller?**
-
-Instantiate the controller directly, mock dependencies via interfaces using Moq or NSubstitute, call the action method, and assert on the returned `IActionResult`. No web server needed.
-
+❌ **Wrong — role-based checks scattered in action code, business logic in controller:**
 ```csharp
-[Fact]
-public async Task GetProduct_ReturnsNotFound_WhenMissing() {
-    var mockService = new Mock<IProductService>();
-    mockService.Setup(s => s.GetByIdAsync(99)).ReturnsAsync((Product?)null);
-
-    var controller = new ProductsController(mockService.Object);
-    var result = await controller.GetProduct(99);
-
-    Assert.IsType<NotFoundResult>(result);
+[HttpDelete("{id}")]
+public async Task<IActionResult> Delete(int id) {
+    if (!User.IsInRole("Admin") && !User.IsInRole("Manager"))
+        return Forbid();
+    // Duplicated in every action that needs this check
 }
 ```
 
-**Q25: What is `WebApplicationFactory` and how is it used for integration testing?**
+✅ **Correct — policy defined once, applied via attribute:**
+```csharp
+// Program.cs
+builder.Services.AddAuthorization(options => {
+    options.AddPolicy("CanManageProducts", policy =>
+        policy.RequireAssertion(ctx =>
+            ctx.User.IsInRole("Admin") || ctx.User.IsInRole("Manager")));
+});
 
-`WebApplicationFactory<TProgram>` spins up the full ASP.NET Core pipeline in-memory for tests — no listening port needed. You get a `HttpClient` that sends requests through the real middleware stack. Override `ConfigureWebHost` to swap out services (e.g., replace the real database with an in-memory one).
+// Controller:
+[HttpDelete("{id:int}")]
+[Authorize(Policy = "CanManageProducts")]
+public async Task<IActionResult> Delete(int id) {
+    await _service.DeleteAsync(id);
+    return NoContent();
+}
+```
 
+---
+
+# 8. Views & Razor
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/views/razor
+> 📚 Tag Helpers: https://learn.microsoft.com/en-us/aspnet/core/mvc/views/tag-helpers/intro
+
+---
+
+## 8.1 Tag Helpers vs HTML Helpers
+
+### Q12. What is the difference between Tag Helpers and HTML Helpers?
+
+**Answer:**
+Tag Helpers look like HTML attributes — they're processed server-side but blend into the markup naturally. HTML Helpers are C# method calls (`@Html.ActionLink(...)`). Tag Helpers are strongly typed, support IntelliSense, and are easier for designers to read.
+
+❌ **Wrong — HTML Helpers, verbose and C#-centric in markup:**
+```html
+@Html.BeginForm("Create", "Products", FormMethod.Post)
+    @Html.LabelFor(m => m.Name)
+    @Html.TextBoxFor(m => m.Name, new { @class = "form-control" })
+    @Html.ValidationMessageFor(m => m.Name)
+    <button type="submit">Save</button>
+@Html.EndForm()
+```
+
+✅ **Correct — Tag Helpers, clean HTML-like syntax:**
+```html
+<form asp-action="Create" asp-controller="Products" method="post">
+    <label asp-for="Name"></label>
+    <input asp-for="Name" class="form-control" />
+    <span asp-validation-for="Name" class="text-danger"></span>
+    <button type="submit">Save</button>
+</form>
+```
+
+---
+
+## 8.2 View Components vs Partial Views
+
+### Q13. When should you use a View Component instead of a Partial View?
+
+**Answer:**
+Use View Components when the rendered content requires service calls or business logic (cart summary, notification badge). They have their own async Invoke method and are independent mini-controllers. Partial Views are for simple template reuse with data passed from the parent view.
+
+❌ **Wrong — putting service calls inside a Partial View via ViewData (tight coupling, not testable):**
+```csharp
+// In main controller action — pushing unrelated data for partial
+ViewData["CartCount"] = await _cartService.GetCountAsync(userId);
+return View();
+```
+```html
+@* Partial view depends on ViewData set by parent controller *@
+<span>Cart: @ViewData["CartCount"]</span>
+```
+
+✅ **Correct — View Component handles its own data fetching:**
+```csharp
+public class CartSummaryViewComponent : ViewComponent {
+    private readonly ICartService _cartService;
+    public CartSummaryViewComponent(ICartService cartService) => _cartService = cartService;
+
+    public async Task<IViewComponentResult> InvokeAsync() {
+        var count = await _cartService.GetCountAsync(UserClaimsPrincipal);
+        return View(count);
+    }
+}
+```
+```html
+@* In any view, independently: *@
+@await Component.InvokeAsync("CartSummary")
+```
+
+---
+
+# 9. Performance & Caching
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/performance/caching/overview
+> 📚 Output caching: https://learn.microsoft.com/en-us/aspnet/core/performance/caching/output
+
+---
+
+## 9.1 Output Caching vs Response Caching
+
+### Q14. What is the difference between Output Caching and Response Caching?
+
+**Answer:**
+Response Caching (`[ResponseCache]`) relies on HTTP cache headers — the browser or a CDN does the caching. Output Caching (`.NET 7+`) is server-side — the server stores and reserializes the response. Output Caching supports tag-based invalidation and works regardless of client cache settings.
+
+❌ **Wrong — Response Caching on an authenticated endpoint (caches per-user responses globally):**
+```csharp
+[HttpGet("my-orders")]
+[ResponseCache(Duration = 60)]  // caches first user's orders for everyone — security issue
+[Authorize]
+public async Task<IActionResult> GetMyOrders() { ... }
+```
+
+✅ **Correct — Output Caching with a cache key that varies by user:**
+```csharp
+// Program.cs
+builder.Services.AddOutputCache();
+app.UseOutputCache();
+
+// Endpoint:
+[HttpGet("products")]
+[OutputCache(Duration = 60, VaryByQueryKeys = ["category", "page"])]
+public async Task<IActionResult> GetProducts([FromQuery] string? category, int page = 1) {
+    var products = await _service.GetPagedAsync(category, page);
+    return Ok(products);
+}
+```
+
+---
+
+# 10. Error Handling & Testing
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/error-handling
+> 📚 Integration testing: https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests
+
+---
+
+## 10.1 Problem Details for APIs
+
+### Q15. How do you return consistent error responses in a Web API?
+
+**Answer:**
+Use Problem Details (RFC 7807) via `AddProblemDetails()`. Returns JSON with `type`, `title`, `status`, `detail`. In .NET 8+, implement `IExceptionHandler` for full control over error responses.
+
+❌ **Wrong — inconsistent ad-hoc error objects across controllers:**
+```csharp
+return BadRequest(new { error = "Name is required" });    // controller A
+return NotFound(new { message = "Not found", id = id });  // controller B — different shape!
+return StatusCode(500, "Something went wrong");            // controller C — plain string
+```
+
+✅ **Correct — unified Problem Details via IExceptionHandler:**
+```csharp
+// Program.cs
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+app.UseExceptionHandler();
+
+public class GlobalExceptionHandler : IExceptionHandler {
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext ctx, Exception ex, CancellationToken ct) {
+        var (status, title) = ex switch {
+            NotFoundException => (404, "Resource not found"),
+            ValidationException => (400, "Validation failed"),
+            _ => (500, "An unexpected error occurred")
+        };
+        await ctx.Response.WriteAsJsonAsync(new ProblemDetails {
+            Status = status, Title = title, Detail = ex.Message
+        }, ct);
+        return true;
+    }
+}
+```
+
+---
+
+## 10.2 Integration Testing with WebApplicationFactory
+
+### Q16. How do you write integration tests for ASP.NET Core controllers?
+
+**Answer:**
+`WebApplicationFactory<TProgram>` spins up the full pipeline in-memory. Override `ConfigureWebHost` to swap real services (like DbContext) for test doubles. Tests exercise real routing, middleware, and serialization.
+
+❌ **Wrong — unit testing the controller directly, misses middleware, routing, and serialization:**
+```csharp
+[Fact]
+public async Task GetProduct_ReturnsOk() {
+    var controller = new ProductsController(new MockProductService());
+    var result = await controller.GetById(1);
+    Assert.IsType<OkObjectResult>(result);
+    // Doesn't test routing, auth middleware, JSON serialization, filters, etc.
+}
+```
+
+✅ **Correct — full integration test with in-memory database:**
 ```csharp
 public class ProductsApiTests : IClassFixture<WebApplicationFactory<Program>> {
     private readonly HttpClient _client;
 
     public ProductsApiTests(WebApplicationFactory<Program> factory) {
-        _client = factory.CreateClient();
+        _client = factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services => {
+                services.RemoveAll<AppDbContext>();
+                services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase("TestDb"));
+            })).CreateClient();
     }
 
     [Fact]
-    public async Task GetProducts_ReturnsOk() {
+    public async Task GetProducts_ReturnsOkWithList() {
         var response = await _client.GetAsync("/api/products");
         response.EnsureSuccessStatusCode();
+        var products = await response.Content.ReadFromJsonAsync<List<ProductDto>>();
+        Assert.NotNull(products);
     }
 }
 ```
