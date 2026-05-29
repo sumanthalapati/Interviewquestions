@@ -1630,3 +1630,513 @@ public class Game {
         Board.AllPieces(color).OfType<King>().First();
 }
 ```
+
+---
+
+# 11. LLD Design Problems — Splitwise & BookMyShow
+
+---
+
+## 11.1 Design Splitwise (Expense Splitting)
+
+> **SOLID applied:** SRP (Expense, Settlement, User each own their logic) · OCP (new split strategies via Strategy) · DIP (services depend on interfaces)
+
+### Requirements
+- Add expense with equal/unequal/percentage split
+- Track who owes whom
+- Settle a debt
+- Show balance summary per user
+- Support groups
+
+### Class Diagram
+```
+User
+  ├── Id, Name, Email
+  └── GetBalance() → Dictionary<User, decimal>
+
+Group
+  ├── Id, Name
+  ├── Members: List<User>
+  ├── Expenses: List<Expense>
+  └── AddExpense(Expense)
+
+Expense
+  ├── Id, Description, Amount, PaidBy, CreatedAt
+  ├── Splits: List<Split>
+  └── SplitStrategy: ISplitStrategy
+
+ISplitStrategy
+  ├── EqualSplitStrategy
+  ├── ExactSplitStrategy
+  └── PercentageSplitStrategy
+
+Split
+  ├── User, Amount
+  └── (owes Amount to PaidBy)
+
+BalanceSheet (service)
+  ├── GetUserBalance(userId) → Dictionary<User, decimal>
+  └── SimplifyDebts(groupId) → List<Settlement>
+```
+
+### Core Implementation
+```csharp
+// STEP 1: Split Strategies (Strategy Pattern + OCP)
+public interface ISplitStrategy
+{
+    List<Split> CalculateSplits(decimal totalAmount, List<User> participants, decimal[]? customAmounts = null);
+}
+
+public class EqualSplitStrategy : ISplitStrategy
+{
+    public List<Split> CalculateSplits(decimal total, List<User> participants, decimal[]? _ = null)
+    {
+        var perPerson = Math.Round(total / participants.Count, 2);
+        var splits    = participants.Select(u => new Split(u, perPerson)).ToList();
+
+        // Fix rounding: last person absorbs remainder
+        var diff = total - splits.Sum(s => s.Amount);
+        splits[^1] = splits[^1] with { Amount = splits[^1].Amount + diff };
+        return splits;
+    }
+}
+
+public class PercentageSplitStrategy : ISplitStrategy
+{
+    public List<Split> CalculateSplits(decimal total, List<User> participants, decimal[]? percentages)
+    {
+        if (percentages is null || percentages.Length != participants.Count)
+            throw new ArgumentException("Percentages count must match participants count");
+        if (percentages.Sum() != 100)
+            throw new ArgumentException("Percentages must sum to 100");
+
+        return participants.Zip(percentages)
+            .Select(pair => new Split(pair.First, Math.Round(total * pair.Second / 100, 2)))
+            .ToList();
+    }
+}
+
+public class ExactSplitStrategy : ISplitStrategy
+{
+    public List<Split> CalculateSplits(decimal total, List<User> participants, decimal[]? exactAmounts)
+    {
+        if (exactAmounts is null || exactAmounts.Sum() != total)
+            throw new ArgumentException("Exact amounts must sum to total");
+        return participants.Zip(exactAmounts)
+            .Select(pair => new Split(pair.First, pair.Second))
+            .ToList();
+    }
+}
+
+// STEP 2: Domain models
+public record User(Guid Id, string Name, string Email);
+public record Split(User User, decimal Amount);
+
+public class Expense
+{
+    public Guid             Id          { get; init; } = Guid.NewGuid();
+    public string           Description { get; init; } = "";
+    public decimal          Amount      { get; init; }
+    public User             PaidBy      { get; init; } = null!;
+    public List<Split>      Splits      { get; init; } = [];
+    public DateTimeOffset   CreatedAt   { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public class Group
+{
+    public Guid          Id       { get; init; } = Guid.NewGuid();
+    public string        Name     { get; init; } = "";
+    public List<User>    Members  { get; }       = [];
+    public List<Expense> Expenses { get; }       = [];
+
+    public Expense AddExpense(
+        string description, decimal amount, User paidBy,
+        ISplitStrategy strategy, List<User>? participants = null,
+        decimal[]? customAmounts = null)
+    {
+        var among  = participants ?? Members;
+        var splits = strategy.CalculateSplits(amount, among, customAmounts);
+
+        var expense = new Expense
+        {
+            Description = description,
+            Amount      = amount,
+            PaidBy      = paidBy,
+            Splits      = splits
+        };
+
+        Expenses.Add(expense);
+        return expense;
+    }
+}
+
+// STEP 3: Balance calculation (SRP)
+public class BalanceService
+{
+    // Returns: positive = owed TO this user; negative = this user OWES
+    public Dictionary<Guid, decimal> GetUserBalance(Group group, User user)
+    {
+        var balances = new Dictionary<Guid, decimal>();
+
+        foreach (var expense in group.Expenses)
+        {
+            foreach (var split in expense.Splits)
+            {
+                if (split.User.Id == expense.PaidBy.Id) continue; // payer doesn't owe themselves
+
+                if (expense.PaidBy.Id == user.Id)
+                {
+                    // user paid → others owe user
+                    balances.TryAdd(split.User.Id, 0);
+                    balances[split.User.Id] += split.Amount;
+                }
+                else if (split.User.Id == user.Id)
+                {
+                    // user is split participant → user owes payer
+                    balances.TryAdd(expense.PaidBy.Id, 0);
+                    balances[expense.PaidBy.Id] -= split.Amount;
+                }
+            }
+        }
+
+        return balances;
+    }
+
+    // Simplify debts: minimize transactions using greedy net balance approach
+    public List<(User From, User To, decimal Amount)> SimplifyDebts(Group group)
+    {
+        // Calculate net balance per user
+        var net = new Dictionary<Guid, decimal>();
+        foreach (var member in group.Members) net[member.Id] = 0;
+
+        foreach (var expense in group.Expenses)
+            foreach (var split in expense.Splits.Where(s => s.User.Id != expense.PaidBy.Id))
+            {
+                net[expense.PaidBy.Id] += split.Amount;  // payer gains
+                net[split.User.Id]     -= split.Amount;  // participant owes
+            }
+
+        // Greedy: match biggest creditor with biggest debtor
+        var creditors = net.Where(kv => kv.Value > 0).OrderByDescending(kv => kv.Value).ToList();
+        var debtors   = net.Where(kv => kv.Value < 0).OrderBy(kv => kv.Value).ToList();
+        var userMap   = group.Members.ToDictionary(u => u.Id);
+        var result    = new List<(User, User, decimal)>();
+
+        int i = 0, j = 0;
+        while (i < creditors.Count && j < debtors.Count)
+        {
+            var cred = creditors[i];
+            var debt = debtors[j];
+            var amt  = Math.Min(cred.Value, -debt.Value);
+
+            result.Add((userMap[debt.Key], userMap[cred.Key], amt));
+
+            creditors[i] = new KeyValuePair<Guid, decimal>(cred.Key, cred.Value - amt);
+            debtors[j]   = new KeyValuePair<Guid, decimal>(debt.Key, debt.Value + amt);
+
+            if (creditors[i].Value == 0) i++;
+            if (debtors[j].Value == 0) j++;
+        }
+
+        return result;
+    }
+}
+
+// STEP 4: Usage
+var alice = new User(Guid.NewGuid(), "Alice", "alice@test.com");
+var bob   = new User(Guid.NewGuid(), "Bob",   "bob@test.com");
+var carol = new User(Guid.NewGuid(), "Carol", "carol@test.com");
+
+var group = new Group { Name = "Trip to Goa" };
+group.Members.AddRange([alice, bob, carol]);
+
+// Alice pays 3000 split equally among 3
+group.AddExpense("Hotel", 3000, alice, new EqualSplitStrategy());
+
+// Bob pays 600 split by percentage 50/30/20
+group.AddExpense("Dinner", 600, bob, new PercentageSplitStrategy(),
+    customAmounts: [50, 30, 20]);
+
+var svc       = new BalanceService();
+var debts     = svc.SimplifyDebts(group);
+foreach (var (from, to, amt) in debts)
+    Console.WriteLine($"{from.Name} owes {to.Name}: ₹{amt:F2}");
+```
+
+### Extensibility Discussion
+```
+Adding new split type (e.g., share-based split where different members have different weights):
+✅ Create ShareSplitStrategy : ISplitStrategy — zero changes to existing code (OCP)
+
+Adding multi-currency:
+✅ Expense gets Currency property; BalanceService converts using ICurrencyConverter
+
+Adding settlement tracking:
+✅ New Settlement entity, SettlementService — no changes to existing expense logic (SRP)
+```
+
+---
+
+## 11.2 Design BookMyShow (Ticket Booking)
+
+> **SOLID applied:** SRP (Seat, Show, Booking each own their logic) · LSP (OnlineSeat, VIPSeat substitutable for Seat) · DIP (BookingService depends on ISeatRepository)
+
+### Requirements
+- Browse movies, shows, theatres
+- View available seats
+- Book 1–6 seats per transaction
+- Hold seats for 10 minutes during payment
+- Prevent double booking (concurrent users)
+- Different seat categories (Regular, Premium, VIP)
+
+### Class Diagram
+```
+Movie
+  ├── Id, Title, Duration, Genre, Rating
+  └── Shows: List<Show>
+
+Theatre
+  ├── Id, Name, Location
+  └── Screens: List<Screen>
+
+Screen
+  ├── Id, Name, TotalSeats
+  └── Seats: List<Seat>
+
+Show
+  ├── Id, Movie, Screen, StartTime, Date
+  ├── ShowSeats: List<ShowSeat>
+  └── GetAvailableSeats() → List<ShowSeat>
+
+ShowSeat
+  ├── Id, Seat, Show, Category, Price
+  ├── Status: Available | Held | Booked
+  ├── HeldBy: userId (nullable)
+  ├── HeldUntil: DateTime (nullable)
+  └── IsAvailable() → bool
+
+Seat
+  ├── Id, Row, Number
+  └── (physical seat in screen)
+
+Booking
+  ├── Id, User, Show, Seats, TotalAmount
+  ├── Status: Pending | Confirmed | Cancelled
+  └── Payment: Payment
+
+SeatHoldService
+  └── HoldSeatsAsync(showId, seatIds, userId) → HoldResult
+
+BookingService
+  ├── HoldSeats()
+  ├── ConfirmBooking()
+  └── CancelBooking()
+```
+
+### Core Implementation
+```csharp
+// STEP 1: Domain entities
+public enum SeatStatus { Available, Held, Booked }
+public enum SeatCategory { Regular, Premium, VIP }
+
+public class ShowSeat
+{
+    public Guid         Id         { get; init; } = Guid.NewGuid();
+    public Guid         ShowId     { get; init; }
+    public int          Row        { get; init; }
+    public int          Number     { get; init; }
+    public SeatCategory Category   { get; set; }
+    public decimal      Price      { get; set; }
+    public SeatStatus   Status     { get; set; } = SeatStatus.Available;
+    public Guid?        HeldByUser { get; set; }
+    public DateTime?    HeldUntil  { get; set; }
+
+    public bool IsAvailable() =>
+        Status == SeatStatus.Available ||
+        (Status == SeatStatus.Held && HeldUntil < DateTime.UtcNow); // expired hold
+
+    public void Hold(Guid userId, TimeSpan duration)
+    {
+        if (!IsAvailable()) throw new SeatNotAvailableException($"Seat {Row}{Number} is not available");
+        Status     = SeatStatus.Held;
+        HeldByUser = userId;
+        HeldUntil  = DateTime.UtcNow.Add(duration);
+    }
+
+    public void Book()
+    {
+        if (Status != SeatStatus.Held) throw new InvalidOperationException("Seat must be held before booking");
+        Status     = SeatStatus.Booked;
+        HeldByUser = null;
+        HeldUntil  = null;
+    }
+
+    public void Release()
+    {
+        Status     = SeatStatus.Available;
+        HeldByUser = null;
+        HeldUntil  = null;
+    }
+}
+
+// STEP 2: Booking service with concurrency control
+public class BookingService
+{
+    private readonly AppDbContext _db;
+    private readonly IPaymentService _paymentService;
+    private readonly IDistributedLockFactory _lockFactory;
+
+    public async Task<HoldResult> HoldSeatsAsync(
+        Guid showId, List<Guid> seatIds, Guid userId)
+    {
+        if (seatIds.Count is < 1 or > 6)
+            throw new ArgumentException("Must select 1–6 seats");
+
+        // Acquire distributed lock per show — prevents race conditions
+        await using var @lock = await _lockFactory.CreateLockAsync(
+            $"show-booking:{showId}",
+            expiry: TimeSpan.FromSeconds(10));
+
+        if (!@lock.IsAcquired)
+            throw new ServiceUnavailableException("Booking system busy, please retry");
+
+        await using var tx = await _db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable); // strongest isolation
+
+        var seats = await _db.ShowSeats
+            .Where(s => s.ShowId == showId && seatIds.Contains(s.Id))
+            .ToListAsync();
+
+        // Validate all seats available
+        var unavailable = seats.Where(s => !s.IsAvailable()).ToList();
+        if (unavailable.Any())
+            throw new SeatsUnavailableException(unavailable.Select(s => $"{s.Row}{s.Number}").ToList());
+
+        // Hold all seats atomically
+        foreach (var seat in seats)
+            seat.Hold(userId, TimeSpan.FromMinutes(10));
+
+        // Create pending booking
+        var booking = new Booking
+        {
+            Id          = Guid.NewGuid(),
+            UserId      = userId,
+            ShowId      = showId,
+            SeatIds     = seatIds,
+            TotalAmount = seats.Sum(s => s.Price),
+            Status      = BookingStatus.Pending,
+            ExpiresAt   = DateTime.UtcNow.AddMinutes(10)
+        };
+        _db.Bookings.Add(booking);
+        await _db.SaveChangesAsync();
+        await tx.CommitAsync();
+
+        return new HoldResult(booking.Id, booking.TotalAmount, booking.ExpiresAt);
+    }
+
+    public async Task<BookingConfirmation> ConfirmBookingAsync(
+        Guid bookingId, PaymentDetails payment)
+    {
+        await using var tx = await _db.Database.BeginTransactionAsync();
+
+        var booking = await _db.Bookings
+            .Include(b => b.ShowSeats)
+            .FirstOrDefaultAsync(b => b.Id == bookingId)
+            ?? throw new NotFoundException("Booking not found");
+
+        if (booking.Status != BookingStatus.Pending)
+            throw new InvalidOperationException("Booking is no longer pending");
+
+        if (booking.ExpiresAt < DateTime.UtcNow)
+        {
+            // Hold expired — release seats
+            foreach (var seat in booking.ShowSeats) seat.Release();
+            booking.Status = BookingStatus.Expired;
+            await _db.SaveChangesAsync();
+            await tx.CommitAsync();
+            throw new BookingExpiredException("Seat hold expired. Please rebook.");
+        }
+
+        // Process payment
+        var paymentResult = await _paymentService.ChargeAsync(
+            booking.TotalAmount, payment, idempotencyKey: $"booking:{bookingId}");
+
+        // Confirm seats
+        foreach (var seat in booking.ShowSeats) seat.Book();
+
+        booking.Status    = BookingStatus.Confirmed;
+        booking.PaymentId = paymentResult.TransactionId;
+
+        await _db.SaveChangesAsync();
+        await tx.CommitAsync();
+
+        return new BookingConfirmation(
+            bookingId, booking.ShowSeats.Select(s => $"{s.Row}{s.Number}").ToList(),
+            booking.TotalAmount, paymentResult.TransactionId);
+    }
+
+    // Background job: release expired holds every minute
+    public async Task ReleaseExpiredHoldsAsync()
+    {
+        var expiredSeats = await _db.ShowSeats
+            .Where(s => s.Status == SeatStatus.Held && s.HeldUntil < DateTime.UtcNow)
+            .ToListAsync();
+
+        foreach (var seat in expiredSeats) seat.Release();
+
+        var expiredBookings = await _db.Bookings
+            .Where(b => b.Status == BookingStatus.Pending && b.ExpiresAt < DateTime.UtcNow)
+            .ToListAsync();
+
+        foreach (var b in expiredBookings) b.Status = BookingStatus.Expired;
+
+        await _db.SaveChangesAsync();
+    }
+}
+
+// STEP 3: Pricing strategy (Strategy Pattern)
+public interface IPricingStrategy
+{
+    decimal CalculatePrice(SeatCategory category, Show show);
+}
+
+public class PeakHourPricingStrategy : IPricingStrategy
+{
+    private static readonly Dictionary<SeatCategory, decimal> BasePrices = new()
+    {
+        [SeatCategory.Regular] = 200m,
+        [SeatCategory.Premium] = 350m,
+        [SeatCategory.VIP]     = 600m
+    };
+
+    public decimal CalculatePrice(SeatCategory category, Show show)
+    {
+        var base_price = BasePrices[category];
+        var isPeakHour = show.StartTime.Hour is >= 18 and <= 22;
+        var isWeekend  = show.Date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+        var multiplier = (isPeakHour ? 1.3m : 1.0m) * (isWeekend ? 1.2m : 1.0m);
+        return Math.Round(base_price * multiplier, 0);
+    }
+}
+```
+
+### Extensibility Discussion
+```
+Add new seat type (ReclineSeat):
+✅ Add ReclineSeat to SeatCategory enum + update pricing strategy — no booking logic changes (OCP)
+
+Add group booking discount:
+✅ New DiscountStrategy interface: GroupDiscountStrategy, PromoCodeStrategy
+   BookingService.ConfirmBooking applies strategy before charging (SRP)
+
+Add waitlist for sold-out shows:
+✅ New WaitlistEntry entity + WaitlistService
+   When a booking is cancelled, WaitlistService notified via event (Observer)
+   Zero changes to BookingService (OCP)
+
+Concurrent booking prevention:
+✅ Distributed lock (Redis RedLock) per show during seat selection window
+   OR: Optimistic concurrency on ShowSeat.RowVersion
+```
+
+---
