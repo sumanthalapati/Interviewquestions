@@ -1334,3 +1334,204 @@ var host = _config["Smtp:Host"];
 // ✅ Prefer — typed, validated, testable
 var host = _smtpSettings.Host;
 ```
+
+---
+
+# ⚖️ ASP.NET Core Comparisons — Side-by-Side Differences
+
+---
+
+## MVC-C1 — Middleware vs Action Filters vs Exception Filters
+
+| | Middleware | Action Filter | Exception Filter |
+|-|-----------|--------------|-----------------|
+| Scope | All requests (pipeline-level) | Controller / action level | Controller / action level |
+| Access to action result | ❌ Only HTTP context | ✅ Yes (ActionExecutingContext) | ✅ Yes |
+| Order of execution | Before routing resolves | After routing, before/after action | After exception thrown in action |
+| Use for | Auth, logging, rate limit, CORS | Validation, logging per-action, caching | Map exceptions → HTTP responses |
+| Registered in | `Program.cs` `app.Use...()` | `[ServiceFilter]`, `AddMvc().AddFilter()` | `[ExceptionFilter]` or global |
+
+```csharp
+// Middleware — runs for every request
+app.Use(async (ctx, next) => { /* before */ await next(); /* after */ });
+
+// Action Filter — runs around a specific action
+public class LogActionFilter : IActionFilter
+{
+    public void OnActionExecuting(ActionExecutingContext ctx) => Log("Before");
+    public void OnActionExecuted(ActionExecutedContext ctx)  => Log("After");
+}
+
+// Exception Filter — only runs when action throws
+public class ApiExceptionFilter : IExceptionFilter
+{
+    public void OnException(ExceptionContext ctx)
+    {
+        ctx.Result = new ObjectResult(new { error = ctx.Exception.Message }) { StatusCode = 500 };
+        ctx.ExceptionHandled = true;
+    }
+}
+```
+
+---
+
+## MVC-C2 — Minimal API vs Controller-Based API
+
+| | Minimal API | Controller (`[ApiController]`) |
+|-|------------|-------------------------------|
+| Boilerplate | Low | Moderate |
+| Route grouping | `RouteGroupBuilder` | Controller class |
+| Model binding | ✅ | ✅ |
+| Filters | Limited (endpoint filters) | Full filter pipeline |
+| OpenAPI support | ✅ (with `WithOpenApi()`) | ✅ |
+| Testability | Unit test harder (inline lambdas) | ✅ Easy (instantiate controller) |
+| Use for | Microservices, small APIs, CQRS dispatch | Large APIs, complex validation, filter chains |
+
+```csharp
+// Minimal API
+app.MapGet("/orders/{id}", async (Guid id, IOrderService svc) =>
+{
+    var order = await svc.GetAsync(id);
+    return order is null ? Results.NotFound() : Results.Ok(order);
+})
+.WithName("GetOrder")
+.RequireAuthorization()
+.WithOpenApi();
+
+// Controller
+[ApiController, Route("api/orders")]
+public class OrdersController : ControllerBase
+{
+    [HttpGet("{id:guid}")]
+    public async Task<IActionResult> Get(Guid id) => ...;
+}
+```
+
+---
+
+## MVC-C3 — `IActionResult` vs `ActionResult<T>` vs `Results<T>` (Minimal API)
+
+| | `IActionResult` | `ActionResult<T>` | `Results<T>` (Minimal) |
+|-|----------------|------------------|------------------------|
+| Type info in OpenAPI | ❌ Inferred | ✅ Explicit | ✅ Explicit |
+| Return typed value | Wrap in `Ok(value)` | Return value directly | `TypedResults.Ok(value)` |
+| Compile-time safety | ❌ | ✅ | ✅ |
+
+```csharp
+// IActionResult — no type info for Swagger
+public IActionResult Get(Guid id) => Ok(new OrderDto());
+
+// ActionResult<T> — Swagger knows response type
+public ActionResult<OrderDto> Get(Guid id) => new OrderDto(); // implicit 200 OK
+
+// Minimal API with typed results
+app.MapGet("/orders/{id}", async (Guid id) =>
+{
+    var order = await GetAsync(id);
+    return order is null
+        ? Results.NotFound()          // 404
+        : TypedResults.Ok(order);     // 200 with type info for OpenAPI
+});
+```
+
+---
+
+## MVC-C4 — Cookie Authentication vs JWT Bearer vs API Key
+
+| | Cookie Auth | JWT Bearer | API Key |
+|-|------------|-----------|---------|
+| Storage (client) | Browser cookie | localStorage or httpOnly cookie | Header / query string |
+| CSRF risk | ✅ Yes (SameSite mitigates) | ❌ No (header not auto-sent) | ❌ No |
+| Stateless | ❌ Session on server (or encrypted cookie) | ✅ Self-contained | ✅ |
+| Refresh mechanism | Sliding expiry | Refresh token pattern | Long-lived key |
+| Use for | Server-rendered web apps (MVC Razor) | SPA / mobile APIs | Server-to-server, webhooks |
+
+---
+
+## MVC-C5 — Singleton vs Scoped vs Transient (DI Lifetimes)
+
+| | Singleton | Scoped | Transient |
+|-|----------|--------|-----------|
+| Created | Once (app start) | Once per HTTP request | Every time injected |
+| Shared across | All requests & users | Same request only | Never shared |
+| Disposed | On app shutdown | End of request | Immediately after use |
+| Safe for | Caches, clients, config | DbContext, services | Validators, light helpers |
+| Danger | Holding Scoped → captive dependency | Holding Transient refs long | Expensive if heavy construction |
+
+```csharp
+builder.Services.AddSingleton<ICache, RedisCache>();       // one instance, app lifetime
+builder.Services.AddScoped<AppDbContext>();                 // one per request
+builder.Services.AddTransient<IEmailBuilder, EmailBuilder>(); // new every injection
+
+// ❌ Captive dependency — Singleton holds Scoped
+builder.Services.AddSingleton<MyService>(); // MyService(AppDbContext db) → WRONG
+// Fix: inject IServiceScopeFactory and create scope manually
+```
+
+---
+
+## MVC-C6 — `app.Use` vs `app.Run` vs `app.Map` vs `app.UseWhen`
+
+| | `app.Use` | `app.Run` | `app.Map` | `app.UseWhen` |
+|-|----------|----------|----------|--------------|
+| Calls next | ✅ (optional) | ❌ Terminal | Branches by path | Conditional branch |
+| Terminates pipeline | Only if you don't call next | ✅ Always | On matched path | Only if predicate true |
+| Use for | Middleware with before+after | Last handler | Path-based branching | Conditional middleware |
+
+```csharp
+app.Use(async (ctx, next) => { /* before */ await next(); /* after */ });
+app.Run(async ctx => await ctx.Response.WriteAsync("Terminal")); // no next
+app.Map("/health", branch => branch.Run(async ctx => await ctx.Response.WriteAsync("OK")));
+app.UseWhen(ctx => ctx.Request.Path.StartsWithSegments("/api"),
+    branch => branch.UseAuthentication());
+```
+
+---
+
+## MVC-C7 — `IMemoryCache` vs `IDistributedCache` vs `ResponseCache`
+
+| | `IMemoryCache` | `IDistributedCache` | `[ResponseCache]` |
+|-|---------------|--------------------|--------------------|
+| Storage | In-process RAM | Redis / SQL / Azure Cache | HTTP cache headers |
+| Multi-instance safe | ❌ No (each pod has own cache) | ✅ Yes (shared) | ✅ (CDN/browser caches) |
+| Object types | Any CLR object | `byte[]` / string only | HTTP responses only |
+| Use for | Single-instance, fast local cache | Session, shared state, scale-out cache | Public API responses, static data |
+
+```csharp
+// IMemoryCache — fast, single process
+_cache.Set("key", complexObject, TimeSpan.FromMinutes(5));
+
+// IDistributedCache — must serialize (but shared across pods)
+await _cache.SetStringAsync("key", JsonSerializer.Serialize(obj),
+    new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5) });
+
+// ResponseCache — browser/CDN caches HTTP response
+[ResponseCache(Duration = 300, Location = ResponseCacheLocation.Any)]
+[HttpGet("products")]
+public IActionResult GetProducts() => Ok(_svc.GetAll());
+```
+
+---
+
+## MVC-C8 — `HttpClient` vs `IHttpClientFactory` vs Typed Client
+
+| | `new HttpClient()` | `IHttpClientFactory` | Typed Client |
+|-|-------------------|---------------------|-------------|
+| Connection pooling | ❌ Port exhaustion | ✅ Pooled handlers | ✅ Pooled handlers |
+| Handler lifetime | Per instance | Managed (2 min rotation) | Managed |
+| Configuration | Manual | Named config in DI | Class-based DI |
+| Use for | ❌ Never in prod | Ad-hoc calls | Service-specific HTTP clients |
+
+```csharp
+// ❌ new HttpClient() — port exhaustion in high-throughput apps
+var client = new HttpClient();
+
+// ✅ IHttpClientFactory
+builder.Services.AddHttpClient("payments", c => c.BaseAddress = new Uri("https://pay.api/"));
+// In class: var client = _factory.CreateClient("payments");
+
+// ✅ Typed Client — best for service wrappers
+builder.Services.AddHttpClient<PaymentApiClient>(c => c.BaseAddress = new Uri("https://pay.api/"));
+public class PaymentApiClient { public PaymentApiClient(HttpClient client) { _client = client; } }
+```
+

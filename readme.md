@@ -4234,3 +4234,256 @@ protected override bool ShouldRender() => _hasDataChanged;
 AOT improves runtime performance at the cost of larger download size and longer publish time.
 
 ---
+
+---
+
+# ⚖️ C# Comparisons — Side-by-Side Differences
+
+> Quick-reference table for every "what's the difference between X and Y?" question.
+
+---
+
+## C#1 — `IEnumerable<T>` vs `IQueryable<T>` vs `IList<T>`
+
+| | `IEnumerable<T>` | `IQueryable<T>` | `IList<T>` |
+|-|-----------------|-----------------|------------|
+| Execution | In-memory, deferred | Translated to SQL/provider, deferred | In-memory, immediate |
+| Where filter runs | C# (after data loaded) | DB server (before data loaded) | C# |
+| Supports index | ❌ | ❌ | ✅ `list[i]` |
+| Use for | LINQ on in-memory collections | EF Core DB queries | In-memory list with index access |
+
+```csharp
+// IQueryable — filter runs on DB (efficient)
+IQueryable<Order> q = _db.Orders.Where(o => o.Total > 100); // SQL: WHERE Total > 100
+
+// IEnumerable — filter runs in C# (loads ALL rows first!)
+IEnumerable<Order> e = _db.Orders.AsEnumerable().Where(o => o.Total > 100); // loads everything!
+
+// Rule: keep IQueryable until you call .ToList() / .FirstOrDefault()
+```
+
+---
+
+## C#2 — `Task` vs `ValueTask`
+
+| | `Task` / `Task<T>` | `ValueTask` / `ValueTask<T>` |
+|-|-------------------|------------------------------|
+| Allocation | Always heap-allocated | Stack-allocated when synchronous |
+| Await multiple times | ✅ Safe | ❌ Can only await once |
+| Best for | Most async operations | Hot paths that often complete synchronously |
+| Example | `HttpClient.GetAsync()` | Cache lookup (usually returns immediately) |
+
+```csharp
+// Task — always allocates, fine for most cases
+public async Task<Order> GetFromDbAsync(Guid id) => await _db.Orders.FindAsync(id);
+
+// ValueTask — zero allocation when cache hit (synchronous path)
+public ValueTask<Order?> GetCachedAsync(Guid id)
+{
+    if (_cache.TryGetValue(id, out var order))
+        return ValueTask.FromResult(order); // synchronous — no allocation
+
+    return new ValueTask<Order?>(LoadFromDbAsync(id)); // async — wraps Task
+}
+```
+
+---
+
+## C#3 — `string` vs `StringBuilder`
+
+| | `string` | `StringBuilder` |
+|-|---------|----------------|
+| Mutability | Immutable — each operation creates new string | Mutable buffer |
+| Concatenation | `O(n²)` in a loop (copies each time) | `O(n)` — appends to buffer |
+| Memory | New object per operation | Single buffer, resized as needed |
+| Use for | Few concatenations, constants | Loops, building large strings |
+
+```csharp
+// ❌ string in loop — creates 1000 intermediate string objects
+string result = "";
+for (int i = 0; i < 1000; i++) result += i; // O(n²) copies
+
+// ✅ StringBuilder — single buffer
+var sb = new StringBuilder();
+for (int i = 0; i < 1000; i++) sb.Append(i);
+string result = sb.ToString(); // one allocation at the end
+```
+
+---
+
+## C#4 — `throw` vs `throw ex`
+
+| | `throw` (rethrow) | `throw ex` (throw with variable) |
+|-|-------------------|----------------------------------|
+| Stack trace | ✅ Preserved (original call site) | ❌ Reset (stack trace starts here) |
+| Use | Rethrowing caught exception | Almost never — loses debugging info |
+
+```csharp
+catch (Exception ex)
+{
+    _log.LogError(ex, "Failed");
+    throw;      // ✅ preserves original stack trace
+    // throw ex; ❌ rewrites stack trace — harder to debug
+}
+```
+
+---
+
+## C#5 — `lock` vs `Monitor` vs `SemaphoreSlim` vs `Mutex`
+
+| | `lock` | `Monitor` | `SemaphoreSlim` | `Mutex` |
+|-|--------|-----------|-----------------|---------|
+| Scope | Same thread only | Same thread only | Multiple threads (count) | Cross-process |
+| Async support | ❌ | ❌ | ✅ `WaitAsync()` | ❌ |
+| Syntax | Simple | Verbose | Moderate | Verbose |
+| Use for | Sync critical sections | Same as lock + TryEnter | Async throttling | Cross-process locks |
+
+```csharp
+// lock — simplest, sync only
+lock (_lockObj) { _counter++; }
+
+// SemaphoreSlim — async safe, can limit concurrency count
+private readonly SemaphoreSlim _sem = new(1, 1); // mutex-like (1 at a time)
+await _sem.WaitAsync();
+try { await DoWorkAsync(); }
+finally { _sem.Release(); }
+
+// SemaphoreSlim(3) — allow 3 concurrent callers (throttling)
+private readonly SemaphoreSlim _throttle = new(3, 3);
+```
+
+---
+
+## C#6 — `List<T>` vs `LinkedList<T>` vs `Array`
+
+| | `Array` | `List<T>` | `LinkedList<T>` |
+|-|---------|-----------|-----------------|
+| Random access | O(1) | O(1) | O(n) |
+| Insert/remove (middle) | O(n) shift | O(n) shift | O(1) (with node) |
+| Insert/remove (end) | N/A (fixed) | O(1) amortised | O(1) |
+| Memory | Contiguous | Contiguous | Scattered (node pointers) |
+| Cache performance | ✅ Excellent | ✅ Good | ❌ Poor (pointer chasing) |
+| Use for | Fixed size, raw perf | General purpose | Frequent middle insert/remove |
+
+---
+
+## C#7 — `==` vs `.Equals()` vs `ReferenceEquals()`
+
+| | `==` | `.Equals()` | `ReferenceEquals()` |
+|-|----|------------|---------------------|
+| Default behaviour | Reference (unless overridden) | Reference (unless overridden) | Always reference |
+| `string` | Value (overridden) | Value (overridden) | Reference |
+| `record` | Value (generated) | Value (generated) | Reference |
+| Null safe | ✅ (no NRE) | ❌ throws if null | ✅ |
+
+```csharp
+string a = "hello";
+string b = new string("hello"); // force new object
+
+a == b;                    // true  — string overrides ==
+a.Equals(b);               // true  — string overrides Equals
+ReferenceEquals(a, b);     // false — different objects
+
+record Point(int X, int Y);
+var p1 = new Point(1, 2);
+var p2 = new Point(1, 2);
+p1 == p2;                  // true  — record generates value ==
+ReferenceEquals(p1, p2);   // false — different objects
+```
+
+---
+
+## C#8 — `Dictionary<K,V>` vs `ConcurrentDictionary<K,V>` vs `ImmutableDictionary<K,V>`
+
+| | `Dictionary` | `ConcurrentDictionary` | `ImmutableDictionary` |
+|-|-------------|----------------------|----------------------|
+| Thread-safe | ❌ No | ✅ Yes (fine-grained locks) | ✅ Yes (no mutation) |
+| Performance | Fastest (single thread) | Good (multi-thread) | Slowest writes (copy-on-write) |
+| Mutation | ✅ | ✅ | ❌ Returns new dict |
+| Use for | Single-threaded, local | Shared caches, counters | Config, snapshots |
+
+```csharp
+// ConcurrentDictionary atomic operations
+var dict = new ConcurrentDictionary<string, int>();
+dict.AddOrUpdate("key", 1, (k, v) => v + 1); // atomic increment
+dict.GetOrAdd("key", k => ExpensiveCompute(k)); // atomic add-if-missing
+```
+
+---
+
+## C#9 — `Func<T>` vs `Action<T>` vs `Predicate<T>`
+
+| | `Action<T>` | `Func<T, TResult>` | `Predicate<T>` |
+|-|-------------|-------------------|---------------|
+| Return type | `void` | Any `TResult` | `bool` |
+| Parameters | 0–16 | 0–16 + return | 1 |
+| Equivalent | `Func<T, void>` | — | `Func<T, bool>` |
+
+```csharp
+Action<string>       log      = msg => Console.WriteLine(msg);      // void
+Func<int, int, int>  add      = (a, b) => a + b;                   // returns int
+Predicate<string>    notEmpty = s => !string.IsNullOrEmpty(s);      // returns bool
+
+// All three are delegate types — interchangeable in most LINQ contexts
+var filtered = list.Where(new Predicate<string>(notEmpty).Invoke);  // same as:
+var filtered = list.Where(s => !string.IsNullOrEmpty(s));
+```
+
+---
+
+## C#10 — `abstract class` vs `interface` (Deep Comparison)
+
+| Feature | Abstract Class | Interface |
+|---------|---------------|-----------|
+| Multiple inheritance | ❌ Single only | ✅ Multiple |
+| Constructors | ✅ | ❌ |
+| Fields / state | ✅ | ❌ (only properties) |
+| Default implementation | ✅ | ✅ (C# 8+ default interface methods) |
+| Access modifiers on members | ✅ Any | Public only (unless explicit) |
+| Use when | Shared base code + state | Pure contract, multiple inheritance |
+
+```csharp
+// Abstract class — use when subclasses share state + behaviour
+public abstract class Animal
+{
+    public string Name { get; set; } = ""; // shared state
+    public abstract void Speak();           // must override
+    public void Breathe() => Console.WriteLine("...breathing"); // shared impl
+}
+
+// Interface — use for contracts across unrelated types
+public interface IExportable { byte[] Export(); }
+public interface IValidatable { bool Validate(); }
+
+// A class can implement both — impossible with 2 abstract classes
+public class Order : IExportable, IValidatable { ... }
+```
+
+---
+
+## C#11 — `sealed` vs `abstract` vs `virtual` vs `override`
+
+| Keyword | Meaning |
+|---------|---------|
+| `virtual` | Base class: "subclasses MAY override this" |
+| `abstract` | Base class: "subclasses MUST override this" (class also abstract) |
+| `override` | Subclass: "I am replacing the base implementation" |
+| `sealed` | On class: "no further subclassing". On override method: "stop override chain" |
+| `new` | Hides (not overrides) base method — breaks polymorphism |
+
+```csharp
+// new hides — loses polymorphism
+class Base  { public void Log() => Console.WriteLine("Base"); }
+class Child : Base { public new void Log() => Console.WriteLine("Child"); }
+
+Base obj = new Child();
+obj.Log(); // "Base" — new does NOT participate in polymorphism!
+
+// override — polymorphic dispatch
+class Base2  { public virtual void Log() => Console.WriteLine("Base"); }
+class Child2 : Base2 { public override void Log() => Console.WriteLine("Child"); }
+
+Base2 obj2 = new Child2();
+obj2.Log(); // "Child" — correct polymorphic call
+```
+

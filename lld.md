@@ -2140,3 +2140,182 @@ Concurrent booking prevention:
 ```
 
 ---
+
+---
+
+# ⚖️ Design Pattern Comparisons — Side-by-Side Differences
+
+---
+
+## PAT-C1 — Factory Method vs Abstract Factory vs Builder
+
+| | Factory Method | Abstract Factory | Builder |
+|-|---------------|-----------------|---------|
+| Creates | One product type | Family of related products | One complex product step-by-step |
+| Subclassing | One factory subclass per product | One factory per product family | Director + ConcreteBuilder |
+| Focus | Which class to instantiate | Consistent family | How to construct |
+| Use for | Single product, runtime type decision | Platform-specific UI families | Complex objects with many optional parts |
+
+```csharp
+// Factory Method — "create ONE thing, subclass decides which"
+abstract class LoggerFactory { public abstract ILogger Create(); }
+class FileLoggerFactory : LoggerFactory { public override ILogger Create() => new FileLogger(); }
+
+// Abstract Factory — "create a FAMILY of things that belong together"
+interface IUIFactory { IButton CreateButton(); IDialog CreateDialog(); } // always consistent family
+
+// Builder — "construct ONE complex object in steps"
+new SqlQueryBuilder().Select("Id","Name").From("Orders").Where("Total>0").Limit(10).Build();
+```
+
+---
+
+## PAT-C2 — Decorator vs Proxy vs Adapter
+
+| | Decorator | Proxy | Adapter |
+|-|-----------|-------|---------|
+| Interface | Same as wrapped | Same as real subject | Different → converts |
+| Purpose | Add behaviour dynamically | Control access / add cross-cutting concerns | Bridge incompatible interfaces |
+| Wraps | Object of same interface | Object of same interface | Object of different interface |
+| Use for | Logging, caching, retry layering | Security check, caching, lazy init | Legacy API integration |
+
+```csharp
+// Decorator — same interface, adds behaviour
+public class CachingOrderService : IOrderService // same interface
+{
+    public CachingOrderService(IOrderService inner) { } // wraps same type
+}
+
+// Proxy — same interface, controls access
+public class SecureOrderService : IOrderService // same interface
+{
+    public Order Get(Guid id) { CheckAuthorization(); return _real.Get(id); }
+}
+
+// Adapter — DIFFERENT interfaces bridged
+public class LegacyLoggerAdapter : IModernLogger // target interface
+{
+    private readonly LegacyLogger _legacy; // adaptee — different interface
+    public void Log(string level, string msg) => _legacy.WriteEntry(msg, DateTime.Now, 1); // translate
+}
+```
+
+---
+
+## PAT-C3 — Strategy vs Command vs Template Method
+
+| | Strategy | Command | Template Method |
+|-|----------|---------|-----------------|
+| Encapsulates | An algorithm (HOW) | An action (WHAT + undo) | Skeleton with variable steps |
+| Runtime switch | ✅ Yes | ✅ Yes | ❌ Set at class time (inheritance) |
+| Undo support | ❌ | ✅ Built-in | ❌ |
+| Relationship | Composition | Composition | Inheritance |
+| Use for | Interchangeable algorithms | Undo/redo, queuing, macro | Framework hooks |
+
+```csharp
+// Strategy — swap sorting algorithm at runtime
+pricer.SetStrategy(new VipDiscount()); // change HOW price is calculated
+
+// Command — encapsulate action + undo
+invoker.Execute(new ShipOrderCommand(order)); // do it
+invoker.Undo();                               // undo it
+
+// Template Method — skeleton in base, subclass fills gaps
+abstract class ReportGenerator { public void Generate() { FetchData(); Format(); Save(); } }
+// subclass only overrides FetchData() and Format()
+```
+
+---
+
+## PAT-C4 — Observer vs Mediator vs Event Bus
+
+| | Observer | Mediator | Event Bus |
+|-|----------|----------|-----------|
+| Coupling | Subject knows observer interface | Components know mediator | Fully decoupled (pub/sub) |
+| Communication | Direct callback | Through mediator | Through message broker |
+| Use for | In-process event notification | Reducing many-to-many wiring | Cross-service events |
+| .NET example | `event`/delegate | MediatR | MassTransit, Azure Service Bus |
+
+```csharp
+// Observer — direct subscription
+_subject.StateChanged += MyHandler; // knows the handler type
+
+// Mediator — through central hub
+await _mediator.Send(new OrderCreatedCommand()); // doesn't know who handles
+
+// Event Bus — cross-service
+await _bus.PublishAsync(new OrderPlacedEvent()); // completely decoupled
+```
+
+---
+
+## PAT-C5 — Singleton vs Static Class
+
+| | Singleton | Static Class |
+|-|-----------|-------------|
+| Instantiation | Lazy (first access) | Class loaded at startup |
+| Interface | ✅ Can implement | ❌ Cannot |
+| Testable / mockable | ✅ Via DI | ❌ |
+| Inheritance | ✅ Can extend | ❌ |
+| State | Instance fields | Static fields |
+| Use for | Services with state via DI | Stateless utility methods (Math, Convert) |
+
+```csharp
+// Static class — stateless utilities, cannot mock
+public static class MathHelper { public static double CircleArea(double r) => Math.PI * r * r; }
+
+// Singleton via DI — mockable, testable
+builder.Services.AddSingleton<IAppConfig, AppConfig>(); // container manages single instance
+// In test: services.AddSingleton<IAppConfig>(mockConfig.Object);
+```
+
+---
+
+## PAT-C6 — Repository vs DAO vs Active Record
+
+| | Repository | DAO (Data Access Object) | Active Record |
+|-|------------|--------------------------|---------------|
+| Domain awareness | ✅ Domain model | ❌ DB-centric | Entity owns its own save/load |
+| Abstraction level | High (collection-like) | Low (CRUD per table) | None — entity = DB row |
+| Testing | ✅ Easy (interface) | Moderate | ❌ Hard (entity coupled to DB) |
+| Example | `IOrderRepository` | `OrderDao.FindByIdFromDb()` | `order.Save()` (Rails-style) |
+| Use in | DDD, clean architecture | Simple data layer | Rapid prototyping |
+
+```csharp
+// Repository — domain-centric
+public interface IOrderRepository { Task<Order?> GetByIdAsync(Guid id); }
+
+// DAO — DB-centric
+public class OrderDao { public DataRow GetRowById(int id) { /* raw SQL */ } }
+
+// Active Record (not typical in .NET, but conceptual)
+public class Order { public void Save() => DbContext.Current.Save(this); }
+```
+
+---
+
+## PAT-C7 — Composition vs Inheritance
+
+| | Composition (has-a) | Inheritance (is-a) |
+|-|--------------------|-------------------|
+| Flexibility | ✅ Swap at runtime | ❌ Fixed at compile time |
+| Coupling | Loose | Tight |
+| Code reuse | Via delegation | Via base class |
+| Multiple behaviour | ✅ Multiple composed objects | ❌ Single inheritance |
+| Use for | Behaviour variation, testability | True subtype relationship |
+
+```csharp
+// ❌ Inheritance — rigid, changes to base affect all subclasses
+class Duck : FlyingBird { } // what if rubber ducks can't fly?
+
+// ✅ Composition — inject only the behaviours needed
+class Duck
+{
+    private readonly IFlyBehaviour _fly;
+    private readonly IQuackBehaviour _quack;
+    public Duck(IFlyBehaviour fly, IQuackBehaviour quack) { _fly = fly; _quack = quack; }
+}
+var rubberDuck = new Duck(new NoFly(), new Squeak()); // no fly, different quack
+var mallard    = new Duck(new FlyWithWings(), new Quack());
+```
+

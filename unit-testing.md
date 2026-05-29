@@ -1459,3 +1459,211 @@ public async Task GetOrders_CompletesWithin500ms()
 ---
 
 *Last updated: 2026 | .NET 8 / xUnit 2.x / Moq 4.x / FluentAssertions 7.x*
+
+---
+
+# ⚖️ Testing Comparisons — Side-by-Side Differences
+
+---
+
+## TEST-C1 — Unit vs Integration vs End-to-End Tests
+
+| | Unit Test | Integration Test | End-to-End (E2E) Test |
+|-|-----------|-----------------|----------------------|
+| What it tests | Single class/method | Multiple layers together | Full user journey (UI → DB) |
+| Dependencies | All mocked | Some real (DB, cache) | All real |
+| Speed | Milliseconds | Seconds | Minutes |
+| Flakiness | ✅ Low (no I/O) | Medium | ❌ High (network, browser timing) |
+| Run frequency | Every save (watch mode) | Every commit (CI) | Nightly / pre-release |
+| Finds | Logic bugs | Integration bugs | UX and workflow bugs |
+| Maintenance | Low | Medium | ❌ High |
+| Ratio (pyramid) | 70% | 20% | 10% |
+
+---
+
+## TEST-C2 — Mock vs Stub vs Fake vs Spy vs Dummy
+
+| | Dummy | Stub | Fake | Mock | Spy |
+|-|-------|------|------|------|-----|
+| Purpose | Placeholder, never used | Returns canned data | Working simplified impl | Verify interactions | Record real calls |
+| Behaviour verification | ❌ | ❌ | ❌ | ✅ `Verify(...)` | ✅ (wraps real) |
+| Real logic | ❌ | ❌ | ✅ Simplified | ❌ | ✅ Real + recorded |
+| Example | `new Mock<ILogger>().Object` | `mockRepo.Setup(...).Returns(...)` | `FakeOrderRepository` | `mock.Verify(r => r.Save(), Times.Once)` | `Mock<T>(CallBase = true)` |
+
+```csharp
+// Dummy — passed but never called
+var dummyLogger = new Mock<ILogger<OrderService>>().Object;
+
+// Stub — provides return value
+var stub = new Mock<IOrderRepo>();
+stub.Setup(r => r.GetAsync(id)).ReturnsAsync(new Order());
+
+// Fake — in-memory working implementation
+public class FakeOrderRepo : IOrderRepo
+{
+    private Dictionary<Guid, Order> _store = new();
+    public Task<Order?> GetAsync(Guid id) => Task.FromResult(_store.GetValueOrDefault(id));
+    public Task SaveAsync(Order o) { _store[o.Id] = o; return Task.CompletedTask; }
+}
+
+// Mock — verifies the interaction happened
+var mock = new Mock<IEmailService>();
+await svc.CreateOrderAsync(dto);
+mock.Verify(e => e.SendConfirmationAsync(It.IsAny<string>()), Times.Once);
+
+// Spy — wraps real object, records calls
+var spy = new Mock<IOrderService>(MockBehavior.Loose) { CallBase = true };
+// Uses real methods but can also verify calls
+```
+
+---
+
+## TEST-C3 — xUnit vs NUnit vs MSTest
+
+| | xUnit | NUnit | MSTest |
+|-|-------|-------|--------|
+| Test attribute | `[Fact]` / `[Theory]` | `[Test]` / `[TestCase]` | `[TestMethod]` / `[DataTestMethod]` |
+| Setup | Constructor / `IAsyncLifetime` | `[SetUp]` | `[TestInitialize]` |
+| Teardown | `Dispose()` | `[TearDown]` | `[TestCleanup]` |
+| Shared fixture | `IClassFixture<T>` | `[OneTimeSetUp]` | `[ClassInitialize]` |
+| Test isolation | ✅ New instance per test | Configurable | New instance per test |
+| Parallelism | ✅ Default | Configurable | Configurable |
+| Industry preference | ✅ Most popular (.NET) | Popular, feature-rich | Microsoft/enterprise |
+
+```csharp
+// xUnit
+public class OrderTests
+{
+    [Fact]
+    public void Create_SetsStatusToPending() { }
+
+    [Theory]
+    [InlineData(1, 2, 3)]
+    [InlineData(-1, 1, 0)]
+    public void Add_ReturnsSum(int a, int b, int expected) { }
+}
+
+// NUnit equivalent
+[TestFixture]
+public class OrderTests
+{
+    [Test]
+    public void Create_SetsStatusToPending() { }
+
+    [TestCase(1, 2, 3)]
+    [TestCase(-1, 1, 0)]
+    public void Add_ReturnsSum(int a, int b, int expected) { }
+}
+```
+
+---
+
+## TEST-C4 — `[Fact]` vs `[Theory]` vs `[MemberData]` vs `[ClassData]`
+
+| | `[Fact]` | `[Theory]` + `[InlineData]` | `[Theory]` + `[MemberData]` | `[Theory]` + `[ClassData]` |
+|-|---------|----------------------------|------------------------------|---------------------------|
+| Parameters | None | Inline primitives | Static property/method | Separate class |
+| Complex objects | ❌ | ❌ | ✅ | ✅ |
+| Reusable across tests | ❌ | ❌ | ✅ | ✅ |
+| Use for | Single scenario | Quick inline cases | Complex test data | Shared datasets |
+
+```csharp
+// MemberData — for complex objects
+public static IEnumerable<object[]> OrderStatusData =>
+[
+    [new Order { Status = "Pending" }, true],
+    [new Order { Status = "Shipped" }, false],
+];
+
+[Theory]
+[MemberData(nameof(OrderStatusData))]
+public void CanEdit_ReturnsExpected(Order order, bool expected) =>
+    Assert.Equal(expected, OrderPolicy.CanEdit(order));
+```
+
+---
+
+## TEST-C5 — `Assert.Equal` vs FluentAssertions vs `Assert.That` (NUnit)
+
+| | `Assert.Equal(expected, actual)` | FluentAssertions | `Assert.That(actual, Is.EqualTo(expected))` |
+|-|----------------------------------|-----------------|---------------------------------------------|
+| Readability | Medium | ✅ Highest | High |
+| Failure message | Basic | ✅ Descriptive with context | Good |
+| Chaining | ❌ | ✅ `.And.BeGreaterThan(0)` | Limited |
+| Collection assertions | Basic | ✅ Rich (`HaveCount`, `AllSatisfy`) | Good |
+| Library | xUnit built-in | NuGet package | NUnit built-in |
+
+```csharp
+// Basic xUnit
+Assert.Equal("Pending", order.Status);
+// Failure: Expected: Pending. Actual: Shipped.
+
+// FluentAssertions
+order.Status.Should().Be("Pending", because: "newly created orders start pending");
+// Failure: Expected order.Status to be "Pending" because newly created orders start pending,
+//          but found "Shipped".
+
+order.Items.Should().HaveCount(3)
+           .And.AllSatisfy(i => i.Price.Should().BePositive());
+```
+
+---
+
+## TEST-C6 — In-Memory EF vs SQLite In-Memory vs Real DB (for Repository Tests)
+
+| | In-Memory EF Provider | SQLite In-Memory | Real SQL Server / TestContainers |
+|-|----------------------|-----------------|----------------------------------|
+| FK constraints | ❌ Not enforced | ✅ Enforced | ✅ Enforced |
+| UNIQUE constraints | ❌ Not enforced | ✅ Enforced | ✅ Enforced |
+| SQL dialect accuracy | ❌ No real SQL | Medium (SQLite dialect) | ✅ Exact match |
+| Speed | ✅ Fastest | ✅ Fast | Slowest (startup) |
+| Migrations tested | ❌ | Partial | ✅ Full |
+| Use for | Simple CRUD logic only | Most repository tests | Integration tests, migration verification |
+
+```csharp
+// SQLite In-Memory — preferred for repository tests
+var connection = new SqliteConnection("DataSource=:memory:");
+connection.Open();
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseSqlite(connection).Options;
+using var db = new AppDbContext(options);
+db.Database.EnsureCreated();
+
+// Testcontainers — real SQL Server in Docker for integration tests
+await using var container = new MsSqlBuilder()
+    .WithPassword("Strong_Pwd_123!").Build();
+await container.StartAsync();
+var connStr = container.GetConnectionString();
+```
+
+---
+
+## TEST-C7 — `Setup` vs `SetupSequence` vs `Callback` vs `Returns` in Moq
+
+| | `Returns` | `ReturnsAsync` | `SetupSequence` | `Callback` | `Throws` |
+|-|----------|---------------|----------------|-----------|---------|
+| Purpose | Return same value always | Return Task value | Different value each call | Side effect / capture arg | Throw exception |
+| Successive calls | Same | Same | Changes per call | N/A | Same |
+
+```csharp
+var mock = new Mock<IOrderRepo>();
+
+// Returns — same every call
+mock.Setup(r => r.GetAsync(id)).ReturnsAsync(new Order { Status = "Pending" });
+
+// SetupSequence — different values on successive calls
+mock.SetupSequence(r => r.GetNextAsync())
+    .ReturnsAsync(order1)   // 1st call
+    .ReturnsAsync(order2)   // 2nd call
+    .ReturnsAsync(null);    // 3rd call → null
+
+// Callback — capture argument for inspection
+Order? saved = null;
+mock.Setup(r => r.SaveAsync(It.IsAny<Order>()))
+    .Callback<Order>(o => saved = o)
+    .Returns(Task.CompletedTask);
+
+// Throws — simulate error
+mock.Setup(r => r.GetAsync(It.IsAny<Guid>())).ThrowsAsync(new TimeoutException());
+```
+

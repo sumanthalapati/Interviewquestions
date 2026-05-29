@@ -2020,3 +2020,130 @@ Cancellation paths:
   Any state before SHIPPED: CANCELLED (inventory released, refund initiated)
   After SHIPPED: RETURN_REQUESTED → RETURN_IN_TRANSIT → RETURNED → REFUNDED
 ```
+
+---
+
+# ⚖️ HLD Comparisons — Side-by-Side Differences
+
+---
+
+## HLD-C1 — SQL vs NoSQL
+
+| | SQL (RDBMS) | NoSQL |
+|-|------------|-------|
+| Schema | Fixed, enforced | Flexible / schema-less |
+| ACID | ✅ Full | Varies (Mongo: document-level; Cassandra: eventual) |
+| Joins | ✅ Native | ❌ Denormalize or application-level |
+| Scale | Vertical (+ read replicas) | Horizontal (sharding built-in) |
+| Query language | SQL (standardised) | Varies per DB |
+| Use for | Financial records, orders, users | Catalogs, social feeds, time-series, logs |
+| Examples | SQL Server, PostgreSQL, MySQL | MongoDB, Cassandra, DynamoDB, Redis |
+
+```
+Choose SQL when:
+✅ Data is relational with many joins
+✅ ACID transactions critical (payments, orders)
+✅ Complex reporting / aggregations
+
+Choose NoSQL when:
+✅ Massive scale (> 1TB, > 100k writes/sec)
+✅ Schema changes frequently
+✅ Document, key-value, or time-series shape
+✅ Geographic distribution needed (Cassandra multi-region)
+```
+
+---
+
+## HLD-C2 — Monolith vs Microservices vs Modular Monolith
+
+| | Monolith | Microservices | Modular Monolith |
+|-|---------|--------------|-----------------|
+| Deployment | Single unit | Independent per service | Single unit |
+| Team autonomy | ❌ Shared codebase | ✅ Per service | Partial |
+| Operational complexity | Low | ❌ High (K8s, tracing, etc.) | Low |
+| Network calls | In-process (fast) | Remote (slower, failure risk) | In-process |
+| Data isolation | Shared DB | Per-service DB | Shared DB (module boundaries in code) |
+| Use when | Early stage, small team | Scale per service needed, independent deploys | Growing monolith, not ready for micro |
+
+---
+
+## HLD-C3 — Synchronous vs Asynchronous Communication
+
+| | Synchronous (REST/gRPC) | Asynchronous (Events/Queue) |
+|-|------------------------|---------------------------|
+| Coupling | Tight (caller waits) | Loose (fire and forget) |
+| Latency | Immediate response | Eventual response |
+| Failure isolation | ❌ Cascade failure | ✅ Queue buffers failures |
+| Consistency | Strong | Eventual |
+| Use for | Query responses, simple CRUD | Workflows, fan-out, long-running tasks |
+
+---
+
+## HLD-C4 — Message Queue vs Event Streaming
+
+| | Message Queue (RabbitMQ, Service Bus) | Event Streaming (Kafka) |
+|-|---------------------------------------|------------------------|
+| Message retention | Deleted after consume | Retained for days/forever |
+| Replay | ❌ No (deleted) | ✅ Yes |
+| Consumers | One queue → one consumer group | One topic → many independent groups |
+| Ordering | Per-queue FIFO | Per-partition ordering |
+| Throughput | Up to ~50k/sec | Millions/sec |
+| Use for | Work queues, notifications | Event sourcing, audit log, analytics |
+
+---
+
+## HLD-C5 — CDN vs Load Balancer vs Reverse Proxy vs API Gateway
+
+| | CDN | Load Balancer | Reverse Proxy | API Gateway |
+|-|-----|---------------|---------------|-------------|
+| Primary role | Cache + edge delivery | Distribute traffic | Route to backend | API management |
+| SSL termination | ✅ | ✅ L7 | ✅ | ✅ |
+| Caching | ✅ Static content | ❌ | Optional | Optional |
+| Auth / rate limiting | ✅ (basic) | ❌ | ❌ | ✅ |
+| Protocol translation | ❌ | ❌ | ❌ | ✅ REST↔gRPC |
+| Examples | Cloudflare, Azure CDN | Azure LB, AWS ALB | nginx, YARP | Azure APIM, Kong |
+
+---
+
+## HLD-C6 — Horizontal vs Vertical Scaling
+
+| | Vertical (Scale Up) | Horizontal (Scale Out) |
+|-|--------------------|------------------------|
+| How | Bigger machine (CPU/RAM) | More machines |
+| Cost | Exponential (premium hardware) | Linear |
+| Ceiling | ❌ Hard limit | ✅ Near-unlimited |
+| Downtime | ❌ Required | ✅ Zero (rolling) |
+| Complexity | Low (no code change) | High (stateless required, LB needed) |
+| Use for | DB servers (short-term), simple apps | Web servers, API servers, stateless workers |
+
+---
+
+## HLD-C7 — Read Replica vs Caching vs CQRS (for Read Scalability)
+
+| | Read Replica | Cache (Redis) | CQRS Read Model |
+|-|-------------|--------------|-----------------|
+| Data freshness | Near-real-time (replication lag) | TTL-based staleness | Event-driven (milliseconds lag) |
+| Query flexibility | Full SQL | Key-value / simple | Custom denormalised model |
+| Complexity | Low | Low–Medium | High |
+| Use for | Heavy read load, same queries | Repeated identical lookups | Complex read patterns, different shape from write |
+
+---
+
+## HLD-C8 — Strong vs Eventual Consistency
+
+| | Strong Consistency | Eventual Consistency |
+|-|-------------------|--------------------|
+| Guarantee | Every read returns latest write | Reads may return stale data temporarily |
+| Availability | ❌ May reject requests during partition | ✅ Always available |
+| Examples | PostgreSQL, ZooKeeper, HBase | DynamoDB, Cassandra, DNS |
+| Use for | Financial transactions, inventory (exact) | Social feeds, search indexes, caches |
+
+```
+Practical rule:
+- Same row, same moment → needs strong consistency → RDBMS / Cosmos with strong
+- Notification that order shipped → eventual is fine → Kafka event
+
+A shopping cart can be eventually consistent (user adds items).
+The final payment deduction must be strongly consistent.
+```
+

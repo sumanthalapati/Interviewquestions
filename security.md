@@ -639,3 +639,187 @@ builder.Configuration.AddAzureKeyVault(vaultUri, credential, new KeyVaultSecretM
 ---
 
 *Last updated: 2026 | .NET 8 / OWASP API Security 2023*
+
+---
+
+# ⚖️ Security Comparisons — Side-by-Side Differences
+
+---
+
+## SEC-C1 — Authentication vs Authorization
+
+| | Authentication (AuthN) | Authorization (AuthZ) |
+|-|----------------------|----------------------|
+| Question | "Who are you?" | "What can you do?" |
+| Happens | First (identify user) | Second (check permissions) |
+| Failure code | 401 Unauthorized | 403 Forbidden |
+| Mechanism | JWT, cookie, API key, OAuth | Roles, claims, policies, RBAC |
+| .NET middleware | `UseAuthentication()` | `UseAuthorization()` |
+
+```csharp
+// 401 — not authenticated (no token / bad token)
+// 403 — authenticated but lacks permission (valid token, wrong role)
+
+[Authorize]                           // 401 if no valid token
+[Authorize(Roles = "Admin")]          // 403 if valid token but not Admin
+[Authorize(Policy = "CanApprove")]    // 403 if valid token but policy fails
+```
+
+---
+
+## SEC-C2 — JWT vs Session Cookies
+
+| | JWT (Stateless) | Session Cookies (Stateful) |
+|-|----------------|--------------------------|
+| Server stores state | ❌ No (self-contained) | ✅ Yes (session store) |
+| Scalability | ✅ Any server handles (stateless) | Needs sticky sessions or shared store (Redis) |
+| Revocation | ❌ Hard (wait for expiry) | ✅ Instant (delete session) |
+| CSRF risk | ❌ No (header-based) | ✅ Yes (auto-sent by browser) |
+| Size | Larger (payload in token) | Small (session ID only) |
+| Best for | SPAs, mobile, microservices | Server-rendered apps (MVC Razor Pages) |
+
+```csharp
+// JWT — stateless, header-based
+Authorization: Bearer eyJhbGci...
+// No server state — any instance can validate
+
+// Session cookie — server must store session
+Set-Cookie: .AspNetCore.Session=abc123; HttpOnly; SameSite=Strict
+// Server looks up "abc123" in Redis/memory to get session data
+```
+
+---
+
+## SEC-C3 — OAuth 2.0 vs OpenID Connect (OIDC)
+
+| | OAuth 2.0 | OpenID Connect (OIDC) |
+|-|----------|----------------------|
+| Purpose | Authorization (access to resources) | Authentication (who the user is) |
+| Token type | Access token | ID token (JWT) + Access token |
+| User info | ❌ Not defined | ✅ `sub`, `email`, `name` claims in ID token |
+| Built on | Protocol | Layer on top of OAuth 2.0 |
+| Use for | "Login with Google" access to Drive API | "Login with Google" to know who the user is |
+
+```
+OAuth 2.0 flow (authorization):
+User → "Allow MyApp to read your Google Drive?" → Access Token
+MyApp uses Access Token to call Google Drive API
+
+OIDC flow (authentication):
+User → "Login with Google" → ID Token (contains sub/email) + Access Token
+MyApp reads ID Token to know user identity (who they are)
+```
+
+---
+
+## SEC-C4 — Symmetric vs Asymmetric Encryption
+
+| | Symmetric (HS256) | Asymmetric (RS256 / ES256) |
+|-|-----------------|--------------------------|
+| Keys | Single shared secret | Key pair (private sign, public verify) |
+| JWT signing | HMAC-SHA256 with secret | RSA or ECDSA with private key |
+| Key distribution | ❌ Secret must be shared securely | ✅ Public key freely distributed |
+| Performance | ✅ Faster | Slower |
+| Use for | Single-service (issuer = verifier) | Multi-service (one issuer, many verifiers) |
+| Risk if key leaked | All tokens forgeable | Only private key forgeable (public key safe to share) |
+
+```csharp
+// HS256 — both sides need the same secret (bad for microservices)
+new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret))
+
+// RS256 — auth server has private key, all services verify with public key
+new RsaSecurityKey(rsa) { KeyId = "my-key-id" }
+// Services download public key from /.well-known/jwks.json — no secret sharing needed
+```
+
+---
+
+## SEC-C5 — Stored XSS vs Reflected XSS vs DOM-Based XSS
+
+| | Stored XSS | Reflected XSS | DOM-Based XSS |
+|-|-----------|--------------|---------------|
+| Payload stored | ✅ In DB/server | ❌ In URL/form | ❌ Client-side only |
+| Victim | Any user loading the page | Only user clicking crafted link | Only user visiting crafted URL |
+| Server involvement | ✅ Serves malicious content | ✅ Reflects in response | ❌ Client JS only |
+| Example | Malicious comment saved to DB | `?search=<script>...` reflected in response | `document.innerHTML = location.hash` |
+| Mitigation | Output encoding + CSP | Output encoding + CSP | Avoid `innerHTML`; use `textContent` |
+
+```csharp
+// ❌ Stored XSS — unsanitised comment served to all users
+<p>@Html.Raw(comment.Content)</p>  // executes any script in comment
+
+// ✅ Razor auto-encodes (safe by default)
+<p>@comment.Content</p>  // encodes < > " ' → &lt; &gt; &quot; &#x27;
+```
+
+---
+
+## SEC-C6 — SQL Injection vs NoSQL Injection vs LDAP Injection
+
+| | SQL Injection | NoSQL Injection | Command Injection |
+|-|-------------|----------------|------------------|
+| Target | SQL databases | MongoDB, etc. | OS shell |
+| Attack vector | Unparameterised SQL strings | Unvalidated JSON operators | Unsanitised shell commands |
+| Example payload | `' OR 1=1 --` | `{ "$gt": "" }` | `; rm -rf /` |
+| Mitigation | Parameterised queries / EF LINQ | Schema validation, sanitise operators | Never pass user input to shell |
+
+```csharp
+// ❌ SQL injection
+$"SELECT * FROM Users WHERE Name = '{input}'"  // input = "' OR 1=1 --"
+
+// ❌ NoSQL injection (MongoDB)
+var filter = $"{{ \"name\": \"{input}\" }}"  // input = {"$gt": ""} → returns all users
+
+// ✅ Both fixed with parameterised / typed queries
+_db.Users.Where(u => u.Name == input)  // EF LINQ — always safe
+collection.Find(u => u.Name == input)  // MongoDB typed filter — safe
+```
+
+---
+
+## SEC-C7 — CSRF vs XSS vs Clickjacking
+
+| | CSRF | XSS | Clickjacking |
+|-|------|-----|-------------|
+| Attack type | Forged request from victim's browser | Script injection in victim's browser | Tricking user to click hidden element |
+| Uses victim's | Session/cookie | Browser context (cookies, DOM) | Browser UI |
+| Mitigation | SameSite cookies, CSRF token | CSP, output encoding | `X-Frame-Options: DENY`, `frame-ancestors 'none'` |
+| Example | Fake form posting to bank.com | `<script>steal(document.cookie)</script>` | Invisible iframe over "Like" button |
+
+---
+
+## SEC-C8 — bcrypt vs PBKDF2 vs Argon2 vs SHA-256 for Passwords
+
+| | SHA-256 (MD5) | bcrypt | PBKDF2 | Argon2 |
+|-|--------------|--------|--------|--------|
+| Password hashing | ❌ Never | ✅ Good | ✅ Good (.NET Identity default) | ✅ Best (2015 winner) |
+| Salt built-in | ❌ Manual | ✅ | ✅ | ✅ |
+| Work factor tunable | ❌ | ✅ (`workFactor`) | ✅ (`iterations`) | ✅ (time + memory) |
+| Memory hardness | ❌ | ❌ | ❌ | ✅ (GPU-resistant) |
+| .NET usage | ❌ Don't use for passwords | `BCrypt.Net` NuGet | ASP.NET Core Identity | `Konscious.Security.Cryptography` |
+
+```csharp
+// ✅ bcrypt — good default choice
+string hash   = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 12);
+bool   isValid = BCrypt.Net.BCrypt.Verify(password, hash);
+
+// ✅ ASP.NET Core Identity — PBKDF2-SHA512, 100,000 iterations, built-in
+services.AddIdentity<ApplicationUser, IdentityRole>();
+// PasswordHasher handles salt + stretching automatically
+
+// ❌ SHA-256 — fast, no salt, crackable with rainbow tables in seconds
+var hash = SHA256.HashData(Encoding.UTF8.GetBytes(password)); // NEVER for passwords
+```
+
+---
+
+## SEC-C9 — API Key vs OAuth Token vs mTLS (Service-to-Service)
+
+| | API Key | OAuth Token (JWT) | mTLS (Client Certificate) |
+|-|---------|-----------------|--------------------------|
+| Identity proof | ❌ Shared secret (anyone with key) | ✅ Signed by auth server | ✅ Certificate bound to service |
+| Revocation | Delete key (manual) | Token expiry + refresh | Certificate revocation (CRL/OCSP) |
+| Rotation | Manual | Automatic (short-lived) | Certificate renewal |
+| Use for | Simple external APIs, webhooks | User-facing APIs, fine-grained scopes | Microservice mesh (zero-trust) |
+| Risk if leaked | Anyone can use | Short expiry limits damage | Cannot be used without private key |
+

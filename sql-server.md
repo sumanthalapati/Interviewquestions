@@ -3447,3 +3447,228 @@ This guide covered 100 T-SQL interview questions across 10 key areas:
 ---
 
 *Generated for SQL Server 2019+ / Azure SQL Database. Most examples are compatible with SQL Server 2016+.*
+
+---
+
+# ⚖️ SQL Server Comparisons — Side-by-Side Differences
+
+---
+
+## SQL-C1 — INNER JOIN vs LEFT JOIN vs RIGHT JOIN vs FULL OUTER JOIN
+
+| | INNER JOIN | LEFT JOIN | RIGHT JOIN | FULL OUTER JOIN |
+|-|-----------|-----------|------------|-----------------|
+| Returns | Only matching rows | All left + matched right | All right + matched left | All rows from both |
+| Unmatched rows | Excluded | Right side = NULL | Left side = NULL | Both sides = NULL |
+| Most common | ✅ Yes | ✅ Yes | Rarely (rewrite as LEFT) | Rarely |
+
+```sql
+-- INNER: only orders WITH a customer
+SELECT o.Id, c.Name FROM Orders o
+INNER JOIN Customers c ON o.CustomerId = c.Id;
+
+-- LEFT: all orders, even those without a customer (orphaned)
+SELECT o.Id, c.Name FROM Orders o
+LEFT JOIN Customers c ON o.CustomerId = c.Id;
+-- c.Name = NULL where no match
+
+-- FULL OUTER: all orders + all customers, NULLs where no match
+SELECT o.Id, c.Name FROM Orders o
+FULL OUTER JOIN Customers c ON o.CustomerId = c.Id;
+```
+
+---
+
+## SQL-C2 — Clustered vs Non-Clustered Index
+
+| | Clustered Index | Non-Clustered Index |
+|-|----------------|---------------------|
+| Physical sort | ✅ Data rows physically sorted | ❌ Separate structure, pointers to rows |
+| Per table | Only ONE (data IS the index) | Many allowed (up to 999) |
+| Leaf node holds | Actual data row | Row pointer (or included columns) |
+| Best for | Primary key, range scans | Lookup by non-PK column |
+| Row lookup after index hit | Instant (data is there) | Extra lookup (key lookup) |
+
+```sql
+-- Clustered index (automatically created on PRIMARY KEY)
+CREATE CLUSTERED INDEX IX_Orders_Id ON Orders(Id);
+-- Rows are physically stored sorted by Id
+
+-- Non-clustered: separate B-tree, leaf = pointer to heap/clustered row
+CREATE NONCLUSTERED INDEX IX_Orders_CustomerId ON Orders(CustomerId)
+INCLUDE (Status, Total); -- covering index: no key lookup needed
+```
+
+---
+
+## SQL-C3 — WHERE vs HAVING vs QUALIFY
+
+| | WHERE | HAVING | QUALIFY (non-standard) |
+|-|-------|--------|----------------------|
+| Filters | Individual rows | Grouped results | Window function results |
+| Used with | Any query | GROUP BY | Window functions (Snowflake/BigQuery) |
+| Runs | Before grouping | After grouping | After window function |
+| Aggregates allowed | ❌ | ✅ | ✅ |
+
+```sql
+-- WHERE — row-level filter (before grouping)
+SELECT CustomerId, SUM(Total) FROM Orders
+WHERE Status = 'Paid'         -- filter rows first
+GROUP BY CustomerId;
+
+-- HAVING — group-level filter (after grouping)
+SELECT CustomerId, SUM(Total) AS TotalSpent FROM Orders
+GROUP BY CustomerId
+HAVING SUM(Total) > 1000;     -- filter groups after aggregation
+
+-- Both together
+SELECT CustomerId, SUM(Total) FROM Orders
+WHERE Status = 'Paid'         -- filter rows
+GROUP BY CustomerId
+HAVING SUM(Total) > 500;      -- then filter groups
+```
+
+---
+
+## SQL-C4 — CTE vs Temp Table vs Table Variable vs Subquery
+
+| | CTE | Temp Table | Table Variable | Subquery |
+|-|-----|-----------|---------------|---------|
+| Scope | Single statement | Session | Batch / procedure | Inline |
+| Indexes | ❌ (no stats) | ✅ Yes | Limited | ❌ |
+| Re-usable in query | ✅ Multiple refs | ✅ | ✅ | ❌ (per reference) |
+| Recursive | ✅ Yes | ❌ | ❌ | ❌ |
+| Spills to disk | ❌ (in-memory plan) | ✅ tempdb | ✅ tempdb (usually in-memory) | ❌ |
+| Use for | Readable complex queries, recursion | Large intermediate results | Small intermediate results | Simple inline filtering |
+
+```sql
+-- CTE — readable, single-use
+WITH TopCustomers AS (
+    SELECT CustomerId, SUM(Total) AS Spent
+    FROM Orders GROUP BY CustomerId
+    HAVING SUM(Total) > 5000
+)
+SELECT c.Name, t.Spent FROM Customers c
+JOIN TopCustomers t ON c.Id = t.CustomerId;
+
+-- Temp Table — persists for session, can index
+CREATE TABLE #TopCustomers (CustomerId INT, Spent DECIMAL);
+INSERT INTO #TopCustomers SELECT CustomerId, SUM(Total) FROM Orders GROUP BY CustomerId;
+CREATE INDEX IX ON #TopCustomers(CustomerId); -- can add indexes!
+SELECT c.Name FROM Customers c JOIN #TopCustomers t ON c.Id = t.CustomerId;
+DROP TABLE #TopCustomers;
+```
+
+---
+
+## SQL-C5 — Stored Procedure vs Function vs View
+
+| | Stored Procedure | Function (Scalar/TVF) | View |
+|-|-----------------|----------------------|------|
+| Returns | Result sets, OUT params | Scalar value or table | Virtual table |
+| DML inside | ✅ INSERT/UPDATE/DELETE | ❌ (scalar) / ❌ (inline TVF) | ❌ |
+| Use in SELECT | ❌ Cannot | ✅ | ✅ |
+| Transaction control | ✅ BEGIN/COMMIT | ❌ | ❌ |
+| Caching | Execution plan cached | Inline TVF = optimised; scalar = slow | Indexed view possible |
+| Use for | Business logic, batch ops | Reusable calculations | Simplified query abstraction |
+
+```sql
+-- Scalar Function (avoid in WHERE on large tables — row-by-row)
+CREATE FUNCTION dbo.GetFullName(@First NVARCHAR(50), @Last NVARCHAR(50))
+RETURNS NVARCHAR(101) AS BEGIN RETURN @First + ' ' + @Last END
+
+-- Inline TVF (preferred — optimizer can inline it)
+CREATE FUNCTION dbo.GetOrdersByCustomer(@CustomerId INT)
+RETURNS TABLE AS RETURN
+    SELECT Id, Total, Status FROM Orders WHERE CustomerId = @CustomerId;
+
+-- View
+CREATE VIEW vw_PaidOrders AS
+    SELECT o.Id, c.Name, o.Total FROM Orders o
+    JOIN Customers c ON o.CustomerId = c.Id WHERE o.Status = 'Paid';
+```
+
+---
+
+## SQL-C6 — DELETE vs TRUNCATE vs DROP
+
+| | DELETE | TRUNCATE | DROP |
+|-|--------|---------|------|
+| WHERE clause | ✅ Yes | ❌ No | ❌ No |
+| Logged | Row-by-row (slow) | Minimal (fast) | Minimal |
+| Rollback | ✅ Yes (within transaction) | ✅ Yes (within transaction) | ✅ Yes |
+| Resets identity | ❌ | ✅ | Table gone |
+| Triggers fire | ✅ | ❌ | ❌ |
+| Removes structure | ❌ | ❌ | ✅ Table deleted |
+
+```sql
+DELETE FROM Orders WHERE Status = 'Cancelled'; -- selective, logged, triggers fire
+TRUNCATE TABLE TempLog;                         -- wipe all rows fast, reset identity
+DROP TABLE TempLog;                             -- delete table entirely
+```
+
+---
+
+## SQL-C7 — ROW_NUMBER vs RANK vs DENSE_RANK vs NTILE
+
+| | ROW_NUMBER | RANK | DENSE_RANK | NTILE(n) |
+|-|-----------|------|------------|---------|
+| Ties | Unique (arbitrary) | Skip numbers | No skip | Bucket assignment |
+| On tie (100, 100, 90) | 1, 2, 3 | 1, 1, 3 | 1, 1, 2 | Bucket 1, 1, 2 |
+| Use for | Pagination, dedup | Leaderboards | Leaderboards (no gaps) | Quartiles, buckets |
+
+```sql
+SELECT Name, Score,
+    ROW_NUMBER()  OVER (ORDER BY Score DESC) AS RowNum,   -- 1,2,3,4
+    RANK()        OVER (ORDER BY Score DESC) AS Rank,     -- 1,1,3,4 (skips 2)
+    DENSE_RANK()  OVER (ORDER BY Score DESC) AS DenseRank,-- 1,1,2,3 (no skip)
+    NTILE(4)      OVER (ORDER BY Score DESC) AS Quartile  -- 1,1,2,3
+FROM Players;
+```
+
+---
+
+## SQL-C8 — UNION vs UNION ALL vs INTERSECT vs EXCEPT
+
+| | UNION | UNION ALL | INTERSECT | EXCEPT |
+|-|-------|-----------|-----------|--------|
+| Duplicates | Removed (DISTINCT) | Kept | Only common rows | Rows in A not in B |
+| Performance | Slower (dedup sort) | ✅ Faster | Medium | Medium |
+| Use for | Merge, deduplicate | Merge without dedup | Common rows only | Set difference |
+
+```sql
+-- UNION: all paid + all shipped orders, no duplicates
+SELECT Id FROM PaidOrders UNION SELECT Id FROM ShippedOrders;
+
+-- UNION ALL: preserve duplicates (faster)
+SELECT Id FROM PaidOrders UNION ALL SELECT Id FROM ShippedOrders;
+
+-- INTERSECT: customers who both ordered AND reviewed
+SELECT CustomerId FROM Orders INTERSECT SELECT CustomerId FROM Reviews;
+
+-- EXCEPT: customers who ordered but never reviewed
+SELECT CustomerId FROM Orders EXCEPT SELECT CustomerId FROM Reviews;
+```
+
+---
+
+## SQL-C9 — OLTP vs OLAP
+
+| | OLTP (Online Transaction Processing) | OLAP (Online Analytical Processing) |
+|-|--------------------------------------|--------------------------------------|
+| Workload | Many small reads/writes | Few large read aggregations |
+| Data | Current, normalised | Historical, denormalised (star schema) |
+| Query type | Row-level INSERT/UPDATE | Aggregations, GROUP BY across millions |
+| Indexes | B-tree (row store) | Columnstore indexes |
+| Examples | Order system, banking, ERP | Data warehouse, BI dashboards, reporting |
+| SQL Server feature | Standard tables | Columnstore indexes, Azure Synapse |
+
+```sql
+-- OLAP: columnstore index for analytical queries (10-100x faster on aggregations)
+CREATE NONCLUSTERED COLUMNSTORE INDEX IX_CS_Orders
+ON Orders (CustomerId, Total, Status, CreatedAt);
+
+-- Query benefits from columnar compression and batch mode execution
+SELECT YEAR(CreatedAt), SUM(Total) FROM Orders GROUP BY YEAR(CreatedAt);
+```
+

@@ -1839,3 +1839,204 @@ public bool IsAnagram(string s, string t) {
     return count.All(c => c == 0);
 }
 ```
+
+---
+
+# ⚖️ DSA Comparisons — Side-by-Side Differences
+
+---
+
+## DSA-C1 — Array vs LinkedList vs ArrayList
+
+| | Array | `List<T>` (dynamic array) | `LinkedList<T>` |
+|-|-------|--------------------------|-----------------|
+| Random access | O(1) | O(1) | O(n) |
+| Insert at end | O(1) amortised | O(1) amortised | O(1) |
+| Insert at middle | O(n) shift | O(n) shift | O(1) with node ref |
+| Memory layout | Contiguous | Contiguous | Scattered (nodes + pointers) |
+| Cache efficiency | ✅ Excellent | ✅ Good | ❌ Poor |
+| Fixed vs dynamic size | Fixed | Dynamic | Dynamic |
+
+**Rule:** Use `List<T>` (dynamic array) almost always. `LinkedList<T>` only when you have a reference to a node and need O(1) insert/delete at that position.
+
+---
+
+## DSA-C2 — Stack vs Queue vs Deque
+
+| | Stack (LIFO) | Queue (FIFO) | Deque (both ends) |
+|-|-------------|-------------|-------------------|
+| Add | Push (top) | Enqueue (back) | AddFirst / AddLast |
+| Remove | Pop (top) | Dequeue (front) | RemoveFirst / RemoveLast |
+| Peek | Peek (top) | Peek (front) | PeekFirst / PeekLast |
+| Use for | DFS, undo/redo, call stack | BFS, task queues | Sliding window, monotonic deque |
+
+```csharp
+var stack = new Stack<int>();
+stack.Push(1); stack.Push(2);
+stack.Pop();   // 2 (LIFO)
+
+var queue = new Queue<int>();
+queue.Enqueue(1); queue.Enqueue(2);
+queue.Dequeue(); // 1 (FIFO)
+
+var deque = new LinkedList<int>(); // .NET deque
+deque.AddFirst(1); deque.AddLast(2);
+deque.RemoveFirst(); // 1
+```
+
+---
+
+## DSA-C3 — BFS vs DFS
+
+| | BFS (Breadth-First) | DFS (Depth-First) |
+|-|--------------------|-------------------|
+| Data structure | Queue | Stack (or recursion) |
+| Finds shortest path | ✅ Yes (unweighted) | ❌ No |
+| Memory (wide graph) | ❌ High (stores entire level) | ✅ Low (path depth) |
+| Memory (deep graph) | ✅ Low | ❌ High (stack overflow risk) |
+| Use for | Shortest path, level-order, nearest node | Cycle detection, topological sort, backtracking, maze solving |
+| Completeness | ✅ Always finds solution | ✅ (iterative), ❌ (recursive on infinite graphs) |
+
+```csharp
+// BFS — Level-order, uses Queue
+void BFS(int start, int[][] adj)
+{
+    var visited = new HashSet<int> { start };
+    var queue   = new Queue<int>(new[] { start });
+    while (queue.Count > 0)
+    {
+        var node = queue.Dequeue();
+        foreach (var neighbor in adj[node])
+            if (visited.Add(neighbor)) queue.Enqueue(neighbor);
+    }
+}
+
+// DFS — Uses Stack (iterative) or recursion
+void DFS(int node, bool[] visited, int[][] adj)
+{
+    visited[node] = true;
+    foreach (var neighbor in adj[node])
+        if (!visited[neighbor]) DFS(neighbor, visited, adj);
+}
+```
+
+---
+
+## DSA-C4 — QuickSort vs MergeSort vs HeapSort
+
+| | QuickSort | MergeSort | HeapSort |
+|-|----------|-----------|----------|
+| Average time | O(n log n) | O(n log n) | O(n log n) |
+| Worst case | O(n²) pivot issues | O(n log n) | O(n log n) |
+| Space | O(log n) in-place | O(n) extra | O(1) in-place |
+| Stable | ❌ Not stable | ✅ Stable | ❌ Not stable |
+| Cache perf | ✅ Excellent | ❌ Poor (scattered) | ❌ Poor |
+| Use for | General purpose (in-place) | Need stable sort / linked list | Guaranteed O(n log n), no extra space |
+
+**Rule:** .NET's `Array.Sort` uses IntroSort (QuickSort + HeapSort fallback for worst case). Use `OrderBy` for stable LINQ sorts (TimSort).
+
+---
+
+## DSA-C5 — HashMap vs TreeMap vs LinkedHashMap (C# equivalents)
+
+| | `Dictionary<K,V>` (HashMap) | `SortedDictionary<K,V>` (TreeMap) | `SortedList<K,V>` |
+|-|-----------------------------|----------------------------------|-------------------|
+| Order | ❌ Unordered | ✅ Sorted by key | ✅ Sorted by key |
+| Lookup | O(1) average | O(log n) | O(log n) |
+| Insert | O(1) average | O(log n) | O(n) (array shift) |
+| Use for | Fast lookup, no order needed | Range queries, ordered iteration | Memory-efficient sorted list |
+
+```csharp
+// Dictionary — O(1), no order
+var dict = new Dictionary<string, int> { ["b"] = 2, ["a"] = 1 };
+// Iteration order: unpredictable
+
+// SortedDictionary — O(log n), always sorted
+var sorted = new SortedDictionary<string, int> { ["b"] = 2, ["a"] = 1 };
+// Iteration order: a, b (sorted)
+```
+
+---
+
+## DSA-C6 — Binary Search Tree vs Heap vs Hash Table
+
+| | BST | Heap (Min/Max) | Hash Table |
+|-|-----|----------------|------------|
+| Find min/max | O(log n) | O(1) | O(n) |
+| Search arbitrary | O(log n) balanced | O(n) | O(1) average |
+| Insert | O(log n) | O(log n) | O(1) average |
+| Delete | O(log n) | O(log n) | O(1) average |
+| Ordered traversal | ✅ In-order = sorted | ❌ | ❌ |
+| Use for | Sorted data, range queries | Priority queue, top-K | Fast lookup |
+
+---
+
+## DSA-C7 — Dynamic Programming vs Greedy vs Backtracking
+
+| | DP | Greedy | Backtracking |
+|-|----|---------|----|
+| Approach | Optimal substructure + memo | Local optimal choice | Exhaustive search + prune |
+| Correctness | ✅ Always optimal | ✅ Sometimes (not always) | ✅ Always finds solution |
+| Time complexity | Polynomial (usually) | Fast (usually O(n)) | Exponential (worst case) |
+| Use for | Longest subsequence, knapsack, coin change | Activity selection, Dijkstra, Huffman | N-Queens, Sudoku, permutations |
+
+```csharp
+// DP — coin change: O(amount × coins)
+int CoinChange(int[] coins, int amount)
+{
+    var dp = new int[amount + 1];
+    Array.Fill(dp, int.MaxValue);
+    dp[0] = 0;
+    for (int i = 1; i <= amount; i++)
+        foreach (var c in coins)
+            if (c <= i && dp[i - c] != int.MaxValue)
+                dp[i] = Math.Min(dp[i], dp[i - c] + 1);
+    return dp[amount] == int.MaxValue ? -1 : dp[amount];
+}
+
+// Greedy — coin change only works for standard denominations (e.g., US coins)
+// Fails for denominations like [1,3,4] with amount=6
+// (Greedy: 4+1+1=3 coins, DP: 3+3=2 coins)
+```
+
+---
+
+## DSA-C8 — Two Pointers vs Sliding Window vs Binary Search
+
+| | Two Pointers | Sliding Window | Binary Search |
+|-|-------------|----------------|---------------|
+| Input | Sorted array or string | Array / string | Sorted array |
+| Pointer movement | Both move inward or same-direction | Window expands/contracts | Halves search space |
+| Use for | Pair sum, three sum, palindrome | Max subarray, longest substring | Find element, first/last occurrence, answer search |
+| Time | O(n) | O(n) | O(log n) |
+
+```csharp
+// Two Pointers — pair sum in sorted array
+bool HasPairSum(int[] arr, int target)
+{
+    int l = 0, r = arr.Length - 1;
+    while (l < r)
+    {
+        int sum = arr[l] + arr[r];
+        if (sum == target) return true;
+        if (sum < target) l++; else r--;
+    }
+    return false;
+}
+
+// Sliding Window — longest substring without repeat
+int LengthOfLongestSubstring(string s)
+{
+    var seen = new Dictionary<char, int>();
+    int max = 0, left = 0;
+    for (int right = 0; right < s.Length; right++)
+    {
+        if (seen.TryGetValue(s[right], out int prev) && prev >= left)
+            left = prev + 1;
+        seen[s[right]] = right;
+        max = Math.Max(max, right - left + 1);
+    }
+    return max;
+}
+```
+

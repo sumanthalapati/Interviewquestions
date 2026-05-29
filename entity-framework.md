@@ -644,3 +644,119 @@ var recentOrders = await _context.Orders
 ```
 *Why correct:* The domain `Order` class stays clean. Audit columns are managed transparently by the interceptor and accessed through the EF Core model when needed.
 
+
+---
+
+# ⚖️ Entity Framework Comparisons
+
+---
+
+## EF-C1 — EF Core vs Dapper vs ADO.NET
+
+| | EF Core | Dapper | ADO.NET |
+|-|---------|--------|---------|
+| Abstraction | High (ORM, LINQ) | Low (raw SQL + mapping) | Lowest (manual everything) |
+| Productivity | ✅ Fastest for CRUD | Medium | Slowest |
+| Performance | Good (with AsNoTracking) | ✅ Near-raw SQL | ✅ Maximum |
+| Complex queries | LINQ (sometimes awkward) | ✅ Raw SQL = full control | ✅ Full control |
+| Change tracking | ✅ Built-in | ❌ Manual | ❌ Manual |
+| Migrations | ✅ Built-in | ❌ Manual | ❌ Manual |
+| Use for | Standard CRUD, rapid dev | Performance-critical reads, complex SQL | Max performance, stored proc heavy |
+
+```csharp
+// EF Core — LINQ, tracked, migrations
+var order = await _db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+
+// Dapper — raw SQL, fast reads
+var orders = await _conn.QueryAsync<OrderDto>(
+    "SELECT Id, Total FROM Orders WHERE CustomerId = @id", new { id });
+
+// ADO.NET — maximum control
+using var cmd = new SqlCommand("SELECT * FROM Orders WHERE Id = @id", conn);
+cmd.Parameters.AddWithValue("@id", id);
+using var reader = await cmd.ExecuteReaderAsync();
+```
+
+---
+
+## EF-C2 — Code First vs Database First vs Model First
+
+| | Code First | Database First | Model First |
+|-|------------|---------------|-------------|
+| Source of truth | C# classes + migrations | Existing DB | Visual designer |
+| DB creation | EF generates DB from models | Scaffold models from DB | EF creates DB from designer |
+| Team workflow | Code review migrations | DBA controls schema | Rarely used today |
+| Best for | Greenfield projects | Legacy DB integration | ❌ Mostly obsolete |
+
+---
+
+## EF-C3 — Lazy vs Eager vs Explicit Loading
+
+| | Lazy Loading | Eager Loading | Explicit Loading |
+|-|-------------|---------------|-----------------|
+| When loaded | On first access (N+1 risk!) | In same query (JOIN) | Manually called |
+| Setup | `.UseLazyLoadingProxies()` | `.Include(o => o.Items)` | `Entry(o).Collection(o => o.Items).LoadAsync()` |
+| SQL generated | N+1 queries | Single JOIN | Extra query on demand |
+| Use for | Rarely — usually a code smell | Default for known relations | Conditional loading |
+
+```csharp
+// ❌ Lazy loading — N+1
+foreach (var order in _db.Orders.ToList())
+    Console.WriteLine(order.Customer.Name); // NEW query per order!
+
+// ✅ Eager loading — single JOIN
+var orders = await _db.Orders.Include(o => o.Customer).ToListAsync();
+
+// Explicit — controlled extra query
+var order = await _db.Orders.FindAsync(id);
+if (needsItems) await _db.Entry(order!).Collection(o => o.Items).LoadAsync();
+```
+
+---
+
+## EF-C4 — Tracked vs Untracked Queries
+
+| | Tracked (default) | AsNoTracking |
+|-|------------------|-------------|
+| Change detection | ✅ Automatic | ❌ None |
+| SaveChanges detects | ✅ Modified properties | ❌ Nothing |
+| Memory | Higher (identity map) | Lower |
+| Speed | Slower | ✅ Faster (~20–30%) |
+| Use for | Read-then-update | Read-only, projections, list views |
+
+```csharp
+// Tracked — use when you'll modify and save
+var order = await _db.Orders.FindAsync(id); // tracked
+order!.Status = "Shipped";
+await _db.SaveChangesAsync(); // detects change automatically
+
+// Untracked — use for read-only (faster, less memory)
+var dtos = await _db.Orders
+    .AsNoTracking()
+    .Select(o => new OrderDto(o.Id, o.Status))
+    .ToListAsync();
+```
+
+---
+
+## EF-C5 — `SaveChanges` vs `ExecuteUpdate` vs `ExecuteDelete`
+
+| | `SaveChanges` | `ExecuteUpdateAsync` | `ExecuteDeleteAsync` |
+|-|--------------|---------------------|---------------------|
+| Load entities first | ✅ Yes (tracked) | ❌ No | ❌ No |
+| Change tracking overhead | ✅ Full tracking | ❌ None | ❌ None |
+| Single SQL | N statements | ✅ One UPDATE | ✅ One DELETE |
+| Use for | CRUD on few records | Bulk updates | Bulk deletes |
+
+```csharp
+// SaveChanges — load all, track all, update all (slow for bulk)
+var orders = await _db.Orders.Where(o => o.Status == "Pending").ToListAsync();
+orders.ForEach(o => o.Status = "Archived");
+await _db.SaveChangesAsync(); // N UPDATEs
+
+// ExecuteUpdateAsync — single SQL, no load (EF Core 7+)
+await _db.Orders
+    .Where(o => o.Status == "Pending")
+    .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, "Archived")); // one UPDATE
+```
+
