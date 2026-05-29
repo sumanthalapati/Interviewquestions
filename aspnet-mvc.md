@@ -1105,3 +1105,232 @@ app.MapProductEndpoints();
 app.MapOrderEndpoints();
 app.MapUserEndpoints();
 ```
+
+---
+
+## 18. Configuration & Options Pattern
+
+### Q82. What is the Options pattern in ASP.NET Core and when do you use each variant?
+
+The Options pattern binds configuration sections to strongly-typed POCO classes. Three interfaces serve different lifetimes:
+
+| Interface | Lifetime | Reloads | Use when |
+|---|---|---|---|
+| `IOptions<T>` | Singleton | Never (reads once at startup) | Config that never changes at runtime |
+| `IOptionsSnapshot<T>` | Scoped | Per request (re-reads each scope) | Config that may change; reflects updates per request |
+| `IOptionsMonitor<T>` | Singleton | Live (via `OnChange` callback) | Long-running services needing live reload |
+
+**Configuration model:**
+```json
+// appsettings.json
+{
+  "Smtp": {
+    "Host": "smtp.example.com",
+    "Port": 587,
+    "UseSsl": true,
+    "From": "no-reply@example.com"
+  },
+  "FeatureFlags": {
+    "EnableDarkMode": true,
+    "MaxUploadMb": 10
+  }
+}
+```
+
+**POCO classes:**
+```csharp
+public class SmtpSettings {
+    public string Host    { get; set; } = "";
+    public int    Port    { get; set; } = 25;
+    public bool   UseSsl  { get; set; }
+    public string From    { get; set; } = "";
+}
+
+public class FeatureFlags {
+    public bool EnableDarkMode { get; set; }
+    public int  MaxUploadMb   { get; set; }
+}
+```
+
+**Registration in Program.cs:**
+```csharp
+builder.Services.Configure<SmtpSettings>(
+    builder.Configuration.GetSection("Smtp"));
+
+builder.Services.Configure<FeatureFlags>(
+    builder.Configuration.GetSection("FeatureFlags"));
+
+// Alternative — AddOptions builder with validation
+builder.Services.AddOptions<SmtpSettings>()
+    .BindConfiguration("Smtp")
+    .ValidateDataAnnotations()        // validates [Required], [Range], etc.
+    .ValidateOnStart();               // fail fast — throw at startup, not first use
+```
+
+---
+
+### Q83. How do you use IOptions<T>, IOptionsSnapshot<T>, and IOptionsMonitor<T> in practice?
+
+**IOptions<T> — singleton, reads once:**
+```csharp
+public class EmailService {
+    private readonly SmtpSettings _smtp;
+
+    // Inject IOptions<T> in constructor
+    public EmailService(IOptions<SmtpSettings> options) {
+        _smtp = options.Value;   // .Value returns the T instance
+    }
+
+    public async Task SendAsync(string to, string subject, string body) {
+        using var client = new SmtpClient(_smtp.Host, _smtp.Port);
+        client.EnableSsl = _smtp.UseSsl;
+        await client.SendMailAsync(_smtp.From, to, subject, body);
+    }
+}
+```
+
+**IOptionsSnapshot<T> — scoped, re-reads per request:**
+```csharp
+// Best for controllers and scoped services — reflects config file changes per request
+[ApiController]
+[Route("api/[controller]")]
+public class UploadController : ControllerBase {
+    private readonly FeatureFlags _flags;
+
+    public UploadController(IOptionsSnapshot<FeatureFlags> snapshot) {
+        _flags = snapshot.Value;   // fresh value every request
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Upload(IFormFile file) {
+        if (file.Length > _flags.MaxUploadMb * 1024 * 1024)
+            return BadRequest($"Max upload size is {_flags.MaxUploadMb} MB");
+        // ...
+        return Ok();
+    }
+}
+```
+
+**IOptionsMonitor<T> — singleton with live change notification:**
+```csharp
+// Best for background services (IHostedService) — singletons that need live config
+public class NotificationWorker : BackgroundService {
+    private readonly IOptionsMonitor<SmtpSettings> _monitor;
+    private SmtpSettings _current;
+
+    public NotificationWorker(IOptionsMonitor<SmtpSettings> monitor) {
+        _monitor = monitor;
+        _current = monitor.CurrentValue;
+
+        // Subscribe to changes — callback fires when config reloads
+        _monitor.OnChange(updated => {
+            _current = updated;
+            Console.WriteLine($"SMTP config reloaded — new host: {updated.Host}");
+        });
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken ct) {
+        while (!ct.IsCancellationRequested) {
+            // always uses the latest _current
+            await SendPendingNotificationsAsync(_current, ct);
+            await Task.Delay(TimeSpan.FromMinutes(1), ct);
+        }
+    }
+}
+```
+
+---
+
+### Q84. What are named options and when are they useful?
+
+Named options let you register multiple configurations of the same type — for example, two different SMTP providers.
+
+```json
+// appsettings.json
+{
+  "Smtp": {
+    "Transactional": { "Host": "smtp.sendgrid.net", "Port": 587, "From": "tx@app.com" },
+    "Marketing":     { "Host": "smtp.mailchimp.com", "Port": 587, "From": "news@app.com" }
+  }
+}
+```
+
+**Registration:**
+```csharp
+builder.Services.Configure<SmtpSettings>("Transactional",
+    builder.Configuration.GetSection("Smtp:Transactional"));
+
+builder.Services.Configure<SmtpSettings>("Marketing",
+    builder.Configuration.GetSection("Smtp:Marketing"));
+```
+
+**Usage with IOptionsMonitor<T> (named options require IOptionsMonitor or IOptionsSnapshot):**
+```csharp
+public class EmailDispatcher {
+    private readonly IOptionsMonitor<SmtpSettings> _monitor;
+
+    public EmailDispatcher(IOptionsMonitor<SmtpSettings> monitor) {
+        _monitor = monitor;
+    }
+
+    public SmtpSettings GetSettings(EmailType type) =>
+        type == EmailType.Marketing
+            ? _monitor.Get("Marketing")
+            : _monitor.Get("Transactional");
+}
+```
+
+> `IOptions<T>` only supports the default (unnamed) instance. Use `IOptionsMonitor<T>` or `IOptionsSnapshot<T>` to retrieve named instances via `.Get("name")`.
+
+---
+
+### Q85. How do you validate options at startup?
+
+```csharp
+public class SmtpSettings {
+    [Required]
+    public string Host { get; set; } = "";
+
+    [Range(1, 65535)]
+    public int Port { get; set; }
+
+    [Required, EmailAddress]
+    public string From { get; set; } = "";
+}
+
+// Program.cs
+builder.Services.AddOptions<SmtpSettings>()
+    .BindConfiguration("Smtp")
+    .ValidateDataAnnotations()   // enforce [Required], [Range], etc.
+    .ValidateOnStart();          // throw OptionsValidationException at startup
+
+// Custom validation via IValidateOptions<T>
+public class SmtpSettingsValidator : IValidateOptions<SmtpSettings> {
+    public ValidateOptionsResult Validate(string? name, SmtpSettings options) {
+        if (options.Port == 25 && options.UseSsl)
+            return ValidateOptionsResult.Fail("Port 25 cannot use SSL.");
+        return ValidateOptionsResult.Success;
+    }
+}
+builder.Services.AddSingleton<IValidateOptions<SmtpSettings>, SmtpSettingsValidator>();
+```
+
+---
+
+### Q86. What is the difference between IConfiguration and the Options pattern?
+
+| | `IConfiguration` | Options pattern (`IOptions<T>`) |
+|---|---|---|
+| **Type safety** | Strings only | Strongly typed POCO |
+| **Change detection** | Manual `.GetReloadToken()` | Built-in via `IOptionsMonitor<T>` |
+| **Validation** | None | Data annotations + custom validators |
+| **Testability** | Requires `IConfiguration` mock | Just pass the POCO directly |
+| **Best for** | Infrastructure / bootstrapping code | Application-level settings |
+
+```csharp
+// ❌ Avoid — stringly-typed, no validation
+var host = _config["Smtp:Host"];
+
+// ✅ Prefer — typed, validated, testable
+var host = _smtpSettings.Host;
+```

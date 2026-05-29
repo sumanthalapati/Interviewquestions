@@ -3867,3 +3867,370 @@ bool match = DatePattern().IsMatch("2026-05-29"); // zero first-call cost
 
 ---
 
+---
+
+# 14. Blazor
+
+Blazor is Microsoft's framework for building interactive web UIs with C# instead of JavaScript. It compiles Razor components (`.razor` files) and runs them either on the server or in the browser via WebAssembly.
+
+## Hosting Models
+
+### Q1 — What are the Blazor hosting models and their trade-offs?
+
+| Model | Where C# runs | Network round-trip | File size | Offline support |
+|---|---|---|---|---|
+| **Blazor Server** | ASP.NET Core server | Yes — SignalR for each UI event | Tiny (only HTML+JS shell) | No |
+| **Blazor WebAssembly (WASM)** | Browser via WASM | No (after initial download) | Large (runtime + app DLLs) | Yes |
+| **Blazor United / Auto (SSR + WASM)** | Server first, then WASM | Hybrid | Medium (progressive) | Partial |
+
+**Blazor Server** — DOM diffs are computed on the server and streamed over SignalR. Fast first paint but requires persistent connection; latency matters for interactive apps.
+
+**Blazor WASM** — .NET runtime is downloaded once and runs in the browser. True SPA: no server required after load. Slower initial load, but great for offline and static hosting (Azure Static Web Apps, GitHub Pages).
+
+---
+
+### Q2 — What is a Razor component and how is it structured?
+
+A `.razor` file combines HTML markup and C# in a single file:
+
+```razor
+@* Counter.razor *@
+@page "/counter"
+
+<h1>Counter</h1>
+<p>Current count: @currentCount</p>
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+
+@code {
+    private int currentCount = 0;
+
+    private void IncrementCount() {
+        currentCount++;
+    }
+}
+```
+
+Key directives:
+- `@page "/route"` — makes the component routable
+- `@code { }` — C# members (fields, properties, methods, lifecycle)
+- `@onclick`, `@onchange`, `@oninput` — DOM event bindings
+- `@bind` — two-way data binding
+
+---
+
+### Q3 — What are component parameters and cascading parameters?
+
+**Parameters** — data passed from parent to child:
+```razor
+@* ChildComponent.razor *@
+<p>Hello, @Name! You are @Age years old.</p>
+
+@code {
+    [Parameter] public string Name { get; set; } = "";
+    [Parameter] public int    Age  { get; set; }
+
+    // Fires when any parameter changes — override for side effects
+    protected override void OnParametersSet() {
+        // react to new Name/Age values
+    }
+}
+```
+
+```razor
+@* Parent usage *@
+<ChildComponent Name="Alice" Age="30" />
+```
+
+**Cascading parameters** — data passed through the component tree without explicit prop-drilling:
+```razor
+@* CascadingTheme.razor — provider *@
+<CascadingValue Value="@theme">
+    @ChildContent
+</CascadingValue>
+
+@code {
+    private AppTheme theme = new AppTheme { PrimaryColor = "#0078d4" };
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}
+```
+
+```razor
+@* DeepChild.razor — consumer (any depth) *@
+@code {
+    [CascadingParameter] public AppTheme Theme { get; set; } = default!;
+}
+```
+
+---
+
+### Q4 — What is the Blazor component lifecycle?
+
+```csharp
+// Execution order for first render:
+// 1. SetParametersAsync  — called before any lifecycle methods
+// 2. OnInitialized(Async) — called once after first render init
+// 3. OnParametersSet(Async) — called after parameters assigned (also on updates)
+// 4. OnAfterRender(Async) — called after DOM is updated (firstRender = true on first call)
+// 5. Dispose / DisposeAsync — if component implements IDisposable
+
+@implements IDisposable
+
+@code {
+    private Timer? _timer;
+
+    protected override async Task OnInitializedAsync() {
+        // safe to call services, load data
+        await LoadDataAsync();
+    }
+
+    protected override void OnAfterRender(bool firstRender) {
+        if (firstRender) {
+            // safe to call JS interop — DOM is ready
+            _timer = new Timer(_ => InvokeAsync(StateHasChanged), null, 0, 1000);
+        }
+    }
+
+    public void Dispose() {
+        _timer?.Dispose();
+    }
+}
+```
+
+---
+
+### Q5 — How does data binding work in Blazor?
+
+**One-way binding** — expression value to DOM:
+```razor
+<p>@message</p>
+<input value="@message" />
+```
+
+**Two-way binding** with `@bind`:
+```razor
+<input @bind="message" />            @* binds on 'change' event by default *@
+<input @bind="message" @bind:event="oninput" />  @* binds on every keystroke *@
+```
+
+**Event callbacks** for child-to-parent communication:
+```razor
+@* Child *@
+<button @onclick="() => OnClick.InvokeAsync(42)">Send</button>
+
+@code {
+    [Parameter] public EventCallback<int> OnClick { get; set; }
+}
+```
+
+```razor
+@* Parent *@
+<ChildBtn OnClick="HandleClick" />
+
+@code {
+    private void HandleClick(int value) => Console.WriteLine(value);
+}
+```
+
+---
+
+### Q6 — How does JavaScript interop work in Blazor?
+
+Blazor can call JS from C# and vice versa using `IJSRuntime`:
+
+**C# → JS:**
+```csharp
+@inject IJSRuntime JS
+
+protected override async Task OnAfterRenderAsync(bool firstRender) {
+    if (firstRender) {
+        await JS.InvokeVoidAsync("console.log", "Blazor mounted");
+        var width = await JS.InvokeAsync<int>("getWindowWidth");
+    }
+}
+```
+
+```javascript
+// wwwroot/app.js
+window.getWindowWidth = () => window.innerWidth;
+```
+
+**JS → C# (call .NET method from JS):**
+```csharp
+// Mark method as callable from JS
+[JSInvokable]
+public static string GetGreeting(string name) => $"Hello, {name}!";
+
+// For instance methods, pass a DotNetObjectReference
+var objRef = DotNetObjectReference.Create(this);
+await JS.InvokeVoidAsync("registerCallback", objRef);
+```
+
+```javascript
+// JS side
+async function registerCallback(dotnetObj) {
+    const result = await dotnetObj.invokeMethodAsync('GetGreeting', 'World');
+    console.log(result);
+}
+```
+
+---
+
+### Q7 — How do you handle forms and validation in Blazor?
+
+Blazor integrates with `DataAnnotations` via `EditForm`:
+
+```razor
+<EditForm Model="@loginModel" OnValidSubmit="HandleSubmit">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div>
+        <label>Email</label>
+        <InputText @bind-Value="loginModel.Email" />
+        <ValidationMessage For="() => loginModel.Email" />
+    </div>
+    <div>
+        <label>Password</label>
+        <InputText type="password" @bind-Value="loginModel.Password" />
+        <ValidationMessage For="() => loginModel.Password" />
+    </div>
+
+    <button type="submit">Login</button>
+</EditForm>
+
+@code {
+    private LoginModel loginModel = new();
+
+    private async Task HandleSubmit() {
+        // Only fires when model is valid
+        await AuthService.LoginAsync(loginModel.Email, loginModel.Password);
+    }
+
+    public class LoginModel {
+        [Required, EmailAddress]
+        public string Email    { get; set; } = "";
+
+        [Required, MinLength(8)]
+        public string Password { get; set; } = "";
+    }
+}
+```
+
+Built-in input components: `InputText`, `InputNumber<T>`, `InputDate<T>`, `InputCheckbox`, `InputSelect<T>`, `InputTextArea`, `InputRadioGroup<T>`.
+
+---
+
+### Q8 — How does Blazor handle state management?
+
+**Component state** — private fields/properties in `@code`. Call `StateHasChanged()` after async operations to trigger re-render.
+
+**Cascading state** — use `CascadingValue` / `CascadingParameter` for tree-wide state (e.g., theme, auth user).
+
+**AppState service** — singleton or scoped service shared via DI:
+```csharp
+// Scoped in Blazor Server (per circuit), Singleton in WASM
+public class AppState {
+    private int _count;
+    public event Action? OnChange;
+
+    public int Count {
+        get => _count;
+        set { _count = value; NotifyStateChanged(); }
+    }
+
+    private void NotifyStateChanged() => OnChange?.Invoke();
+}
+```
+
+```razor
+@inject AppState State
+@implements IDisposable
+
+<p>Shared count: @State.Count</p>
+
+@code {
+    protected override void OnInitialized() =>
+        State.OnChange += StateHasChanged;
+
+    public void Dispose() =>
+        State.OnChange -= StateHasChanged;
+}
+```
+
+**Fluxor / Blazor-State** — Redux-like state management libraries for larger apps.
+
+---
+
+### Q9 — What is the difference between Blazor Server and Blazor WASM authentication?
+
+**Blazor Server** — uses ASP.NET Core authentication (cookies, JWT, Identity). The `AuthenticationState` is available via `CascadingAuthenticationState`:
+```razor
+<AuthorizeView>
+    <Authorized>
+        <p>Welcome, @context.User.Identity?.Name!</p>
+    </Authorized>
+    <NotAuthorized>
+        <p>Please <a href="/login">log in</a>.</p>
+    </NotAuthorized>
+</AuthorizeView>
+
+@* Or attribute on routable component *@
+@attribute [Authorize(Roles = "Admin")]
+```
+
+**Blazor WASM** — uses `AuthenticationStateProvider`. Common approach is `Microsoft.AspNetCore.Components.WebAssembly.Authentication` (OIDC / OAuth2 with MSAL or IdentityServer):
+```csharp
+// Inject into component
+@inject IAccessTokenProvider TokenProvider
+
+var tokenResult = await TokenProvider.RequestAccessToken();
+if (tokenResult.TryGetToken(out var token))
+    httpClient.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Bearer", token.Value);
+```
+
+---
+
+### Q10 — How do you optimize Blazor performance?
+
+**Virtualization** — render only visible items:
+```razor
+<Virtualize Items="@largeList" Context="item">
+    <ItemContent>
+        <div>@item.Name</div>
+    </ItemContent>
+</Virtualize>
+```
+
+**Lazy loading** — load assemblies on demand (WASM):
+```csharp
+// Program.cs (WASM)
+builder.Services.AddLazyAssemblyLoader();
+
+// Router.razor
+<Router AppAssembly="typeof(App).Assembly"
+        AdditionalAssemblies="lazyLoadedAssemblies"
+        OnNavigateAsync="OnNavigateAsync">
+```
+
+**ShouldRender override** — skip unnecessary re-renders:
+```csharp
+protected override bool ShouldRender() => _hasDataChanged;
+```
+
+**`@key` directive** — helps the diffing algorithm reuse DOM elements:
+```razor
+@foreach (var item in items) {
+    <ListItem @key="item.Id" Item="item" />
+}
+```
+
+**Ahead-of-Time (AOT) compilation for WASM** — add to `.csproj`:
+```xml
+<PropertyGroup>
+    <RunAOTCompilation>true</RunAOTCompilation>
+</PropertyGroup>
+```
+AOT improves runtime performance at the cost of larger download size and longer publish time.
+
+---
