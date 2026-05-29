@@ -791,3 +791,842 @@ public class TokenBucketRateLimiter {
     }
 }
 ```
+
+---
+
+# 8. Design Patterns — Structural (Extended)
+
+> 📚 Reference: https://refactoring.guru/design-patterns/structural-patterns
+
+---
+
+## 8.1 Adapter Pattern
+
+### Q17. When do you use the Adapter pattern and how do you implement it?
+
+**Answer:**
+Adapter bridges an incompatible interface to the one your code expects — like a plug adapter. Use it when integrating a third-party library or legacy code whose interface you can't change. The adapter wraps the adaptee and translates calls.
+
+❌ **Wrong — directly coupling business logic to a third-party SDK's interface:**
+```csharp
+public class PaymentService {
+    // Directly calls Stripe SDK — if you ever switch to PayPal, rewrite everything
+    public void Charge(decimal amount) {
+        var stripe = new StripeClient("sk_test_...");
+        var options = new ChargeCreateOptions { Amount = (long)(amount * 100), Currency = "usd" };
+        new ChargeService(stripe).Create(options);
+    }
+}
+```
+
+✅ **Correct — adapter wraps the third-party SDK behind your own interface:**
+```csharp
+public interface IPaymentGateway {
+    Task<PaymentResult> ChargeAsync(decimal amount, string currency, string token);
+}
+
+// Adapter: wraps Stripe behind IPaymentGateway
+public class StripePaymentAdapter : IPaymentGateway {
+    private readonly ChargeService _chargeService;
+    public StripePaymentAdapter(StripeClient client) => _chargeService = new ChargeService(client);
+
+    public async Task<PaymentResult> ChargeAsync(decimal amount, string currency, string token) {
+        var charge = await _chargeService.CreateAsync(new ChargeCreateOptions {
+            Amount = (long)(amount * 100), Currency = currency, Source = token
+        });
+        return new PaymentResult(charge.Id, charge.Status == "succeeded");
+    }
+}
+
+// PayPal tomorrow? Add PayPalPaymentAdapter : IPaymentGateway — zero changes to PaymentService
+```
+
+---
+
+## 8.2 Facade Pattern
+
+### Q18. What is the Facade pattern and what problem does it solve?
+
+**Answer:**
+A Facade provides a single simplified interface over a complex subsystem of many classes. The caller doesn't need to know how the subsystem works — the facade coordinates the parts. Used in service layers, SDKs, and domain orchestrators.
+
+❌ **Wrong — client wires together multiple subsystem classes directly (tight coupling, duplicated orchestration):**
+```csharp
+// In every controller action that processes an order:
+var inventory = new InventoryService();
+inventory.Reserve(order.Items);
+var payment = new PaymentGateway();
+payment.Charge(order.Total, order.PaymentToken);
+var shipping = new ShippingService();
+shipping.CreateShipment(order);
+var email = new EmailService();
+email.SendOrderConfirmation(order);
+// This 4-step sequence duplicated everywhere it's needed
+```
+
+✅ **Correct — Facade coordinates the subsystem, clients call one method:**
+```csharp
+public class OrderFacade {
+    private readonly IInventoryService _inventory;
+    private readonly IPaymentGateway _payment;
+    private readonly IShippingService _shipping;
+    private readonly IEmailService _email;
+
+    public OrderFacade(IInventoryService inv, IPaymentGateway pay,
+                       IShippingService ship, IEmailService email) {
+        _inventory = inv; _payment = pay; _shipping = ship; _email = email;
+    }
+
+    public async Task<OrderResult> PlaceOrderAsync(Order order) {
+        await _inventory.ReserveAsync(order.Items);
+        var payment = await _payment.ChargeAsync(order.Total, order.PaymentToken);
+        var shipment = await _shipping.CreateShipmentAsync(order);
+        await _email.SendConfirmationAsync(order, shipment.TrackingNumber);
+        return new OrderResult(payment.TransactionId, shipment.TrackingNumber);
+    }
+}
+// Controller just calls: await _orderFacade.PlaceOrderAsync(order);
+```
+
+---
+
+## 8.3 Proxy Pattern
+
+### Q19. What are the types of Proxy and when do you use each?
+
+**Answer:**
+A Proxy controls access to another object. Three common types: Virtual Proxy (lazy initialization — create expensive object only when needed), Protection Proxy (access control), Remote Proxy (local representative for a remote service). In .NET, `DispatchProxy` and source generators enable compile-time proxies.
+
+❌ **Wrong — eagerly loading a heavy resource even when it may never be used:**
+```csharp
+public class ReportService {
+    private readonly HeavyReportGenerator _generator = new HeavyReportGenerator();
+    // Loads 500MB of historical data in constructor — always, even if no report is needed today
+}
+```
+
+✅ **Correct — Virtual Proxy with lazy initialization:**
+```csharp
+public interface IReportGenerator { Report Generate(DateTime from, DateTime to); }
+
+public class LazyReportProxy : IReportGenerator {
+    private HeavyReportGenerator? _real;
+    private readonly object _lock = new();
+
+    public Report Generate(DateTime from, DateTime to) {
+        if (_real == null) {
+            lock (_lock) {
+                _real ??= new HeavyReportGenerator(); // load only when first needed
+            }
+        }
+        return _real.Generate(from, to);
+    }
+}
+```
+
+---
+
+## 8.4 Abstract Factory Pattern
+
+### Q20. How does Abstract Factory differ from Factory Method?
+
+**Answer:**
+Factory Method creates one product via a virtual method; subclasses decide the concrete type. Abstract Factory creates a *family* of related products through an interface with multiple factory methods. Use it when products must be used together and you want to enforce compatibility.
+
+❌ **Wrong — mixing UI components from different themes (incompatible family):**
+```csharp
+var button = new WindowsButton();   // Windows
+var textBox = new MacTextBox();     // Mac — inconsistent UI family!
+var dialog = new LinuxDialog();     // Linux — visual chaos
+```
+
+✅ **Correct — Abstract Factory enforces a consistent family:**
+```csharp
+public interface IUIFactory {
+    IButton CreateButton();
+    ITextBox CreateTextBox();
+    IDialog CreateDialog();
+}
+
+public class WindowsUIFactory : IUIFactory {
+    public IButton  CreateButton()  => new WindowsButton();
+    public ITextBox CreateTextBox() => new WindowsTextBox();
+    public IDialog  CreateDialog()  => new WindowsDialog();
+}
+
+public class MacUIFactory : IUIFactory {
+    public IButton  CreateButton()  => new MacButton();
+    public ITextBox CreateTextBox() => new MacTextBox();
+    public IDialog  CreateDialog()  => new MacDialog();
+}
+
+public class Application {
+    private readonly IUIFactory _factory;
+    public Application(IUIFactory factory) => _factory = factory;
+
+    public void BuildUI() {
+        var button  = _factory.CreateButton();   // always compatible family
+        var textBox = _factory.CreateTextBox();
+        var dialog  = _factory.CreateDialog();
+    }
+}
+```
+
+---
+
+# 9. Design Patterns — Behavioral (Extended)
+
+> 📚 Reference: https://refactoring.guru/design-patterns/behavioral-patterns
+
+---
+
+## 9.1 Command Pattern
+
+### Q21. What is the Command pattern and when is it useful?
+
+**Answer:**
+A Command encapsulates a request as an object, decoupling sender from receiver. Enables undo/redo, queuing, logging, and macro commands. Each command implements an `Execute()` (and optionally `Undo()`) method.
+
+❌ **Wrong — action logic hardcoded in the invoker (editor directly manipulates text):**
+```csharp
+public class TextEditor {
+    public string Text = "";
+    public void Bold()   { Text = $"<b>{Text}</b>"; }
+    public void Italic() { Text = $"<i>{Text}</i>"; }
+    // Undo is impossible — no history of what was done
+}
+```
+
+✅ **Correct — commands with undo support:**
+```csharp
+public interface ICommand { void Execute(); void Undo(); }
+
+public class BoldCommand : ICommand {
+    private readonly TextEditor _editor;
+    private string _previousText = "";
+    public BoldCommand(TextEditor e) => _editor = e;
+    public void Execute() { _previousText = _editor.Text; _editor.Text = $"<b>{_editor.Text}</b>"; }
+    public void Undo()    { _editor.Text = _previousText; }
+}
+
+public class CommandHistory {
+    private readonly Stack<ICommand> _history = new();
+    public void Execute(ICommand cmd) { cmd.Execute(); _history.Push(cmd); }
+    public void Undo() { if (_history.Count > 0) _history.Pop().Undo(); }
+}
+```
+
+---
+
+## 9.2 Chain of Responsibility
+
+### Q22. What is the Chain of Responsibility pattern? Give a real-world .NET example.
+
+**Answer:**
+Each handler in a chain either processes a request or passes it to the next handler. Decouples request senders from receivers. ASP.NET Core middleware is a classic CoR implementation.
+
+❌ **Wrong — all validation logic in one monolithic method, impossible to extend:**
+```csharp
+public ValidationResult Validate(Order order) {
+    if (order.Items.Count == 0) return ValidationResult.Fail("No items");
+    if (order.Total <= 0) return ValidationResult.Fail("Invalid total");
+    if (!_inventory.IsAvailable(order)) return ValidationResult.Fail("Out of stock");
+    if (!_fraud.IsLegitimate(order)) return ValidationResult.Fail("Fraud detected");
+    if (!_payment.CanCharge(order)) return ValidationResult.Fail("Payment declined");
+    return ValidationResult.Ok();
+    // Adding a new check means editing this method
+}
+```
+
+✅ **Correct — chain of independent handlers:**
+```csharp
+public abstract class OrderHandler {
+    private OrderHandler? _next;
+    public OrderHandler SetNext(OrderHandler next) { _next = next; return next; }
+    public virtual ValidationResult Handle(Order order) =>
+        _next?.Handle(order) ?? ValidationResult.Ok();
+}
+
+public class EmptyCartHandler : OrderHandler {
+    public override ValidationResult Handle(Order order) =>
+        order.Items.Count == 0 ? ValidationResult.Fail("No items") : base.Handle(order);
+}
+public class InventoryHandler : OrderHandler {
+    public override ValidationResult Handle(Order order) =>
+        !_inventory.IsAvailable(order) ? ValidationResult.Fail("Out of stock") : base.Handle(order);
+}
+public class FraudHandler : OrderHandler {
+    public override ValidationResult Handle(Order order) =>
+        !_fraud.IsLegitimate(order) ? ValidationResult.Fail("Fraud detected") : base.Handle(order);
+}
+
+// Wire the chain:
+var chain = new EmptyCartHandler();
+chain.SetNext(new InventoryHandler()).SetNext(new FraudHandler());
+var result = chain.Handle(order);
+```
+
+---
+
+## 9.3 State Pattern
+
+### Q23. How does the State pattern eliminate complex state-based conditionals?
+
+**Answer:**
+Each state is a class implementing a common interface. The context delegates behavior to the current state object. Transitioning = swapping the state object. Eliminates giant if/switch chains that check state.
+
+❌ **Wrong — switch on an enum in every method, grows forever:**
+```csharp
+public void Process(Order order) {
+    switch (order.Status) {
+        case OrderStatus.New:      HandleNew(order); break;
+        case OrderStatus.Paid:     HandlePaid(order); break;
+        case OrderStatus.Shipped:  HandleShipped(order); break;
+        case OrderStatus.Returned: HandleReturn(order); break;
+        // Every new status = edit every switch in the codebase
+    }
+}
+```
+
+✅ **Correct — each state handles its own behavior and transitions:**
+```csharp
+public interface IOrderState {
+    void Pay(OrderContext ctx);
+    void Ship(OrderContext ctx);
+    void Return(OrderContext ctx);
+}
+
+public class NewOrderState : IOrderState {
+    public void Pay(OrderContext ctx)    { ctx.SetState(new PaidOrderState()); }
+    public void Ship(OrderContext ctx)   => throw new InvalidOperationException("Pay first");
+    public void Return(OrderContext ctx) => throw new InvalidOperationException("Nothing to return");
+}
+
+public class PaidOrderState : IOrderState {
+    public void Pay(OrderContext ctx)    => throw new InvalidOperationException("Already paid");
+    public void Ship(OrderContext ctx)   { ctx.SetState(new ShippedOrderState()); }
+    public void Return(OrderContext ctx) { ctx.SetState(new RefundedOrderState()); }
+}
+
+public class OrderContext {
+    private IOrderState _state = new NewOrderState();
+    public void SetState(IOrderState s) => _state = s;
+    public void Pay()    => _state.Pay(this);
+    public void Ship()   => _state.Ship(this);
+    public void Return() => _state.Return(this);
+}
+```
+
+---
+
+## 9.4 Template Method Pattern
+
+### Q24. What is the Template Method pattern and when do you use it?
+
+**Answer:**
+Define the skeleton of an algorithm in a base class with abstract or virtual steps. Subclasses override specific steps without changing the overall structure. Use when multiple classes share the same algorithm flow but differ in specific steps.
+
+❌ **Wrong — duplicating the report-generation flow in every subclass:**
+```csharp
+public class PdfReporter {
+    public void Generate() {
+        var data = FetchData();     // same
+        var processed = Process(data); // same
+        // ... PDF-specific rendering
+        SaveToFile("report.pdf");   // same
+    }
+}
+public class ExcelReporter {
+    public void Generate() {
+        var data = FetchData();     // duplicated
+        var processed = Process(data); // duplicated
+        // ... Excel-specific rendering
+        SaveToFile("report.xlsx");  // duplicated
+    }
+}
+```
+
+✅ **Correct — base class owns the skeleton, subclasses fill in format-specific steps:**
+```csharp
+public abstract class ReportGenerator {
+    // Template method — the fixed skeleton
+    public void Generate() {
+        var data = FetchData();
+        var processed = ProcessData(data);
+        var content = RenderContent(processed);  // abstract step
+        var filename = GetFileName();            // abstract step
+        SaveToFile(content, filename);
+    }
+
+    protected abstract byte[] RenderContent(ProcessedData data);
+    protected abstract string GetFileName();
+
+    private RawData FetchData() { /* shared DB query */ return new(); }
+    private ProcessedData ProcessData(RawData d) { /* shared logic */ return new(); }
+    private void SaveToFile(byte[] content, string name) { File.WriteAllBytes(name, content); }
+}
+
+public class PdfReportGenerator : ReportGenerator {
+    protected override byte[] RenderContent(ProcessedData d) => PdfRenderer.Render(d);
+    protected override string GetFileName() => $"report_{DateTime.Now:yyyyMMdd}.pdf";
+}
+
+public class ExcelReportGenerator : ReportGenerator {
+    protected override byte[] RenderContent(ProcessedData d) => ExcelRenderer.Render(d);
+    protected override string GetFileName() => $"report_{DateTime.Now:yyyyMMdd}.xlsx";
+}
+```
+
+---
+
+# 10. LLD Design Problems (Extended)
+
+> 📚 Reference: https://github.com/prasadgujar/low-level-design-primer
+
+---
+
+## 10.1 Design an ATM Machine
+
+### Q25. Design an ATM system at the class level.
+
+**Answer:**
+Key classes: `ATM` (entry point, state machine), `Card`, `Account`, `Transaction`, `CashDispenser`, `ReceiptPrinter`. State pattern for ATM states (idle, card inserted, PIN entered, transaction in progress). Command pattern for transaction types.
+
+❌ **Wrong — monolithic ATM class with all logic and state in if/else chains:**
+```csharp
+public class ATM {
+    string _state = "idle";
+    public void InsertCard(Card c) { if (_state == "idle") _state = "card_inserted"; }
+    public void EnterPin(int pin)  { if (_state == "card_inserted") { /* inline auth */ _state = "authenticated"; } }
+    public void Withdraw(decimal amount) { if (_state == "authenticated") { /* inline cash logic */ } }
+    // One class doing auth, dispensing cash, printing receipts, state management
+}
+```
+
+✅ **Correct — separated responsibilities with state pattern:**
+```csharp
+// States
+public interface IATMState {
+    void InsertCard(ATMContext ctx, Card card);
+    void EnterPin(ATMContext ctx, int pin);
+    void SelectTransaction(ATMContext ctx, ITransaction tx);
+    void EjectCard(ATMContext ctx);
+}
+
+public class IdleState : IATMState {
+    public void InsertCard(ATMContext ctx, Card card) {
+        ctx.CurrentCard = card;
+        ctx.SetState(new CardInsertedState());
+    }
+    public void EnterPin(ATMContext ctx, int pin)         => ctx.DisplayMessage("Please insert card first");
+    public void SelectTransaction(ATMContext ctx, ITransaction tx) => ctx.DisplayMessage("Please insert card first");
+    public void EjectCard(ATMContext ctx)                 => ctx.DisplayMessage("No card inserted");
+}
+
+// Transactions (Command pattern)
+public interface ITransaction { TransactionResult Execute(Account account); }
+
+public class WithdrawTransaction : ITransaction {
+    private readonly decimal _amount;
+    private readonly CashDispenser _dispenser;
+    public WithdrawTransaction(decimal amount, CashDispenser dispenser) {
+        _amount = amount; _dispenser = dispenser;
+    }
+    public TransactionResult Execute(Account account) {
+        if (account.Balance < _amount) return TransactionResult.Fail("Insufficient funds");
+        account.Debit(_amount);
+        _dispenser.Dispense(_amount);
+        return TransactionResult.Success();
+    }
+}
+
+// Components
+public class CashDispenser {
+    private decimal _cashAvailable;
+    public void Dispense(decimal amount) {
+        if (_cashAvailable < amount) throw new InvalidOperationException("ATM out of cash");
+        _cashAvailable -= amount;
+        Console.WriteLine($"Dispensing ${amount}");
+    }
+}
+
+public class ATMContext {
+    public Card? CurrentCard { get; set; }
+    public Account? AuthenticatedAccount { get; set; }
+    private IATMState _state = new IdleState();
+    public void SetState(IATMState s) => _state = s;
+    public void DisplayMessage(string msg) => Console.WriteLine(msg);
+    public void InsertCard(Card c)        => _state.InsertCard(this, c);
+    public void EnterPin(int pin)         => _state.EnterPin(this, pin);
+    public void SelectTransaction(ITransaction tx) => _state.SelectTransaction(this, tx);
+}
+```
+
+---
+
+## 10.2 Design a Vending Machine
+
+### Q26. Design a Vending Machine at the class level.
+
+**Answer:**
+Key classes: `VendingMachine` (state machine), `Product`, `Inventory`, `Coin`/`Payment`, states (Idle, HasMoney, Dispensing). State pattern transitions on coin insert, product select, and dispense.
+
+❌ **Wrong — boolean flags and if-chains manage state, spaghetti logic:**
+```csharp
+public class VendingMachine {
+    bool _hasMoney, _productSelected;
+    decimal _insertedAmount;
+    public void InsertCoin(decimal c) { if (!_hasMoney) { _insertedAmount += c; _hasMoney = true; } }
+    public void SelectProduct(string id) { if (_hasMoney) _productSelected = true; }
+    public void Dispense() { if (_hasMoney && _productSelected) { /* dispense */ _hasMoney = _productSelected = false; } }
+}
+```
+
+✅ **Correct — state pattern with clean transitions:**
+```csharp
+public interface IVendingState {
+    void InsertMoney(VendingContext ctx, decimal amount);
+    void SelectProduct(VendingContext ctx, string productId);
+    void Dispense(VendingContext ctx);
+    void ReturnChange(VendingContext ctx);
+}
+
+public class IdleState : IVendingState {
+    public void InsertMoney(VendingContext ctx, decimal amount) {
+        ctx.InsertedAmount += amount;
+        ctx.Display($"Inserted: ${ctx.InsertedAmount}");
+        ctx.SetState(new HasMoneyState());
+    }
+    public void SelectProduct(VendingContext ctx, string id) => ctx.Display("Please insert money first");
+    public void Dispense(VendingContext ctx)                 => ctx.Display("Please insert money first");
+    public void ReturnChange(VendingContext ctx)             => ctx.Display("No money to return");
+}
+
+public class HasMoneyState : IVendingState {
+    public void InsertMoney(VendingContext ctx, decimal amount) { ctx.InsertedAmount += amount; ctx.Display($"Total: ${ctx.InsertedAmount}"); }
+    public void SelectProduct(VendingContext ctx, string productId) {
+        var product = ctx.Inventory.GetProduct(productId);
+        if (product == null)                        { ctx.Display("Product not found"); return; }
+        if (ctx.InsertedAmount < product.Price)     { ctx.Display($"Need ${product.Price - ctx.InsertedAmount} more"); return; }
+        if (!ctx.Inventory.IsAvailable(productId))  { ctx.Display("Out of stock"); return; }
+        ctx.SelectedProduct = product;
+        ctx.SetState(new DispensingState());
+        ctx.Dispense();
+    }
+    public void Dispense(VendingContext ctx)     => ctx.Display("Please select a product first");
+    public void ReturnChange(VendingContext ctx) { ctx.Display($"Returning ${ctx.InsertedAmount}"); ctx.InsertedAmount = 0; ctx.SetState(new IdleState()); }
+}
+
+public class DispensingState : IVendingState {
+    public void InsertMoney(VendingContext ctx, decimal a) => ctx.Display("Dispensing, please wait");
+    public void SelectProduct(VendingContext ctx, string id) => ctx.Display("Dispensing, please wait");
+    public void Dispense(VendingContext ctx) {
+        ctx.Inventory.Dispense(ctx.SelectedProduct!.Id);
+        decimal change = ctx.InsertedAmount - ctx.SelectedProduct.Price;
+        ctx.InsertedAmount = 0;
+        if (change > 0) ctx.Display($"Change: ${change}");
+        ctx.SetState(new IdleState());
+    }
+    public void ReturnChange(VendingContext ctx) => ctx.Display("Dispensing in progress");
+}
+
+public class VendingContext {
+    public decimal InsertedAmount { get; set; }
+    public Product? SelectedProduct { get; set; }
+    public Inventory Inventory { get; }
+    private IVendingState _state = new IdleState();
+    public VendingContext(Inventory inv) => Inventory = inv;
+    public void SetState(IVendingState s) => _state = s;
+    public void Display(string msg)       => Console.WriteLine(msg);
+    public void InsertMoney(decimal a)    => _state.InsertMoney(this, a);
+    public void SelectProduct(string id)  => _state.SelectProduct(this, id);
+    public void Dispense()                => _state.Dispense(this);
+    public void ReturnChange()            => _state.ReturnChange(this);
+}
+```
+
+---
+
+## 10.3 Design an Elevator System
+
+### Q27. Design an elevator system for a multi-floor building.
+
+**Answer:**
+Key classes: `ElevatorSystem`, `Elevator`, `ElevatorRequest`, `Scheduler` (dispatching algorithm). State per elevator: Idle, MovingUp, MovingDown, DoorsOpen. Scheduler selects the best elevator for each request.
+
+❌ **Wrong — single elevator, no scheduler, requests handled in arrival order:**
+```csharp
+public class Elevator {
+    Queue<int> _requests = new();
+    public void Request(int floor) { _requests.Enqueue(floor); }
+    public void Run() { while(_requests.Count > 0) MoveTo(_requests.Dequeue()); }
+    // No optimization, no multi-elevator support, ignores direction preference
+}
+```
+
+✅ **Correct — multi-elevator system with SCAN (elevator algorithm) scheduling:**
+```csharp
+public enum Direction { Up, Down, Idle }
+public enum ElevatorState { Idle, Moving, DoorsOpen }
+
+public class Elevator {
+    public int Id { get; }
+    public int CurrentFloor { get; private set; }
+    public Direction Direction { get; private set; } = Direction.Idle;
+    public ElevatorState State { get; private set; } = ElevatorState.Idle;
+    private readonly SortedSet<int> _upQueue   = new();
+    private readonly SortedSet<int> _downQueue = new(Comparer<int>.Create((a,b) => b-a));
+
+    public Elevator(int id, int startFloor) { Id = id; CurrentFloor = startFloor; }
+
+    public void AddRequest(int floor) {
+        if (floor >= CurrentFloor) _upQueue.Add(floor);
+        else _downQueue.Add(floor);
+    }
+
+    public async Task RunAsync(CancellationToken ct) {
+        while (!ct.IsCancellationRequested) {
+            if (_upQueue.Count > 0) {
+                Direction = Direction.Up;
+                foreach (int floor in _upQueue.ToList()) {
+                    await MoveToAsync(floor);
+                    _upQueue.Remove(floor);
+                }
+            } else if (_downQueue.Count > 0) {
+                Direction = Direction.Down;
+                foreach (int floor in _downQueue.ToList()) {
+                    await MoveToAsync(floor);
+                    _downQueue.Remove(floor);
+                }
+            } else {
+                Direction = Direction.Idle;
+                State = ElevatorState.Idle;
+                await Task.Delay(200, ct);
+            }
+        }
+    }
+
+    private async Task MoveToAsync(int floor) {
+        State = ElevatorState.Moving;
+        while (CurrentFloor != floor) {
+            CurrentFloor += CurrentFloor < floor ? 1 : -1;
+            await Task.Delay(500); // simulate movement
+        }
+        State = ElevatorState.DoorsOpen;
+        await Task.Delay(2000); // doors open
+        State = ElevatorState.Moving;
+    }
+}
+
+public class ElevatorScheduler {
+    private readonly List<Elevator> _elevators;
+
+    public ElevatorScheduler(int numElevators, int floors) {
+        _elevators = Enumerable.Range(0, numElevators)
+            .Select(i => new Elevator(i, 0)).ToList();
+    }
+
+    // SCAN: pick the elevator closest to the requested floor that's already moving in the right direction, else idle
+    public void RequestElevator(int floor, Direction dir) {
+        var best = _elevators
+            .Where(e => e.Direction == dir || e.Direction == Direction.Idle)
+            .OrderBy(e => Math.Abs(e.CurrentFloor - floor))
+            .FirstOrDefault()
+            ?? _elevators.OrderBy(e => Math.Abs(e.CurrentFloor - floor)).First();
+
+        best.AddRequest(floor);
+    }
+}
+```
+
+---
+
+## 10.4 Design an Online Shopping Cart
+
+### Q28. Design an online shopping cart and checkout system.
+
+**Answer:**
+Key classes: `Cart`, `CartItem`, `Product`, `PricingEngine` (discounts, coupons), `CheckoutService`, `Order`, `PaymentProcessor`, `InventoryService`. Use Strategy for pricing/discount rules. Observer for cart change events.
+
+❌ **Wrong — Cart class calculates pricing, applies discounts, processes payment, and updates inventory:**
+```csharp
+public class Cart {
+    public decimal Checkout(string couponCode, string paymentToken) {
+        decimal total = Items.Sum(i => i.Price * i.Qty);
+        if (couponCode == "SAVE10") total *= 0.9m;    // hardcoded discount
+        _db.Execute("UPDATE inventory ...");            // direct DB in domain object
+        _stripe.Charge(total, paymentToken);           // payment in domain object
+        return total;
+    }
+}
+```
+
+✅ **Correct — each concern is separated:**
+```csharp
+public class Cart {
+    public Guid Id { get; } = Guid.NewGuid();
+    public Guid UserId { get; }
+    private readonly List<CartItem> _items = new();
+    public IReadOnlyList<CartItem> Items => _items.AsReadOnly();
+
+    public void AddItem(Product product, int qty) {
+        var existing = _items.FirstOrDefault(i => i.ProductId == product.Id);
+        if (existing != null) existing.IncreaseQty(qty);
+        else _items.Add(new CartItem(product.Id, product.Name, product.Price, qty));
+    }
+    public void RemoveItem(Guid productId) => _items.RemoveAll(i => i.ProductId == productId);
+    public decimal Subtotal() => _items.Sum(i => i.Price * i.Qty);
+}
+
+public class PricingEngine {
+    private readonly IEnumerable<IDiscountStrategy> _strategies;
+    public PricingEngine(IEnumerable<IDiscountStrategy> strategies) => _strategies = strategies;
+
+    public PricingSummary Calculate(Cart cart, string? couponCode) {
+        decimal subtotal = cart.Subtotal();
+        decimal discount = _strategies
+            .Where(s => s.IsApplicable(cart, couponCode))
+            .Sum(s => s.CalculateDiscount(cart));
+        decimal tax = (subtotal - discount) * 0.08m;
+        return new PricingSummary(subtotal, discount, tax, subtotal - discount + tax);
+    }
+}
+
+public class CheckoutService {
+    private readonly IInventoryService _inventory;
+    private readonly IPaymentGateway _payment;
+    private readonly IOrderRepository _orders;
+    private readonly PricingEngine _pricing;
+
+    public async Task<Order> CheckoutAsync(Cart cart, string? coupon, string paymentToken) {
+        var summary = _pricing.Calculate(cart, coupon);
+        await _inventory.ReserveAsync(cart.Items);          // reserve before charging
+        var paymentResult = await _payment.ChargeAsync(summary.Total, paymentToken);
+        if (!paymentResult.Success) {
+            await _inventory.ReleaseAsync(cart.Items);       // rollback reservation
+            throw new PaymentFailedException(paymentResult.Error);
+        }
+        var order = Order.Create(cart, summary, paymentResult.TransactionId);
+        await _orders.AddAsync(order);
+        return order;
+    }
+}
+```
+
+---
+
+## 10.5 Design a Chess Game
+
+### Q29. Design a chess game at the class level.
+
+**Answer:**
+Key classes: `Board`, `Piece` (abstract, subclasses per piece type), `Square`, `Player`, `Game`, `Move`. Use polymorphism for piece move validation. Observer for check/checkmate detection.
+
+❌ **Wrong — giant switch statement for piece movement in one class:**
+```csharp
+public bool IsValidMove(string pieceType, int fromRow, int fromCol, int toRow, int toCol) {
+    switch (pieceType) {
+        case "Pawn":   /* pawn rules */ break;
+        case "Rook":   /* rook rules */ break;
+        case "Knight": /* knight rules */ break;
+        // All piece logic in one place — 300 line method
+    }
+}
+```
+
+✅ **Correct — each piece knows its own movement rules:**
+```csharp
+public enum Color { White, Black }
+public record Square(int Row, int Col) {
+    public bool IsValid => Row >= 0 && Row < 8 && Col >= 0 && Col < 8;
+}
+
+public abstract class Piece {
+    public Color Color { get; }
+    public Square Position { get; set; }
+    protected Piece(Color color, Square pos) { Color = color; Position = pos; }
+
+    public abstract IEnumerable<Square> GetValidMoves(Board board);
+
+    public bool CanMoveTo(Square target, Board board) =>
+        GetValidMoves(board).Contains(target);
+}
+
+public class Rook : Piece {
+    public Rook(Color color, Square pos) : base(color, pos) { }
+
+    public override IEnumerable<Square> GetValidMoves(Board board) {
+        var moves = new List<Square>();
+        int[][] directions = { new[]{1,0}, new[]{-1,0}, new[]{0,1}, new[]{0,-1} };
+        foreach (var dir in directions) {
+            int r = Position.Row + dir[0], c = Position.Col + dir[1];
+            while (new Square(r, c).IsValid) {
+                var sq = new Square(r, c);
+                var occupant = board.GetPiece(sq);
+                if (occupant == null)  { moves.Add(sq); }             // empty square
+                else { if (occupant.Color != Color) moves.Add(sq);    // capture
+                       break; }                                        // blocked
+                r += dir[0]; c += dir[1];
+            }
+        }
+        return moves;
+    }
+}
+
+public class Knight : Piece {
+    public Knight(Color color, Square pos) : base(color, pos) { }
+    public override IEnumerable<Square> GetValidMoves(Board board) {
+        int[][] offsets = { new[]{2,1},{2,-1},{-2,1},{-2,-1},{1,2},{1,-2},{-1,2},{-1,-2} };
+        return offsets
+            .Select(o => new Square(Position.Row + o[0], Position.Col + o[1]))
+            .Where(s => s.IsValid && (board.GetPiece(s)?.Color != Color));
+    }
+}
+
+public class Board {
+    private readonly Piece?[,] _grid = new Piece?[8, 8];
+
+    public Piece? GetPiece(Square sq) => _grid[sq.Row, sq.Col];
+    public void SetPiece(Piece? piece, Square sq) {
+        _grid[sq.Row, sq.Col] = piece;
+        if (piece != null) piece.Position = sq;
+    }
+    public void MovePiece(Square from, Square to) {
+        var piece = GetPiece(from) ?? throw new InvalidOperationException("No piece at source");
+        SetPiece(null, from);
+        SetPiece(piece, to);
+    }
+}
+
+public class Game {
+    public Board Board { get; } = new();
+    public Player[] Players { get; }
+    private int _turnIndex = 0;
+    public Player CurrentPlayer => Players[_turnIndex % 2];
+
+    public Game(Player white, Player black) => Players = new[] { white, black };
+
+    public MoveResult MakeMove(Square from, Square to) {
+        var piece = Board.GetPiece(from);
+        if (piece == null || piece.Color != CurrentPlayer.Color)
+            return MoveResult.Invalid("Not your piece");
+        if (!piece.CanMoveTo(to, Board))
+            return MoveResult.Invalid("Illegal move for this piece");
+
+        Board.MovePiece(from, to);
+        _turnIndex++;
+        return IsInCheck(CurrentPlayer.Color)
+            ? MoveResult.Check()
+            : MoveResult.Success();
+    }
+
+    private bool IsInCheck(Color color) {
+        var king = FindKing(color);
+        var opponent = color == Color.White ? Color.Black : Color.White;
+        return Board.AllPieces(opponent).Any(p => p.CanMoveTo(king.Position, Board));
+    }
+
+    private King FindKing(Color color) =>
+        Board.AllPieces(color).OfType<King>().First();
+}
+```

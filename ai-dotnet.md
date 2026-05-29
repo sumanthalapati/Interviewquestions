@@ -622,3 +622,403 @@ history.AddUserMessage($"[USER QUESTION]: {userQuestion}"); // clearly labeled
 // Optionally: validate response format with JSON schema if structured output expected
 var result = await chat.GetChatMessageContentAsync(history);
 ```
+
+---
+
+# 9. Prompt Engineering
+
+> 📚 Reference: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
+> 📚 OpenAI: https://platform.openai.com/docs/guides/prompt-engineering
+
+---
+
+## 9.1 Prompt Engineering Techniques
+
+### Q17. What are the key prompt engineering techniques and how do you apply them in .NET?
+
+**Answer:**
+Effective prompts are specific, provide context, use examples (few-shot), assign a role, and specify output format. In .NET with Semantic Kernel, use prompt templates with variables and handlebars syntax. Separate system instructions from user content. Always validate and sanitize before interpolating user input.
+
+❌ **Wrong — vague one-liner prompt, no format specification, no role:**
+```csharp
+var result = await kernel.InvokePromptAsync(
+    $"Analyze this: {userText}");
+// LLM doesn't know: format? length? audience? what kind of analysis?
+// Output unpredictable — sometimes a paragraph, sometimes a list, sometimes code
+```
+
+✅ **Correct — structured prompt with role, context, format, and examples:**
+```csharp
+var promptTemplate = """
+    You are a senior .NET code reviewer with 10+ years of experience.
+    
+    Review the following C# code snippet and provide feedback in this exact JSON format:
+    {
+      "issues": [{ "severity": "critical|major|minor", "line": <int>, "description": "<string>", "fix": "<string>" }],
+      "score": <int 1-10>,
+      "summary": "<2 sentence overall assessment>"
+    }
+    
+    Focus on: security vulnerabilities, performance anti-patterns, SOLID violations, and async/await misuse.
+    If no issues found, return an empty issues array.
+    
+    Code to review:
+    ```csharp
+    {{$code}}
+    ```
+    """;
+
+var function = kernel.CreateFunctionFromPrompt(promptTemplate,
+    new OpenAIPromptExecutionSettings {
+        ResponseFormat = "json_object", // force JSON mode
+        Temperature = 0.1              // low temp for consistent structured output
+    });
+
+var result = await kernel.InvokeAsync(function, new KernelArguments { ["code"] = userCode });
+var review = JsonSerializer.Deserialize<CodeReview>(result.ToString());
+```
+
+---
+
+## 9.2 Few-Shot Prompting
+
+### Q18. What is few-shot prompting and when does it outperform zero-shot?
+
+**Answer:**
+Few-shot prompting includes 2–5 input/output examples in the prompt to demonstrate the desired pattern. Particularly effective for: classification tasks, format adherence, tone matching, and domain-specific transformations where the task is hard to describe but easy to demonstrate.
+
+❌ **Wrong — zero-shot for a classification with nuanced business rules:**
+```csharp
+var prompt = $"Classify this support ticket as: billing, technical, account, or other.\nTicket: {ticket}";
+// LLM guesses based on general knowledge — misses business-specific classification rules
+// "My promo code doesn't work" → might classify as "billing" but your team calls it "account"
+```
+
+✅ **Correct — few-shot examples demonstrate the exact classification rules:**
+```csharp
+var prompt = $"""
+    Classify support tickets into exactly one category: billing, technical, account, or other.
+    
+    Examples:
+    Ticket: "I was charged twice for my subscription last month"
+    Category: billing
+    
+    Ticket: "The app crashes when I try to upload a file larger than 10MB"
+    Category: technical
+    
+    Ticket: "My promo code SAVE20 shows as invalid but I received it in email"
+    Category: account
+    
+    Ticket: "How do I export my data to CSV?"
+    Category: other
+    
+    Now classify:
+    Ticket: "{ticket}"
+    Category:""";
+// LLM has seen what your team considers "account" vs "billing" — follows the pattern
+```
+
+---
+
+## 9.3 Chain-of-Thought Prompting
+
+### Q19. What is Chain-of-Thought prompting and when should you use it?
+
+**Answer:**
+Chain-of-Thought (CoT) instructs the LLM to show its reasoning before giving a final answer. Dramatically improves accuracy on multi-step reasoning, math, logic, and complex decision-making tasks. Use "Let's think step by step" or provide step-by-step examples. For production, use structured reasoning with a final answer field to parse reliably.
+
+❌ **Wrong — asking for the answer directly on a reasoning-heavy task:**
+```csharp
+var prompt = $"Based on our refund policy, should we approve this refund request? Reply yes or no.\nRequest: {request}";
+// LLM jumps to conclusion without considering all policy rules
+// 30-40% error rate on edge cases vs. CoT
+```
+
+✅ **Correct — structured CoT with reasoning then conclusion:**
+```csharp
+var prompt = $"""
+    You are a refund policy specialist. Evaluate this refund request step by step.
+    
+    Refund Policy:
+    - Full refund within 30 days of purchase
+    - 50% refund between 31-60 days
+    - No refund after 60 days
+    - Exception: defective products always get full refund regardless of date
+    - Exception: fraud cases are escalated, not approved/denied here
+    
+    Request: {request}
+    
+    Reasoning: Think through each policy rule that applies.
+    Decision: (approve_full / approve_partial / deny / escalate)
+    Reason: One sentence explanation.
+    
+    Respond in JSON: {{"reasoning": "...", "decision": "...", "reason": "..."}}
+    """;
+```
+
+---
+
+# 10. Fine-Tuning vs RAG
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/fine-tuning-considerations
+
+---
+
+## 10.1 When to Use Fine-Tuning vs RAG
+
+### Q20. How do you decide between fine-tuning and RAG for a knowledge-based AI application?
+
+**Answer:**
+RAG retrieves relevant documents at query time and injects them as context — good for frequently updated knowledge, large knowledge bases, traceability (can cite sources), and when you need the model to answer from specific documents. Fine-tuning bakes knowledge into model weights during training — good for consistent style/format, specialized tone, and domain vocabulary. Most enterprise applications should start with RAG; only fine-tune when RAG's latency or context window limits are a real constraint.
+
+❌ **Wrong — fine-tuning for knowledge that changes weekly:**
+```
+Scenario: Customer support bot that needs to know current product pricing and policies
+Approach: Fine-tune GPT-4 on the product catalog and support docs
+
+Problems:
+- Pricing changes monthly → need to re-fine-tune monthly ($$$)
+- Fine-tuning doesn't guarantee perfect recall — model still hallucinates
+- Can't trace which document the answer came from
+- Latency/cost of fine-tuning: days + thousands of dollars per run
+```
+
+✅ **Correct — RAG for frequently updated knowledge, fine-tune for style:**
+```
+Scenario: Same customer support bot
+
+RAG approach:
+- Embed product docs, pricing pages, FAQs into Azure AI Search vector index
+- On each query: retrieve top-5 relevant chunks → inject as context → generate answer
+- When pricing changes: re-embed the updated document (minutes, not days)
+- Answer cites source document → traceable, auditable
+
+Fine-tune only for:
+- Consistent brand voice and tone (not knowledge — just style)
+- Domain-specific abbreviations/jargon ("SKU", "MRR", internal terms)
+- Format adherence (always use specific JSON schema)
+- These change rarely → fine-tune once, use for months
+
+Decision matrix:
+| Need                           | Use          |
+| Knowledge that changes often   | RAG          |
+| Large knowledge base (>100MB)  | RAG          |
+| Answer traceability/citations  | RAG          |
+| Consistent output format/style | Fine-tuning  |
+| Domain vocabulary/tone         | Fine-tuning  |
+| Reduce prompt length at scale  | Fine-tuning  |
+```
+
+---
+
+# 11. Local LLMs with Ollama
+
+> 📚 Reference: https://ollama.com/
+> 📚 .NET: https://github.com/microsoft/semantic-kernel/blob/main/dotnet/samples/Concepts/LocalModels
+
+---
+
+## 11.1 Running Local LLMs in .NET
+
+### Q21. How do you use a local LLM (Ollama) with Semantic Kernel for development or privacy-sensitive workloads?
+
+**Answer:**
+Ollama serves open-source models (Llama 3, Mistral, Phi-3, Gemma) locally via an OpenAI-compatible API. Use it in development to avoid API costs, or in production for air-gapped or privacy-sensitive environments. The same Semantic Kernel code works — just swap the endpoint.
+
+❌ **Wrong — hardcoding OpenAI/Azure endpoint, can't switch to local for dev/testing:**
+```csharp
+// Always hits OpenAI — runs up costs during development, can't test offline
+var kernel = Kernel.CreateBuilder()
+    .AddOpenAIChatCompletion("gpt-4o", Environment.GetEnvironmentVariable("OPENAI_KEY")!)
+    .Build();
+```
+
+✅ **Correct — environment-driven provider selection, local for dev, cloud for prod:**
+```csharp
+// Program.cs — switch providers via config
+var kernelBuilder = Kernel.CreateBuilder();
+
+if (builder.Environment.IsDevelopment()) {
+    // Local Ollama — free, no API key, runs on developer's machine
+    kernelBuilder.AddOpenAIChatCompletion(
+        modelId: "llama3.2",
+        apiKey: "ollama",            // Ollama ignores the key but SK requires non-null
+        endpoint: new Uri("http://localhost:11434/v1"));
+} else {
+    // Azure OpenAI in production
+    kernelBuilder.AddAzureOpenAIChatCompletion(
+        deploymentName: config["AzureOpenAI:Deployment"]!,
+        endpoint: config["AzureOpenAI:Endpoint"]!,
+        apiKey: config["AzureOpenAI:Key"]!);
+}
+
+var kernel = kernelBuilder.Build();
+// Rest of the code is identical — provider is transparent
+```
+
+---
+
+# 12. Structured Output & JSON Mode
+
+> 📚 Reference: https://platform.openai.com/docs/guides/structured-outputs
+> 📚 SK: https://learn.microsoft.com/en-us/semantic-kernel/concepts/ai-services/chat-completion/function-calling/
+
+---
+
+## 12.1 Reliable Structured Output
+
+### Q22. How do you reliably extract structured data from LLM responses in .NET?
+
+**Answer:**
+Use JSON mode (`ResponseFormat = "json_object"`) or Structured Outputs with a JSON Schema. In Semantic Kernel, use `kernel.InvokePromptAsync<T>()` to deserialize directly. Always validate the schema — LLMs occasionally hallucinate field names or miss required fields. Have a fallback retry or a default response.
+
+❌ **Wrong — parsing free-text response with string manipulation:**
+```csharp
+var result = await kernel.InvokePromptAsync("Extract name and age from: " + text);
+// Response: "The person's name is John and they are 30 years old."
+var name = result.ToString().Split("name is ")[1].Split(" ")[0]; // brittle!
+// Any variation in phrasing breaks the parser
+```
+
+✅ **Correct — JSON mode with schema validation and retry:**
+```csharp
+public record PersonInfo(string Name, int Age, string? Email);
+
+public async Task<PersonInfo?> ExtractPersonAsync(string text) {
+    var prompt = $"""
+        Extract person information from the text below.
+        Return ONLY valid JSON matching this schema exactly:
+        {{"name": "string", "age": number, "email": "string or null"}}
+        
+        Text: {text}
+        """;
+
+    var settings = new OpenAIPromptExecutionSettings {
+        ResponseFormat = "json_object",
+        Temperature = 0
+    };
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        try {
+            var result = await kernel.InvokePromptAsync(prompt, new KernelArguments(settings));
+            var person = JsonSerializer.Deserialize<PersonInfo>(result.ToString());
+            if (person?.Name is not null) return person;
+        } catch (JsonException ex) {
+            _logger.LogWarning(ex, "JSON parse failed on attempt {Attempt}", attempt + 1);
+        }
+    }
+    return null; // graceful fallback after 3 attempts
+}
+```
+
+---
+
+# 13. AI Evaluation (Evals)
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/ai-studio/concepts/evaluation-approach-gen-ai
+> 📚 Promptfoo: https://promptfoo.dev/
+
+---
+
+## 13.1 Evaluating LLM Application Quality
+
+### Q23. How do you measure and maintain quality in a production LLM application?
+
+**Answer:**
+LLM applications degrade silently when models are updated, prompts drift, or data changes. Evals are automated tests that measure quality on a golden dataset. Key metrics: groundedness (does the answer come from provided context?), relevance (does it answer the question?), coherence (is it readable?), and task-specific accuracy. Run evals in CI before deploying prompt changes.
+
+❌ **Wrong — testing only that the API returns 200 OK, no quality checks:**
+```csharp
+[Fact]
+public async Task ChatEndpoint_Returns200() {
+    var response = await _client.PostAsJsonAsync("/api/chat", new { message = "Hello" });
+    Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    // Tests that code runs — not that it returns a useful, accurate answer
+}
+```
+
+✅ **Correct — eval suite with golden dataset and LLM-as-judge scoring:**
+```csharp
+public class RagEvalTests {
+    private readonly EvalHarness _eval = new();
+
+    // Golden dataset: question + expected answer + source document
+    private static readonly EvalCase[] Cases = {
+        new("What is the refund policy?",
+            expectedKeywords: new[] { "30 days", "full refund" },
+            sourceDoc: "policy.pdf"),
+        new("How do I cancel my subscription?",
+            expectedKeywords: new[] { "account settings", "cancel" },
+            sourceDoc: "faq.pdf"),
+    };
+
+    [Theory, MemberData(nameof(Cases))]
+    public async Task RagAnswers_AreGrounded(EvalCase tc) {
+        var result = await _rag.AskAsync(tc.Question);
+
+        // 1. Groundedness: answer must come from the source document
+        Assert.True(result.Citations.Any(c => c.Source == tc.SourceDoc),
+            "Answer not grounded in source document");
+
+        // 2. Keyword coverage: expected facts present in answer
+        foreach (var kw in tc.ExpectedKeywords)
+            Assert.Contains(kw, result.Answer, StringComparison.OrdinalIgnoreCase);
+
+        // 3. LLM-as-judge: use a second LLM call to score relevance (0-5)
+        var score = await _eval.ScoreRelevanceAsync(tc.Question, result.Answer);
+        Assert.True(score >= 4, $"Relevance score {score}/5 below threshold for: {tc.Question}");
+    }
+}
+```
+
+---
+
+# 14. Azure AI Foundry & Model Catalog
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/ai-foundry/
+> 📚 Model catalog: https://learn.microsoft.com/en-us/azure/machine-learning/concept-model-catalog
+
+---
+
+## 14.1 Azure AI Foundry in Production
+
+### Q24. What does Azure AI Foundry provide and how does it fit into a production AI workflow?
+
+**Answer:**
+Azure AI Foundry (formerly Azure AI Studio) is the central hub for building, evaluating, and deploying AI applications on Azure. It provides: model catalog (GPT-4o, Llama 3, Phi-3, Mistral), prompt flow for visual pipeline building, built-in evals (groundedness, coherence, fluency), content safety integration, and managed inference endpoints. Use it as the deployment target for production RAG pipelines and Semantic Kernel applications.
+
+❌ **Wrong — deploying LLM apps with ad-hoc scripts, no monitoring or eval pipeline:**
+```
+Development: Prompt tested manually in ChatGPT
+Deployment: Copy prompt to production config file
+Monitoring: Check if errors appear in app logs
+Evaluation: "Seems to work" after manual testing of 5 questions
+
+Problems:
+- No regression detection when GPT-4o is updated
+- No groundedness metrics → hallucinations go undetected
+- No content safety → PII or harmful content may surface
+- No cost tracking per feature/user
+```
+
+✅ **Correct — AI Foundry for the full lifecycle:**
+```
+Development:
+  → Azure AI Foundry Playground: test prompts, compare models side-by-side
+  → Prompt Flow: build RAG pipeline visually, version-controlled
+
+Pre-deployment:
+  → Run built-in evals: groundedness, relevance, coherence against golden dataset
+  → Content Safety scan: auto-detect harmful outputs in eval set
+  → A/B test: compare GPT-4o vs GPT-4o-mini for cost vs quality tradeoff
+
+Deployment:
+  → Deploy to managed endpoint via Foundry
+  → Auto-scaling, PTU (provisioned throughput) for consistent latency
+
+Production monitoring:
+  → Azure Monitor: token usage, latency P50/P99, error rates
+  → Trace logging: every prompt/response logged with correlation IDs
+  → Continuous eval: 1% of production traffic scored by eval pipeline nightly
+  → Drift detection: alert if groundedness score drops >10% from baseline
+```

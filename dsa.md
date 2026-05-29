@@ -966,3 +966,876 @@ var list = new List<int>();
 for (int i = 0; i < n; i++) list.Add(i); // amortized O(1) per add
 int val = list[500]; // O(1) index access
 ```
+
+---
+
+# 11. Heap & Priority Queue
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/api/system.collections.generic.priorityqueue-2
+> 📚 Patterns: https://leetcode.com/explore/learn/card/heap/
+
+---
+
+## 11.1 K Largest / K Smallest Elements
+
+### Q25. How do you find the K largest elements in an array efficiently?
+
+**Answer:**
+Use a min-heap of size K. Iterate the array: push each element; if heap size exceeds K, pop the minimum. After processing, the heap contains the K largest. Time: O(n log K), Space: O(K). Far better than sorting the entire array O(n log n) when K << n.
+
+❌ **Wrong — sort the entire array just to get top K:**
+```csharp
+public int[] TopKElements(int[] nums, int k) {
+    Array.Sort(nums, (a, b) => b - a); // O(n log n) — overkill for small K
+    return nums.Take(k).ToArray();
+}
+```
+
+✅ **Correct — min-heap of size K, O(n log K):**
+```csharp
+public int[] TopKElements(int[] nums, int k) {
+    // PriorityQueue is a min-heap by default in .NET
+    var minHeap = new PriorityQueue<int, int>();
+    foreach (int num in nums) {
+        minHeap.Enqueue(num, num);
+        if (minHeap.Count > k) minHeap.Dequeue(); // remove smallest
+    }
+    return minHeap.UnorderedItems.Select(x => x.Element).ToArray();
+}
+```
+
+---
+
+## 11.2 Merge K Sorted Lists
+
+### Q26. How do you merge K sorted linked lists efficiently?
+
+**Answer:**
+Use a min-heap seeded with the head of each list. Pop the minimum, add it to the result, then push the next node from that list. Time: O(N log K) where N = total nodes, K = number of lists.
+
+❌ **Wrong — collect all values, sort, rebuild list — O(N log N) + O(N) space:**
+```csharp
+public ListNode MergeKLists(ListNode[] lists) {
+    var all = new List<int>();
+    foreach (var l in lists) { var n = l; while (n != null) { all.Add(n.val); n = n.next; } }
+    all.Sort();
+    var dummy = new ListNode(0); var cur = dummy;
+    foreach (var v in all) { cur.next = new ListNode(v); cur = cur.next; }
+    return dummy.next;
+}
+```
+
+✅ **Correct — min-heap on list heads, O(N log K):**
+```csharp
+public ListNode MergeKLists(ListNode[] lists) {
+    var heap = new PriorityQueue<ListNode, int>();
+    foreach (var node in lists)
+        if (node != null) heap.Enqueue(node, node.val);
+
+    var dummy = new ListNode(0);
+    var cur = dummy;
+    while (heap.Count > 0) {
+        var node = heap.Dequeue();
+        cur.next = node;
+        cur = cur.next;
+        if (node.next != null) heap.Enqueue(node.next, node.next.val);
+    }
+    return dummy.next;
+}
+```
+
+---
+
+## 11.3 K Closest Points to Origin
+
+### Q27. How do you find the K closest points to the origin?
+
+**Answer:**
+Use a max-heap of size K keyed by distance. When the heap exceeds K, evict the farthest point — leaving only the K closest. No need to compute actual square root (compare distance² to avoid floating point).
+
+❌ **Wrong — sort all points by distance, O(n log n):**
+```csharp
+public int[][] KClosest(int[][] points, int k) {
+    return points.OrderBy(p => p[0] * p[0] + p[1] * p[1]).Take(k).ToArray();
+}
+```
+
+✅ **Correct — max-heap of size K, O(n log K):**
+```csharp
+public int[][] KClosest(int[][] points, int k) {
+    // max-heap: negate distance so PriorityQueue (min-heap) acts as max-heap
+    var maxHeap = new PriorityQueue<int[], int>();
+    foreach (var p in points) {
+        int dist = p[0] * p[0] + p[1] * p[1];
+        maxHeap.Enqueue(p, -dist);       // negative = largest distance first
+        if (maxHeap.Count > k) maxHeap.Dequeue(); // remove farthest
+    }
+    return maxHeap.UnorderedItems.Select(x => x.Element).ToArray();
+}
+```
+
+---
+
+# 12. Trie (Prefix Tree)
+
+> 📚 Reference: https://leetcode.com/explore/learn/card/trie/
+> 📚 Use cases: autocomplete, spell-check, IP routing
+
+---
+
+## 12.1 Implement a Trie
+
+### Q28. How do you implement a Trie and what are its use cases?
+
+**Answer:**
+A Trie is a tree where each node represents a character. Used for prefix search, autocomplete, dictionary lookups. Insert and search are O(L) where L = word length, independent of dictionary size. Space: O(total characters across all words).
+
+❌ **Wrong — using a sorted list of strings for prefix search:**
+```csharp
+public class AutoComplete {
+    private List<string> _words = new();
+    public void Insert(string word) => _words.Add(word);
+    public List<string> StartsWith(string prefix) =>
+        _words.Where(w => w.StartsWith(prefix)).ToList(); // O(n × L) per query
+}
+```
+
+✅ **Correct — Trie with O(L) insert and search:**
+```csharp
+public class TrieNode {
+    public Dictionary<char, TrieNode> Children = new();
+    public bool IsEndOfWord = false;
+}
+
+public class Trie {
+    private readonly TrieNode _root = new();
+
+    public void Insert(string word) {
+        var node = _root;
+        foreach (char c in word) {
+            if (!node.Children.ContainsKey(c))
+                node.Children[c] = new TrieNode();
+            node = node.Children[c];
+        }
+        node.IsEndOfWord = true;
+    }
+
+    public bool Search(string word) {
+        var node = _root;
+        foreach (char c in word) {
+            if (!node.Children.ContainsKey(c)) return false;
+            node = node.Children[c];
+        }
+        return node.IsEndOfWord;
+    }
+
+    public bool StartsWith(string prefix) {
+        var node = _root;
+        foreach (char c in prefix) {
+            if (!node.Children.ContainsKey(c)) return false;
+            node = node.Children[c];
+        }
+        return true; // prefix exists
+    }
+}
+```
+
+---
+
+## 12.2 Word Search II (Trie + DFS)
+
+### Q29. How do you find all words from a dictionary that exist in a character board?
+
+**Answer:**
+Build a Trie from the word list. DFS from every cell on the board, following valid Trie paths. This prunes the search space — if no word starts with the current path prefix, stop exploring. Time: O(M × N × 4^L) but with aggressive pruning via Trie.
+
+❌ **Wrong — run separate DFS for every word in the dictionary:**
+```csharp
+// For each of W words, run a separate DFS over the entire M×N board
+// O(W × M × N × 4^L) — extremely slow for large dictionaries
+foreach (var word in words)
+    if (Exists(board, word)) result.Add(word);
+```
+
+✅ **Correct — single DFS pass guided by Trie:**
+```csharp
+public IList<string> FindWords(char[][] board, string[] words) {
+    var trie = new Trie();
+    foreach (var w in words) trie.Insert(w);
+
+    var result = new HashSet<string>();
+    int m = board.Length, n = board[0].Length;
+    var visited = new bool[m, n];
+
+    void Dfs(int r, int c, TrieNode node, StringBuilder path) {
+        if (r < 0 || r >= m || c < 0 || c >= n || visited[r, c]) return;
+        char ch = board[r][c];
+        if (!node.Children.ContainsKey(ch)) return; // prune — no word with this prefix
+
+        node = node.Children[ch];
+        path.Append(ch);
+        if (node.IsEndOfWord) result.Add(path.ToString());
+
+        visited[r, c] = true;
+        Dfs(r+1,c,node,path); Dfs(r-1,c,node,path);
+        Dfs(r,c+1,node,path); Dfs(r,c-1,node,path);
+        visited[r, c] = false;
+        path.Remove(path.Length - 1, 1);
+    }
+
+    for (int i = 0; i < m; i++)
+        for (int j = 0; j < n; j++)
+            Dfs(i, j, trie.Root, new StringBuilder());
+
+    return result.ToList();
+}
+```
+
+---
+
+# 13. Matrix / 2D Grid Problems
+
+> 📚 Reference: https://leetcode.com/explore/learn/card/queue-and-stack/
+> 📚 Patterns: flood fill, multi-source BFS, island counting
+
+---
+
+## 13.1 Number of Islands
+
+### Q30. How do you count connected regions (islands) in a grid?
+
+**Answer:**
+DFS or BFS from each unvisited land cell, marking all connected cells as visited. Each DFS call from a new unvisited land cell = one island. Time: O(M×N), Space: O(M×N) recursion stack.
+
+❌ **Wrong — count cells without marking visited, causing infinite loops:**
+```csharp
+public int NumIslands(char[][] grid) {
+    int count = 0;
+    for (int r = 0; r < grid.Length; r++)
+        for (int c = 0; c < grid[0].Length; c++)
+            if (grid[r][c] == '1') { count++; DFS(grid, r, c); }
+    return count;
+
+    void DFS(char[][] g, int r, int c) {
+        if (r<0||r>=g.Length||c<0||c>=g[0].Length||g[r][c]!='1') return;
+        // Missing: mark as visited before recursing → infinite loop on adjacent cells
+        DFS(g,r+1,c); DFS(g,r-1,c); DFS(g,r,c+1); DFS(g,r,c-1);
+    }
+}
+```
+
+✅ **Correct — mark visited by overwriting cell:**
+```csharp
+public int NumIslands(char[][] grid) {
+    int count = 0;
+    for (int r = 0; r < grid.Length; r++)
+        for (int c = 0; c < grid[0].Length; c++)
+            if (grid[r][c] == '1') { DFS(grid, r, c); count++; }
+    return count;
+}
+
+private void DFS(char[][] grid, int r, int c) {
+    if (r < 0 || r >= grid.Length || c < 0 || c >= grid[0].Length || grid[r][c] != '1') return;
+    grid[r][c] = '0'; // mark visited — avoids extra visited array
+    DFS(grid, r+1, c); DFS(grid, r-1, c);
+    DFS(grid, r, c+1); DFS(grid, r, c-1);
+}
+```
+
+---
+
+## 13.2 Shortest Path in Matrix (Multi-Source BFS)
+
+### Q31. How do you find the nearest zero for each cell in a binary matrix?
+
+**Answer:**
+Multi-source BFS: enqueue ALL zero cells simultaneously as the starting layer. BFS naturally propagates distances outward level by level. Time: O(M×N).
+
+❌ **Wrong — run BFS separately from each zero cell:**
+```csharp
+// For each '0' cell, run its own BFS to fill distances — O(M²×N²)
+for (int r = 0; r < m; r++)
+    for (int c = 0; c < n; c++)
+        if (mat[r][c] == 0) BfsFromCell(r, c, dist);
+```
+
+✅ **Correct — single multi-source BFS:**
+```csharp
+public int[][] UpdateMatrix(int[][] mat) {
+    int m = mat.Length, n = mat[0].Length;
+    int[][] dist = new int[m][];
+    for (int i = 0; i < m; i++) dist[i] = Enumerable.Repeat(int.MaxValue, n).ToArray();
+
+    var queue = new Queue<(int r, int c)>();
+    for (int r = 0; r < m; r++)
+        for (int c = 0; c < n; c++)
+            if (mat[r][c] == 0) { dist[r][c] = 0; queue.Enqueue((r, c)); }
+
+    int[][] dirs = { new[]{1,0}, new[]{-1,0}, new[]{0,1}, new[]{0,-1} };
+    while (queue.Count > 0) {
+        var (r, c) = queue.Dequeue();
+        foreach (var d in dirs) {
+            int nr = r + d[0], nc = c + d[1];
+            if (nr >= 0 && nr < m && nc >= 0 && nc < n && dist[nr][nc] > dist[r][c] + 1) {
+                dist[nr][nc] = dist[r][c] + 1;
+                queue.Enqueue((nr, nc));
+            }
+        }
+    }
+    return dist;
+}
+```
+
+---
+
+# 14. Merge Intervals
+
+> 📚 Reference: https://leetcode.com/problems/merge-intervals/
+> 📚 Pattern: sort + linear scan
+
+---
+
+## 14.1 Merge Overlapping Intervals
+
+### Q32. How do you merge all overlapping intervals?
+
+**Answer:**
+Sort by start time. Iterate: if the current interval overlaps with the last merged interval (current.start ≤ last.end), extend the last interval's end. Otherwise add a new interval. Time: O(n log n) for sort, O(n) for merge pass.
+
+❌ **Wrong — nested loop comparison, O(n²):**
+```csharp
+public int[][] Merge(int[][] intervals) {
+    var result = new List<int[]>();
+    foreach (var iv in intervals) {
+        bool merged = false;
+        foreach (var r in result) {
+            if (iv[0] <= r[1] && iv[1] >= r[0]) { // overlap check
+                r[0] = Math.Min(r[0], iv[0]);
+                r[1] = Math.Max(r[1], iv[1]);
+                merged = true; break;
+            }
+        }
+        if (!merged) result.Add(iv);
+    }
+    return result.ToArray(); // incorrect for chains of overlaps
+}
+```
+
+✅ **Correct — sort then linear merge:**
+```csharp
+public int[][] Merge(int[][] intervals) {
+    Array.Sort(intervals, (a, b) => a[0] - b[0]); // sort by start
+    var result = new List<int[]> { intervals[0] };
+
+    for (int i = 1; i < intervals.Length; i++) {
+        var last = result[^1];
+        if (intervals[i][0] <= last[1])               // overlaps
+            last[1] = Math.Max(last[1], intervals[i][1]); // extend
+        else
+            result.Add(intervals[i]);                 // no overlap → new interval
+    }
+    return result.ToArray();
+}
+```
+
+---
+
+## 14.2 Meeting Rooms — Can Attend All?
+
+### Q33. How do you check if a person can attend all meetings (no overlaps)?
+
+**Answer:**
+Sort intervals by start. Check if any adjacent pair overlaps (next.start < current.end). Time: O(n log n).
+
+❌ **Wrong — check all pairs, O(n²):**
+```csharp
+for (int i = 0; i < intervals.Length; i++)
+    for (int j = i + 1; j < intervals.Length; j++)
+        if (intervals[i][1] > intervals[j][0]) return false;
+```
+
+✅ **Correct — sort and check adjacent pairs:**
+```csharp
+public bool CanAttendMeetings(int[][] intervals) {
+    Array.Sort(intervals, (a, b) => a[0] - b[0]);
+    for (int i = 1; i < intervals.Length; i++)
+        if (intervals[i][0] < intervals[i-1][1]) return false;
+    return true;
+}
+```
+
+---
+
+## 14.3 Minimum Meeting Rooms Required
+
+### Q34. How do you find the minimum number of meeting rooms needed?
+
+**Answer:**
+Separate start and end times into sorted arrays. Use two pointers: if the next meeting starts before the earliest ending meeting, we need a new room. Otherwise reuse the room. The answer is the maximum simultaneous overlap. Time: O(n log n).
+
+❌ **Wrong — use a list and scan for a free room each time, O(n²):**
+```csharp
+// Track end times of rooms, scan all for the earliest free — O(n²)
+```
+
+✅ **Correct — sorted start/end times with two pointers:**
+```csharp
+public int MinMeetingRooms(int[][] intervals) {
+    int n = intervals.Length;
+    int[] starts = intervals.Select(i => i[0]).OrderBy(x=>x).ToArray();
+    int[] ends   = intervals.Select(i => i[1]).OrderBy(x=>x).ToArray();
+
+    int rooms = 0, maxRooms = 0, e = 0;
+    for (int s = 0; s < n; s++) {
+        if (starts[s] < ends[e]) rooms++;  // new meeting starts before any ends
+        else { rooms--; e++; }             // reuse a room that just ended
+        maxRooms = Math.Max(maxRooms, rooms);
+    }
+    return maxRooms;
+}
+```
+
+---
+
+# 15. Union-Find (Disjoint Set Union)
+
+> 📚 Reference: https://cp-algorithms.com/data_structures/disjoint_set_union.html
+> 📚 Used in: Kruskal's MST, cycle detection, number of connected components
+
+---
+
+## 15.1 Implement Union-Find
+
+### Q35. How do you implement Union-Find with path compression and union by rank?
+
+**Answer:**
+`find` returns the root of a node's component (with path compression — flattens the tree). `union` merges two components by attaching the smaller-rank tree under the larger one. Both operations are effectively O(1) amortized (inverse Ackermann time).
+
+❌ **Wrong — no path compression or union by rank, degenerates to O(n) per operation:**
+```csharp
+public class UnionFind {
+    private int[] parent;
+    public UnionFind(int n) { parent = Enumerable.Range(0, n).ToArray(); }
+    public int Find(int x) {
+        while (parent[x] != x) x = parent[x]; // no path compression — O(n) depth
+        return x;
+    }
+    public void Union(int x, int y) { parent[Find(x)] = Find(y); } // no rank — chain grows
+}
+```
+
+✅ **Correct — path compression + union by rank:**
+```csharp
+public class UnionFind {
+    private int[] parent, rank;
+
+    public UnionFind(int n) {
+        parent = Enumerable.Range(0, n).ToArray();
+        rank = new int[n];
+    }
+
+    public int Find(int x) {
+        if (parent[x] != x)
+            parent[x] = Find(parent[x]); // path compression: flatten to root
+        return parent[x];
+    }
+
+    public bool Union(int x, int y) {
+        int rx = Find(x), ry = Find(y);
+        if (rx == ry) return false; // already connected
+        if (rank[rx] < rank[ry]) (rx, ry) = (ry, rx);
+        parent[ry] = rx;            // attach smaller tree under larger
+        if (rank[rx] == rank[ry]) rank[rx]++;
+        return true;
+    }
+
+    public bool Connected(int x, int y) => Find(x) == Find(y);
+}
+```
+
+---
+
+## 15.2 Number of Connected Components
+
+### Q36. How do you find the number of connected components in an undirected graph?
+
+**Answer:**
+Use Union-Find: initialize n components. For each edge, union the two nodes — if they weren't already connected, decrement the component count. Final count = number of components.
+
+❌ **Wrong — DFS from every unvisited node works but uses O(V+E) space for adjacency list:**
+```csharp
+// DFS is correct but Union-Find is more elegant and efficient for this pattern
+int count = 0;
+bool[] visited = new bool[n];
+foreach (var start in Enumerable.Range(0, n))
+    if (!visited[start]) { DFS(start); count++; }
+```
+
+✅ **Correct — Union-Find with component counter:**
+```csharp
+public int CountComponents(int n, int[][] edges) {
+    var uf = new UnionFind(n);
+    int components = n;
+    foreach (var e in edges)
+        if (uf.Union(e[0], e[1])) components--; // merge reduces component count
+    return components;
+}
+```
+
+---
+
+# 16. Bit Manipulation
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/bitwise-and-shift-operators
+> 📚 Tricks: https://graphics.stanford.edu/~seander/bithacks.html
+
+---
+
+## 16.1 Single Number (XOR Trick)
+
+### Q37. How do you find the element that appears once when all others appear twice?
+
+**Answer:**
+XOR all numbers. Since `a ^ a = 0` and `a ^ 0 = a`, pairs cancel out and only the single element remains. Time: O(n), Space: O(1).
+
+❌ **Wrong — uses a HashSet, O(n) space:**
+```csharp
+public int SingleNumber(int[] nums) {
+    var set = new HashSet<int>();
+    foreach (int n in nums)
+        if (!set.Add(n)) set.Remove(n); // toggle
+    return set.First(); // O(n) space
+}
+```
+
+✅ **Correct — XOR, O(1) space:**
+```csharp
+public int SingleNumber(int[] nums) {
+    int result = 0;
+    foreach (int n in nums) result ^= n; // all pairs cancel, only single remains
+    return result;
+}
+```
+
+---
+
+## 16.2 Count Set Bits (Brian Kernighan's Algorithm)
+
+### Q38. How do you count the number of 1 bits in an integer?
+
+**Answer:**
+Brian Kernighan: `n & (n-1)` clears the lowest set bit. Count iterations until n becomes 0. Time: O(number of set bits) — faster than checking all 32 bits.
+
+❌ **Wrong — checks every bit position, always 32 iterations:**
+```csharp
+public int HammingWeight(uint n) {
+    int count = 0;
+    while (n != 0) {
+        count += (int)(n & 1); // check rightmost bit
+        n >>= 1;               // always 32 iterations
+    }
+    return count;
+}
+```
+
+✅ **Correct — Brian Kernighan, O(set bits):**
+```csharp
+public int HammingWeight(uint n) {
+    int count = 0;
+    while (n != 0) {
+        n &= (n - 1); // clears the lowest set bit
+        count++;
+    }
+    return count;
+}
+```
+
+---
+
+## 16.3 Power of Two Check
+
+### Q39. How do you check if a number is a power of two using bit manipulation?
+
+**Answer:**
+A power of two has exactly one set bit. `n & (n-1)` clears the lowest set bit — for a power of two this produces 0. Also handle the edge case n ≤ 0.
+
+❌ **Wrong — loop dividing by 2, misses edge cases:**
+```csharp
+public bool IsPowerOfTwo(int n) {
+    while (n > 1) n /= 2;
+    return n == 1; // O(log n) and doesn't handle 0 or negatives cleanly
+}
+```
+
+✅ **Correct — single bitwise operation:**
+```csharp
+public bool IsPowerOfTwo(int n) => n > 0 && (n & (n - 1)) == 0;
+```
+
+---
+
+# 17. Greedy Algorithms
+
+> 📚 Reference: https://cp-algorithms.com/greedy/
+> 📚 Patterns: make locally optimal choice at each step
+
+---
+
+## 17.1 Jump Game
+
+### Q40. How do you determine if you can reach the last index in a jump game?
+
+**Answer:**
+Track the maximum reachable index as you walk forward. If you're ever at a position beyond the max reachable, you're stuck. Time: O(n), Space: O(1).
+
+❌ **Wrong — BFS/DFS explores all paths, O(n²) or O(2^n):**
+```csharp
+// Recursive: try every possible jump from each position
+bool CanJump(int[] nums, int pos) {
+    if (pos >= nums.Length - 1) return true;
+    for (int jump = 1; jump <= nums[pos]; jump++)
+        if (CanJump(nums, pos + jump)) return true;
+    return false; // exponential without memoization
+}
+```
+
+✅ **Correct — greedy, track max reach:**
+```csharp
+public bool CanJump(int[] nums) {
+    int maxReach = 0;
+    for (int i = 0; i < nums.Length; i++) {
+        if (i > maxReach) return false; // can't reach this position
+        maxReach = Math.Max(maxReach, i + nums[i]);
+    }
+    return true;
+}
+```
+
+---
+
+## 17.2 Gas Station (Circular Route)
+
+### Q41. How do you find the starting gas station from which you can complete a circular route?
+
+**Answer:**
+If total gas ≥ total cost, a solution exists. The starting point is the station after the last point where the running tank went negative. Time: O(n), Space: O(1).
+
+❌ **Wrong — try every starting station, O(n²):**
+```csharp
+for (int start = 0; start < n; start++) {
+    int tank = 0; bool ok = true;
+    for (int i = 0; i < n; i++) {
+        tank += gas[(start+i)%n] - cost[(start+i)%n];
+        if (tank < 0) { ok = false; break; }
+    }
+    if (ok) return start;
+}
+```
+
+✅ **Correct — single pass greedy:**
+```csharp
+public int CanCompleteCircuit(int[] gas, int[] cost) {
+    int totalTank = 0, currentTank = 0, start = 0;
+    for (int i = 0; i < gas.Length; i++) {
+        int diff = gas[i] - cost[i];
+        totalTank += diff;
+        currentTank += diff;
+        if (currentTank < 0) { start = i + 1; currentTank = 0; } // reset start
+    }
+    return totalTank >= 0 ? start : -1;
+}
+```
+
+---
+
+# 18. Binary Search on Answer
+
+> 📚 Reference: https://leetcode.com/explore/learn/card/binary-search/
+> 📚 Pattern: "minimize the maximum" or "find the smallest value satisfying a condition"
+
+---
+
+## 18.1 Search in Rotated Sorted Array
+
+### Q42. How do you search a rotated sorted array in O(log n)?
+
+**Answer:**
+At every midpoint, one half is always sorted. Determine which half, then check if the target falls in that half. Narrow the search to the relevant half.
+
+❌ **Wrong — linear scan, ignores sorted property:**
+```csharp
+public int Search(int[] nums, int target) {
+    for (int i = 0; i < nums.Length; i++)
+        if (nums[i] == target) return i;
+    return -1; // O(n)
+}
+```
+
+✅ **Correct — modified binary search, O(log n):**
+```csharp
+public int Search(int[] nums, int target) {
+    int left = 0, right = nums.Length - 1;
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+        if (nums[mid] == target) return mid;
+
+        if (nums[left] <= nums[mid]) {          // left half is sorted
+            if (target >= nums[left] && target < nums[mid]) right = mid - 1;
+            else left = mid + 1;
+        } else {                                // right half is sorted
+            if (target > nums[mid] && target <= nums[right]) left = mid + 1;
+            else right = mid - 1;
+        }
+    }
+    return -1;
+}
+```
+
+---
+
+## 18.2 Koko Eating Bananas (Binary Search on Answer)
+
+### Q43. How do you apply binary search when the answer itself is a range?
+
+**Answer:**
+Binary search on the speed K: for a given K, can Koko finish in H hours? The answer space is [1, max_pile]. Find the minimum K where the condition holds. Time: O(n log(max_pile)).
+
+❌ **Wrong — linear scan through all possible speeds, O(n × max_pile):**
+```csharp
+for (int k = 1; k <= piles.Max(); k++)
+    if (CanFinish(piles, k, h)) return k;
+```
+
+✅ **Correct — binary search on the answer space:**
+```csharp
+public int MinEatingSpeed(int[] piles, int h) {
+    int left = 1, right = piles.Max();
+    while (left < right) {
+        int mid = left + (right - left) / 2;
+        if (CanFinish(piles, mid, h)) right = mid; // mid works, try smaller
+        else left = mid + 1;
+    }
+    return left;
+}
+
+private bool CanFinish(int[] piles, int speed, int h) {
+    int hours = 0;
+    foreach (int pile in piles)
+        hours += (int)Math.Ceiling((double)pile / speed);
+    return hours <= h;
+}
+```
+
+---
+
+# 19. String Problems
+
+> 📚 Reference: https://leetcode.com/explore/learn/card/array-and-string/
+> 📚 Patterns: sliding window, hashing, two pointers for strings
+
+---
+
+## 19.1 Group Anagrams
+
+### Q44. How do you group strings that are anagrams of each other?
+
+**Answer:**
+For each string, compute a canonical key (either sorted characters, or a 26-length frequency count string). Group by key. Time: O(n × L log L) with sort key, or O(n × L) with frequency key.
+
+❌ **Wrong — compare every pair, O(n² × L log L):**
+```csharp
+// Compare all pairs to find anagrams — nested loops
+for (int i = 0; i < strs.Length; i++)
+    for (int j = i+1; j < strs.Length; j++)
+        if (AreAnagrams(strs[i], strs[j])) /* group them */;
+```
+
+✅ **Correct — hash by character frequency, O(n × L):**
+```csharp
+public IList<IList<string>> GroupAnagrams(string[] strs) {
+    var groups = new Dictionary<string, List<string>>();
+    foreach (var s in strs) {
+        var key = GetKey(s);
+        if (!groups.ContainsKey(key)) groups[key] = new List<string>();
+        groups[key].Add(s);
+    }
+    return groups.Values.Cast<IList<string>>().ToList();
+}
+
+private string GetKey(string s) {
+    var count = new int[26];
+    foreach (char c in s) count[c - 'a']++;
+    return string.Join(",", count); // e.g., "1,0,0,...,1,..." — unique per anagram group
+}
+```
+
+---
+
+## 19.2 Minimum Window Substring
+
+### Q45. How do you find the smallest window in s containing all characters of t?
+
+**Answer:**
+Sliding window with two frequency maps. Expand right until window is valid (contains all of t). Then shrink from left to find the minimum valid window. Track how many required characters are satisfied. Time: O(|s| + |t|).
+
+❌ **Wrong — generate all substrings and check each, O(n² × m):**
+```csharp
+for (int i = 0; i < s.Length; i++)
+    for (int j = i; j <= s.Length; j++)
+        if (ContainsAll(s.Substring(i, j-i), t)) UpdateMin(...);
+```
+
+✅ **Correct — sliding window with satisfied-count tracking:**
+```csharp
+public string MinWindow(string s, string t) {
+    var need = new Dictionary<char, int>();
+    foreach (char c in t) need[c] = need.GetValueOrDefault(c) + 1;
+
+    int left = 0, minLen = int.MaxValue, minStart = 0;
+    int have = 0, required = need.Count;
+    var window = new Dictionary<char, int>();
+
+    for (int right = 0; right < s.Length; right++) {
+        char c = s[right];
+        window[c] = window.GetValueOrDefault(c) + 1;
+        if (need.ContainsKey(c) && window[c] == need[c]) have++; // this char is satisfied
+
+        while (have == required) { // window is valid — try to shrink
+            if (right - left + 1 < minLen) { minLen = right - left + 1; minStart = left; }
+            char lc = s[left++];
+            window[lc]--;
+            if (need.ContainsKey(lc) && window[lc] < need[lc]) have--;
+        }
+    }
+    return minLen == int.MaxValue ? "" : s.Substring(minStart, minLen);
+}
+```
+
+---
+
+## 19.3 Valid Anagram
+
+### Q46. How do you check if two strings are anagrams?
+
+**Answer:**
+Count character frequencies in one string, then subtract for the other. If all counts reach zero, they're anagrams. Time: O(n), Space: O(1) — bounded by alphabet size (26 lowercase letters).
+
+❌ **Wrong — sort both strings, O(n log n) time and O(n) space:**
+```csharp
+public bool IsAnagram(string s, string t) {
+    return s.OrderBy(c => c).SequenceEqual(t.OrderBy(c => c)); // O(n log n)
+}
+```
+
+✅ **Correct — frequency count, O(n):**
+```csharp
+public bool IsAnagram(string s, string t) {
+    if (s.Length != t.Length) return false;
+    int[] count = new int[26];
+    for (int i = 0; i < s.Length; i++) {
+        count[s[i] - 'a']++;
+        count[t[i] - 'a']--;
+    }
+    return count.All(c => c == 0);
+}
+```

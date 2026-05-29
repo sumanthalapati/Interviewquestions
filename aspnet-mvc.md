@@ -655,3 +655,453 @@ public class ProductsApiTests : IClassFixture<WebApplicationFactory<Program>> {
     }
 }
 ```
+
+---
+
+# 11. SignalR & Real-Time Communication
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/signalr/introduction
+> 📚 Hubs: https://learn.microsoft.com/en-us/aspnet/core/signalr/hubs
+
+---
+
+## 11.1 SignalR Hubs
+
+### Q17. How do you implement real-time communication with SignalR?
+
+**Answer:**
+SignalR abstracts WebSockets (falling back to SSE, then long-polling). A Hub is the server-side class clients connect to. The server can push messages to specific clients, groups, or all connected clients. Use `IHubContext<T>` to push from outside the Hub (e.g., from a background service).
+
+❌ **Wrong — polling an endpoint every 2 seconds for updates:**
+```csharp
+// Client polls every 2s
+setInterval(() => fetch('/api/notifications/unread').then(...), 2000);
+// Server: every client hits this endpoint constantly — wasted load even when nothing changed
+```
+
+✅ **Correct — SignalR Hub pushes only when there's something to send:**
+```csharp
+// Hub
+public class NotificationHub : Hub {
+    public async Task JoinUserGroup(string userId) =>
+        await Groups.AddToGroupAsync(Context.ConnectionId, $"user-{userId}");
+
+    public override async Task OnConnectedAsync() {
+        var userId = Context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (userId != null)
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"user-{userId}");
+        await base.OnConnectedAsync();
+    }
+}
+
+// Push from a background service or controller using IHubContext
+public class OrderService(IHubContext<NotificationHub> hubContext) {
+    public async Task CompleteOrderAsync(Order order) {
+        // ... order logic ...
+        // Push to specific user's group — only sent when event actually occurs
+        await hubContext.Clients.Group($"user-{order.UserId}")
+            .SendAsync("OrderCompleted", new { order.Id, order.Status });
+    }
+}
+
+// Program.cs
+builder.Services.AddSignalR();
+app.MapHub<NotificationHub>("/hubs/notifications");
+```
+
+---
+
+## 11.2 SignalR Scaling — Backplane
+
+### Q18. How do you scale SignalR across multiple server instances?
+
+**Answer:**
+Each server instance only knows about its own connected clients. If server A has a user and server B tries to push to them, it fails. A backplane (Redis, Azure SignalR Service) broadcasts messages across all instances.
+
+❌ **Wrong — no backplane, messages only reach clients on the same instance:**
+```csharp
+// Works on one server instance, silently fails on multi-instance deployment
+builder.Services.AddSignalR(); // no backplane configured
+```
+
+✅ **Correct — Redis backplane or Azure SignalR Service:**
+```csharp
+// Option 1: Redis backplane
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(config["Redis:ConnectionString"]!);
+
+// Option 2: Azure SignalR Service (fully managed, no server-side WebSocket)
+builder.Services.AddSignalR()
+    .AddAzureSignalR(config["AzureSignalR:ConnectionString"]!);
+// Azure SignalR Service handles all connections externally — servers are stateless
+```
+
+---
+
+# 12. Background Services & Hosted Services
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services
+
+---
+
+## 12.1 IHostedService vs BackgroundService
+
+### Q19. What is the difference between `IHostedService` and `BackgroundService`?
+
+**Answer:**
+`IHostedService` has `StartAsync` and `StopAsync` — you manage the loop yourself. `BackgroundService` is a base class implementing `IHostedService` with a `ExecuteAsync(CancellationToken)` method — simpler for continuous background loops. Always respect the cancellation token to enable clean shutdown.
+
+❌ **Wrong — `async void` background work, ignores cancellation, crashes the process on exception:**
+```csharp
+public class BadWorker : IHostedService {
+    public Task StartAsync(CancellationToken ct) {
+        Task.Run(async () => {              // fire-and-forget — exceptions lost
+            while (true) {                 // no cancellation token check
+                await DoWorkAsync();
+                await Task.Delay(5000);    // can't be cancelled cleanly
+            }
+        });
+        return Task.CompletedTask;
+    }
+    public Task StopAsync(CancellationToken ct) => Task.CompletedTask; // doesn't stop the loop!
+}
+```
+
+✅ **Correct — `BackgroundService` with proper cancellation:**
+```csharp
+public class OutboxRelayWorker : BackgroundService {
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<OutboxRelayWorker> _logger;
+
+    public OutboxRelayWorker(IServiceScopeFactory sf, ILogger<OutboxRelayWorker> logger) {
+        _scopeFactory = sf; _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
+        _logger.LogInformation("OutboxRelayWorker starting");
+        while (!stoppingToken.IsCancellationRequested) {
+            try {
+                using var scope = _scopeFactory.CreateScope();
+                var relay = scope.ServiceProvider.GetRequiredService<IOutboxRelay>();
+                await relay.ProcessPendingAsync(stoppingToken);
+            } catch (Exception ex) when (ex is not OperationCanceledException) {
+                _logger.LogError(ex, "Error in OutboxRelayWorker");
+            }
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        }
+        _logger.LogInformation("OutboxRelayWorker stopping");
+    }
+}
+
+// Program.cs
+builder.Services.AddHostedService<OutboxRelayWorker>();
+```
+
+---
+
+# 13. Health Checks
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/health-checks
+
+---
+
+## 13.1 Health Check Endpoints
+
+### Q20. How do you implement health checks in ASP.NET Core for Kubernetes readiness/liveness probes?
+
+**Answer:**
+Register health checks for your database, external services, and message queues. Expose `/health/live` (liveness — is the process alive) and `/health/ready` (readiness — can it serve traffic, all dependencies available). Kubernetes probes hit these endpoints.
+
+❌ **Wrong — single `/health` endpoint that always returns 200 regardless of dependencies:**
+```csharp
+app.MapGet("/health", () => "OK");
+// Kubernetes thinks the pod is healthy even if the database is down
+```
+
+✅ **Correct — separate liveness and readiness probes with real dependency checks:**
+```csharp
+// Program.cs
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<AppDbContext>("database", tags: new[] { "ready" })
+    .AddRedis(config["Redis:ConnectionString"]!, name: "redis", tags: new[] { "ready" })
+    .AddUrlGroup(new Uri(config["ExternalApi:BaseUrl"]!), name: "external-api", tags: new[] { "ready" });
+
+// Custom health check
+public class QueueHealthCheck : IHealthCheck {
+    private readonly IMessageBus _bus;
+    public QueueHealthCheck(IMessageBus bus) => _bus = bus;
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext ctx, CancellationToken ct) {
+        var isHealthy = await _bus.IsConnectedAsync(ct);
+        return isHealthy
+            ? HealthCheckResult.Healthy("Queue connected")
+            : HealthCheckResult.Unhealthy("Queue disconnected");
+    }
+}
+
+builder.Services.AddHealthChecks().AddCheck<QueueHealthCheck>("queue", tags: new[] { "ready" });
+
+// Map two endpoints with filtered tags
+app.MapHealthChecks("/health/live",  new HealthCheckOptions { Predicate = _ => false }); // process alive only
+app.MapHealthChecks("/health/ready", new HealthCheckOptions {
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+```
+
+---
+
+# 14. API Versioning
+
+> 📚 Reference: https://github.com/dotnet/aspnet-api-versioning
+> 📚 NuGet: Asp.Versioning.Mvc
+
+---
+
+## 14.1 API Versioning Strategies
+
+### Q21. How do you version an ASP.NET Core Web API?
+
+**Answer:**
+Three strategies: URL segment (`/api/v1/products`), query string (`?api-version=1.0`), header (`Api-Version: 1.0`). Use `Asp.Versioning.Mvc` NuGet package. Deprecate old versions gracefully with sunset headers. Never break existing clients by changing a version.
+
+❌ **Wrong — creating separate controllers in separate folders as versions accumulate:**
+```csharp
+// Manually managing V1 and V2 with no framework support
+namespace Api.V1.Controllers { public class ProductsController { ... } }
+namespace Api.V2.Controllers { public class ProductsController { ... } }
+// Routes overlap, no version negotiation, no deprecation notices
+```
+
+✅ **Correct — framework-supported versioning with deprecation:**
+```csharp
+// Program.cs
+builder.Services.AddApiVersioning(options => {
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true; // adds api-supported-versions header
+}).AddApiExplorer(options => {
+    options.GroupNameFormat = "'v'VVV";
+    options.SubstituteApiVersionInUrl = true;
+});
+
+// V1 Controller
+[ApiController]
+[Route("api/v{version:apiVersion}/[controller]")]
+[ApiVersion("1.0")]
+[ApiVersion("1.1")]
+public class ProductsController : ControllerBase {
+    [HttpGet]
+    [MapToApiVersion("1.0")]
+    public IActionResult GetV1() => Ok(new { version = "1.0" });
+
+    [HttpGet]
+    [MapToApiVersion("1.1")]
+    public IActionResult GetV1_1() => Ok(new { version = "1.1", extra = "new field" });
+}
+
+// V2 Controller (breaking change — new separate controller)
+[ApiController]
+[Route("api/v{version:apiVersion}/[controller]")]
+[ApiVersion("2.0")]
+[ApiVersion("1.0", Deprecated = true)] // mark V1 deprecated
+public class ProductsV2Controller : ControllerBase { ... }
+```
+
+---
+
+# 15. CORS & Rate Limiting
+
+> 📚 CORS: https://learn.microsoft.com/en-us/aspnet/core/security/cors
+> 📚 Rate Limiting: https://learn.microsoft.com/en-us/aspnet/core/performance/rate-limit
+
+---
+
+## 15.1 CORS Configuration
+
+### Q22. How do you configure CORS correctly in ASP.NET Core?
+
+**Answer:**
+CORS is a browser security feature — servers tell browsers which origins are allowed. Configure per-policy and apply globally or per-endpoint. Never use `AllowAnyOrigin()` with `AllowCredentials()` — it's both a security risk and a CORS spec violation.
+
+❌ **Wrong — wildcard CORS with credentials allowed:**
+```csharp
+builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
+    p.AllowAnyOrigin()         // any website
+     .AllowAnyMethod()
+     .AllowAnyHeader()
+     .AllowCredentials()));    // INVALID: browsers reject AllowAnyOrigin + AllowCredentials
+```
+
+✅ **Correct — specific origins for production, permissive for development:**
+```csharp
+builder.Services.AddCors(options => {
+    options.AddPolicy("Production", policy => policy
+        .WithOrigins("https://app.example.com", "https://admin.example.com")
+        .WithMethods("GET", "POST", "PUT", "DELETE")
+        .WithHeaders("Authorization", "Content-Type")
+        .AllowCredentials());
+
+    options.AddPolicy("Development", policy => policy
+        .AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
+
+app.UseCors(builder.Environment.IsDevelopment() ? "Development" : "Production");
+
+// Per-endpoint override if needed:
+app.MapGet("/public", () => "public").RequireCors("Production");
+```
+
+---
+
+## 15.2 Rate Limiting (ASP.NET Core 7+)
+
+### Q23. How do you implement rate limiting in ASP.NET Core?
+
+**Answer:**
+Use the built-in `Microsoft.AspNetCore.RateLimiting` middleware (.NET 7+). Supports Fixed Window, Sliding Window, Token Bucket, and Concurrency limiters. Apply globally or per-endpoint. Return `429 Too Many Requests` with a `Retry-After` header.
+
+❌ **Wrong — manual counter in a static dictionary, not thread-safe, not distributed:**
+```csharp
+private static Dictionary<string, int> _counts = new();
+// [HttpGet] action manually checks and increments _counts[ip]
+// Not thread-safe, resets on restart, doesn't work across multiple instances
+```
+
+✅ **Correct — built-in rate limiter with per-user and global policies:**
+```csharp
+builder.Services.AddRateLimiter(options => {
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Per-IP sliding window
+    options.AddPolicy("per-ip", httpContext => RateLimitPartition.GetSlidingWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new SlidingWindowRateLimiterOptions {
+            PermitLimit = 100, Window = TimeSpan.FromMinutes(1), SegmentsPerWindow = 6
+        }));
+
+    // Per-user token bucket (authenticated endpoints)
+    options.AddPolicy("per-user", httpContext => RateLimitPartition.GetTokenBucketLimiter(
+        partitionKey: httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "anon",
+        factory: _ => new TokenBucketRateLimiterOptions {
+            TokenLimit = 20, ReplenishmentPeriod = TimeSpan.FromSeconds(10), TokensPerPeriod = 5
+        }));
+});
+
+app.UseRateLimiter();
+
+// Apply per-endpoint:
+app.MapPost("/api/auth/login", LoginHandler)
+   .RequireRateLimiting("per-ip");
+
+app.MapGet("/api/products", GetProducts)
+   .RequireRateLimiting("per-user");
+```
+
+---
+
+# 16. gRPC in ASP.NET Core
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/grpc/
+
+---
+
+## 16.1 gRPC vs REST
+
+### Q24. When do you choose gRPC over REST?
+
+**Answer:**
+gRPC uses HTTP/2 and Protocol Buffers (binary serialization). It's 5–10× faster than JSON over HTTP/1.1 for internal service-to-service calls. Strongly typed contracts via `.proto` files. Supports streaming (server, client, bidirectional). Use REST for public APIs and browser clients; use gRPC for internal microservice communication and high-throughput scenarios.
+
+❌ **Wrong — using JSON REST for internal high-frequency inter-service calls:**
+```csharp
+// ProductService calling InventoryService 1000x/sec via JSON REST
+var response = await _http.GetAsync($"http://inventory-svc/api/stock/{productId}");
+var stock = await response.Content.ReadFromJsonAsync<StockDto>();
+// JSON serialization overhead + HTTP/1.1 connection overhead at high frequency
+```
+
+✅ **Correct — gRPC for internal service communication:**
+```protobuf
+// inventory.proto
+syntax = "proto3";
+service InventoryService {
+  rpc GetStock (StockRequest) returns (StockResponse);
+  rpc WatchStock (StockRequest) returns (stream StockUpdate); // server streaming
+}
+message StockRequest { string product_id = 1; }
+message StockResponse { string product_id = 1; int32 quantity = 2; }
+message StockUpdate   { string product_id = 1; int32 quantity = 2; string timestamp = 3; }
+```
+
+```csharp
+// Server:
+public class InventoryGrpcService : InventoryService.InventoryServiceBase {
+    public override async Task<StockResponse> GetStock(StockRequest req, ServerCallContext ctx) {
+        var qty = await _repo.GetQuantityAsync(req.ProductId);
+        return new StockResponse { ProductId = req.ProductId, Quantity = qty };
+    }
+}
+
+// Client (generated strongly-typed client):
+var channel = GrpcChannel.ForAddress("https://inventory-svc");
+var client  = new InventoryService.InventoryServiceClient(channel);
+var stock   = await client.GetStockAsync(new StockRequest { ProductId = "abc" });
+```
+
+---
+
+# 17. Minimal APIs (Deep Dive)
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis/overview
+
+---
+
+## 17.1 Minimal API Organization at Scale
+
+### Q25. How do you organize a Minimal API project as it grows beyond a few endpoints?
+
+**Answer:**
+Group endpoints into extension methods using `IEndpointRouteBuilder`. Use `RouteGroupBuilder` for common prefixes and middleware. Apply filters for cross-cutting concerns. Keeps `Program.cs` clean without reverting to full MVC controllers.
+
+❌ **Wrong — all 50 endpoints defined inline in Program.cs, one giant file:**
+```csharp
+// Program.cs — hundreds of lines
+app.MapGet("/api/products", async (AppDbContext db) => await db.Products.ToListAsync());
+app.MapPost("/api/products", async (CreateProductDto dto, AppDbContext db) => { ... });
+app.MapGet("/api/orders", ...);
+app.MapPost("/api/orders", ...);
+// ... 46 more endpoints inline
+```
+
+✅ **Correct — grouped into extension methods by domain:**
+```csharp
+// ProductEndpoints.cs
+public static class ProductEndpoints {
+    public static IEndpointRouteBuilder MapProductEndpoints(this IEndpointRouteBuilder app) {
+        var group = app.MapGroup("/api/products")
+            .WithTags("Products")
+            .RequireAuthorization()
+            .AddEndpointFilter<ValidationFilter<CreateProductDto>>();
+
+        group.MapGet("/",      GetAll);
+        group.MapGet("/{id:int}", GetById);
+        group.MapPost("/",    Create);
+        group.MapPut("/{id:int}", Update);
+        group.MapDelete("/{id:int}", Delete);
+        return app;
+    }
+
+    private static async Task<Ok<List<ProductDto>>> GetAll(IProductService svc) =>
+        TypedResults.Ok(await svc.GetAllAsync());
+
+    private static async Task<Results<Ok<ProductDto>, NotFound>> GetById(int id, IProductService svc) {
+        var p = await svc.GetByIdAsync(id);
+        return p is null ? TypedResults.NotFound() : TypedResults.Ok(p);
+    }
+}
+
+// Program.cs — clean
+app.MapProductEndpoints();
+app.MapOrderEndpoints();
+app.MapUserEndpoints();
+```

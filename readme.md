@@ -1,6 +1,6 @@
 # 🟣 .NET Interview Questions — Complete Guide
 
-> **450+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
+> **500+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
 > Use `Ctrl+F` / `Cmd+F` to jump to any topic.
 
 ---
@@ -17,6 +17,12 @@
    - [Async / Await / Threading](#17-async--await--threading)
    - [Null Handling & Exception Keywords](#18-null-handling--exception-keywords)
    - [Misc C# Keywords & Features](#19-misc-c-keywords--features)
+   - [Records & Init-Only Properties](#110-records--init-only-properties)
+   - [Pattern Matching](#111-pattern-matching)
+   - [Span<T> and Memory<T>](#112-spant-and-memoryt)
+   - [Nullable Reference Types](#113-nullable-reference-types)
+   - [Modern C# Features (C# 9–13)](#114-modern-c-language-features-c-913)
+   - [Source Generators](#115-source-generators)
 2. [ASP.NET Core / Web API](#2-aspnet-core--web-api)
    - [Request Pipeline & Middleware](#21-request-pipeline--middleware)
    - [Dependency Injection & Lifetimes](#22-dependency-injection--lifetimes)
@@ -3277,3 +3283,587 @@ var systemPrompt = """
 ---
 
 *Last updated: 2026 | .NET 8 / C# 12 / Angular 17+*
+
+---
+
+## 1.10 Records & Init-Only Properties
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record
+
+### Q1 — What is a `record` and when should you use it instead of a `class`?
+
+A `record` is a reference type (or value type with `record struct`) that provides **value-based equality**, a compiler-generated `ToString`, `Equals`, `GetHashCode`, and supports **non-destructive mutation** via `with` expressions. Use records for immutable data transfer objects, domain events, and command/query objects.
+
+❌ **Wrong** — using a class where value equality and immutability are needed:
+```csharp
+public class Point
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+}
+
+var a = new Point { X = 1, Y = 2 };
+var b = new Point { X = 1, Y = 2 };
+Console.WriteLine(a == b); // False — reference equality!
+```
+
+✅ **Correct** — record gives value equality and immutability for free:
+```csharp
+public record Point(int X, int Y);
+
+var a = new Point(1, 2);
+var b = new Point(1, 2);
+Console.WriteLine(a == b);     // True — value equality!
+
+var c = a with { Y = 99 };     // non-destructive mutation
+Console.WriteLine(c);          // Point { X = 1, Y = 99 }
+```
+
+---
+
+### Q2 — What are `init`-only setters and when are they useful?
+
+`init` setters allow a property to be set **only during object initialization** (constructor or object initialiser), then become immutable — without requiring a constructor parameter for each property.
+
+❌ **Wrong** — mutable setter allows accidental post-construction mutation:
+```csharp
+public class OrderDto
+{
+    public Guid Id { get; set; }       // can be changed after creation
+    public string Status { get; set; }
+}
+
+var dto = new OrderDto { Id = Guid.NewGuid(), Status = "Pending" };
+dto.Status = "Cancelled"; // silently allowed — dangerous in DTOs
+```
+
+✅ **Correct** — `init` setter locks the value after construction:
+```csharp
+public class OrderDto
+{
+    public Guid Id { get; init; }
+    public string Status { get; init; }
+}
+
+var dto = new OrderDto { Id = Guid.NewGuid(), Status = "Pending" };
+// dto.Status = "Cancelled"; // ❌ compile error — init-only
+```
+
+---
+
+### Q3 — What is `required` and how does it enforce initialization?
+
+C# 11 introduced `required` members — the compiler enforces that every caller must supply them during object initialisation, replacing constructor overloads for mandatory fields.
+
+❌ **Wrong** — no enforcement, fields silently default to null:
+```csharp
+public class CustomerDto
+{
+    public string Name { get; init; }   // nothing forces caller to set this
+    public string Email { get; init; }
+}
+var dto = new CustomerDto(); // Name = null, Email = null — silent bug
+```
+
+✅ **Correct** — `required` causes compile error if property is omitted:
+```csharp
+public class CustomerDto
+{
+    public required string Name { get; init; }
+    public required string Email { get; init; }
+}
+
+var dto = new CustomerDto { Name = "Alice", Email = "a@b.com" }; // ✅
+// var bad = new CustomerDto(); // ❌ CS9035: required member 'Name' not set
+```
+
+---
+
+## 1.11 Pattern Matching
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/functional/pattern-matching
+
+### Q1 — What is a switch expression and how does it differ from a switch statement?
+
+A switch expression is an **expression-bodied** form that returns a value, supports exhaustiveness checking, and uses `=>` arms instead of `case`/`break`. It eliminates fall-through bugs and works naturally with records and tuples.
+
+❌ **Wrong** — verbose switch statement, easy to forget `break`:
+```csharp
+string Describe(Shape shape)
+{
+    string result;
+    switch (shape)
+    {
+        case Circle c:
+            result = $"Circle r={c.Radius}";
+            break;
+        case Rectangle r:
+            result = $"Rect {r.W}x{r.H}";
+            break;
+        default:
+            result = "Unknown";
+            break;
+    }
+    return result;
+}
+```
+
+✅ **Correct** — concise switch expression, exhaustive:
+```csharp
+string Describe(Shape shape) => shape switch
+{
+    Circle c    => $"Circle r={c.Radius}",
+    Rectangle r => $"Rect {r.W}x{r.H}",
+    _           => "Unknown"
+};
+```
+
+---
+
+### Q2 — What are property, positional, and list patterns?
+
+Property patterns match on an object's property values; positional patterns deconstruct a record/tuple; list patterns (C# 11) match against collection elements.
+
+❌ **Wrong** — chained if-else with manual property access:
+```csharp
+string Classify(Order o)
+{
+    if (o.Status == "Paid" && o.Total > 1000) return "VIP";
+    if (o.Status == "Paid") return "Standard";
+    return "Unpaid";
+}
+```
+
+✅ **Correct** — property pattern is declarative and readable:
+```csharp
+string Classify(Order o) => o switch
+{
+    { Status: "Paid", Total: > 1000 } => "VIP",
+    { Status: "Paid" }               => "Standard",
+    _                                => "Unpaid"
+};
+
+// Positional pattern with record
+var point = new Point(0, 0);
+string where = point switch
+{
+    (0, 0) => "Origin",
+    (var x, 0) => $"X-axis at {x}",
+    (0, var y) => $"Y-axis at {y}",
+    var (x, y) => $"({x},{y})"
+};
+
+// List pattern (C# 11)
+int[] nums = { 1, 2, 3 };
+string desc = nums switch
+{
+    []          => "empty",
+    [var x]     => $"one: {x}",
+    [1, 2, ..] => "starts with 1,2",
+    _           => "other"
+};
+```
+
+---
+
+### Q3 — What is the `is` type-pattern with `when` guard?
+
+The `is` pattern combined with a `when` clause allows type-checking and condition evaluation in a single expression, replacing `as` + null check + cast chains.
+
+❌ **Wrong** — double cast, verbose null check:
+```csharp
+void Process(object obj)
+{
+    var employee = obj as Employee;
+    if (employee != null && employee.Salary > 50000)
+        Console.WriteLine($"High earner: {employee.Name}");
+}
+```
+
+✅ **Correct** — `is` pattern with `when`:
+```csharp
+void Process(object obj)
+{
+    if (obj is Employee { Salary: > 50000 } e)
+        Console.WriteLine($"High earner: {e.Name}");
+}
+```
+
+---
+
+## 1.12 Span\<T\> and Memory\<T\>
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/api/system.span-1
+
+### Q1 — What is `Span<T>` and why does it avoid allocations?
+
+`Span<T>` is a **stack-allocated, ref struct** that represents a contiguous region of memory (array, stackalloc, unmanaged pointer) without copying data. It is used to slice arrays and strings with **zero heap allocation**.
+
+❌ **Wrong** — `Substring` allocates a new string on every call:
+```csharp
+string Parse(string input)
+{
+    // allocates a new string for every slice
+    string part = input.Substring(3, 5);
+    return part.Trim();
+}
+```
+
+✅ **Correct** — `AsSpan` + `Trim` on span, zero allocation:
+```csharp
+ReadOnlySpan<char> Parse(string input)
+{
+    ReadOnlySpan<char> span = input.AsSpan(3, 5);
+    return span.Trim(); // no heap allocation
+}
+
+// Parsing integers without allocation:
+ReadOnlySpan<char> text = "  42  ".AsSpan().Trim();
+int value = int.Parse(text); // parse directly from span
+```
+
+---
+
+### Q2 — When should you use `Memory<T>` instead of `Span<T>`?
+
+`Span<T>` cannot be stored on the heap (it's a ref struct), so it cannot cross `await` boundaries. `Memory<T>` is the heap-safe counterpart used in **async methods** and stored in fields.
+
+❌ **Wrong** — `Span<T>` cannot be used across await:
+```csharp
+async Task ProcessAsync(byte[] data)
+{
+    Span<byte> span = data.AsSpan(); // ❌ can't use across await
+    await SomeAsyncOperation();
+    ProcessSpan(span); // compile error: Span across await
+}
+```
+
+✅ **Correct** — use `Memory<T>` in async context:
+```csharp
+async Task ProcessAsync(byte[] data)
+{
+    Memory<byte> mem = data.AsMemory();
+    await SomeAsyncOperation();
+    ProcessMemory(mem); // ✅ safe across await
+
+    // Access the span only within sync slice
+    Span<byte> span = mem.Span;
+    span[0] = 0xFF;
+}
+```
+
+---
+
+### Q3 — What is `stackalloc` and when is it appropriate?
+
+`stackalloc` allocates a buffer on the **stack**, avoiding heap pressure for short-lived, fixed-size buffers. Combined with `Span<T>`, it's safe without unsafe code.
+
+❌ **Wrong** — heap-allocating a temporary buffer:
+```csharp
+byte[] buffer = new byte[128]; // heap allocation for temp work
+// ... use buffer, then GC must collect it
+```
+
+✅ **Correct** — stack-allocate with Span for small, short-lived buffers:
+```csharp
+Span<byte> buffer = stackalloc byte[128]; // stack — no GC pressure
+// Use buffer for local processing, automatically freed on return
+FillBuffer(buffer);
+SendData(buffer);
+```
+
+---
+
+## 1.13 Nullable Reference Types
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/nullable-references
+
+### Q1 — What does `#nullable enable` do and why should you turn it on?
+
+`#nullable enable` (or `<Nullable>enable</Nullable>` in .csproj) activates the **nullable reference type** annotation system. The compiler now distinguishes between `string` (non-nullable, must not be null) and `string?` (nullable, must be null-checked). This moves null reference errors from runtime to compile time.
+
+❌ **Wrong** — no nullable annotations, runtime NullReferenceException:
+```csharp
+public class UserService
+{
+    public string GetDisplayName(User user)
+    {
+        return user.Profile.Name.ToUpper(); // NullReferenceException if Profile or Name is null
+    }
+}
+```
+
+✅ **Correct** — nullable annotations force the caller to handle nulls:
+```csharp
+#nullable enable
+public class UserService
+{
+    public string GetDisplayName(User user)
+    {
+        string? name = user.Profile?.Name;
+        return name?.ToUpper() ?? "Anonymous"; // handled at compile time
+    }
+}
+```
+
+---
+
+### Q2 — What is the null-forgiving operator `!` and when is it acceptable?
+
+The `!` (null-forgiving) operator suppresses the compiler's nullable warning. It is **only acceptable** when you have out-of-band knowledge that a value cannot be null (e.g., after an assertion, or in test setup).
+
+❌ **Wrong** — using `!` to silence warnings without understanding the risk:
+```csharp
+string? value = GetValue();
+int length = value!.Length; // silences warning but may throw at runtime
+```
+
+✅ **Correct** — use `!` only after a null-guard:
+```csharp
+string? value = GetValue();
+if (value is null) throw new InvalidOperationException("value must not be null");
+int length = value!.Length; // safe: we just guarded above
+
+// Better — let the compiler track it:
+if (value is not null)
+    int length = value.Length; // no ! needed; compiler knows it's non-null
+```
+
+---
+
+## 1.14 Modern C# Language Features (C# 9–13)
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/
+
+### Q1 — What are file-scoped namespaces and global usings?
+
+C# 10 introduced **file-scoped namespaces** (eliminates one level of indentation) and **global usings** (import a namespace once for the whole project).
+
+❌ **Wrong** — old block-scoped namespace, boilerplate usings in every file:
+```csharp
+// MyService.cs
+using System;
+using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
+
+namespace MyApp.Services
+{
+    public class MyService { }
+}
+```
+
+✅ **Correct** — file-scoped namespace + global usings in one file:
+```csharp
+// GlobalUsings.cs
+global using System;
+global using System.Collections.Generic;
+global using Microsoft.Extensions.Logging;
+
+// MyService.cs — no usings needed, no extra braces
+namespace MyApp.Services;
+
+public class MyService { }
+```
+
+---
+
+### Q2 — What are primary constructors in C# 12?
+
+**Primary constructors** embed constructor parameters directly in the class/struct declaration. The parameters become in-scope throughout the class body, removing boilerplate field declarations.
+
+❌ **Wrong** — C# 9 style: explicit field + constructor:
+```csharp
+public class OrderService
+{
+    private readonly IOrderRepository _repo;
+    private readonly ILogger<OrderService> _logger;
+
+    public OrderService(IOrderRepository repo, ILogger<OrderService> logger)
+    {
+        _repo = repo;
+        _logger = logger;
+    }
+
+    public async Task<Order?> GetAsync(Guid id) => await _repo.GetByIdAsync(id);
+}
+```
+
+✅ **Correct** — C# 12 primary constructor:
+```csharp
+public class OrderService(IOrderRepository repo, ILogger<OrderService> logger)
+{
+    public async Task<Order?> GetAsync(Guid id)
+    {
+        logger.LogInformation("Fetching order {Id}", id);
+        return await repo.GetByIdAsync(id);
+    }
+}
+```
+
+---
+
+### Q3 — What are collection expressions (C# 12)?
+
+Collection expressions provide a unified, concise `[...]` syntax for creating lists, arrays, spans, and other collection types, replacing `new List<T> { }`, `new[] { }`, and `ImmutableArray.Create()`.
+
+❌ **Wrong** — different syntax for each collection type:
+```csharp
+int[] array  = new int[] { 1, 2, 3 };
+List<int> list = new List<int> { 1, 2, 3 };
+Span<int> span = new int[] { 1, 2, 3 }; // extra alloc
+```
+
+✅ **Correct** — unified collection expression syntax:
+```csharp
+int[]     array = [1, 2, 3];
+List<int> list  = [1, 2, 3];
+Span<int> span  = [1, 2, 3]; // compiler picks stackalloc when safe
+
+// Spread operator
+int[] first  = [1, 2];
+int[] second = [3, 4];
+int[] all    = [..first, ..second]; // [1, 2, 3, 4]
+```
+
+---
+
+### Q4 — What are raw string literals and when do they help?
+
+Raw string literals (C# 11) start with three or more `"` characters and eliminate the need for `\n`, `\"`, and `\\` escapes. They are ideal for JSON, SQL, regex, and XML embedded in code.
+
+❌ **Wrong** — escaped strings are hard to read and error-prone:
+```csharp
+string json = "{\n  \"name\": \"Alice\",\n  \"age\": 30\n}";
+string sql  = "SELECT * FROM Users WHERE Name = \"Alice\" AND Active = 1";
+```
+
+✅ **Correct** — raw string literals preserve exact formatting:
+```csharp
+string json = """
+    {
+      "name": "Alice",
+      "age": 30
+    }
+    """;
+
+string sql = """
+    SELECT *
+    FROM   Users
+    WHERE  Name = "Alice"
+      AND  Active = 1
+    """;
+```
+
+---
+
+### Q5 — What are top-level statements (C# 9) and how do they simplify console apps?
+
+Top-level statements allow a file to contain executable statements **without a class or Main method**. The compiler generates the entry point automatically. This is the default template for `dotnet new console` from .NET 6 onwards.
+
+❌ **Wrong** — unnecessary ceremony for a simple program:
+```csharp
+using System;
+
+namespace MyApp
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine("Hello, World!");
+        }
+    }
+}
+```
+
+✅ **Correct** — top-level statements:
+```csharp
+Console.WriteLine("Hello, World!");
+
+// args, async Main, and return codes all still work:
+await SomethingAsync();
+return 0;
+```
+
+---
+
+## 1.15 Source Generators
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/roslyn-sdk/source-generators-overview
+
+### Q1 — What are source generators and what problems do they solve?
+
+Source generators are **compile-time code generators** that run as part of the Roslyn compiler pipeline. They inspect the compilation (syntax trees, symbols) and emit additional C# source files. They replace runtime reflection and `ILEmit`-based approaches with zero-runtime-overhead, AOT-compatible code.
+
+❌ **Wrong** — runtime reflection for serialization is slow and breaks AOT:
+```csharp
+// System.Text.Json without source gen — uses runtime reflection:
+string json = JsonSerializer.Serialize(myObject);
+// Slow on first call; throws in NativeAOT / Blazor WASM trimming
+```
+
+✅ **Correct** — source-generated `JsonSerializerContext` for zero reflection:
+```csharp
+[JsonSerializable(typeof(Order))]
+[JsonSerializable(typeof(List<Order>))]
+public partial class AppJsonContext : JsonSerializerContext { }
+
+// Usage — fully AOT-safe, no reflection:
+string json = JsonSerializer.Serialize(order, AppJsonContext.Default.Order);
+Order? obj  = JsonSerializer.Deserialize(json, AppJsonContext.Default.Order);
+```
+
+---
+
+### Q2 — What is the `[LoggerMessage]` source generator?
+
+The `[LoggerMessage]` source generator (in `Microsoft.Extensions.Logging`) generates **high-performance, structured logging** code at compile time. It avoids boxing value types and does not evaluate the message string if the log level is disabled.
+
+❌ **Wrong** — string interpolation in logging allocates even when logging is disabled:
+```csharp
+_logger.LogInformation($"Processing order {orderId} for customer {customerId}");
+// allocates the string even if Info is not enabled
+```
+
+✅ **Correct** — source-generated `[LoggerMessage]` is allocation-free:
+```csharp
+public static partial class Log
+{
+    [LoggerMessage(Level = LogLevel.Information,
+                   Message = "Processing order {OrderId} for customer {CustomerId}")]
+    public static partial void ProcessingOrder(
+        ILogger logger, Guid orderId, Guid customerId);
+}
+
+// Usage — no allocation if Info is disabled:
+Log.ProcessingOrder(_logger, orderId, customerId);
+```
+
+---
+
+### Q3 — Name two other commonly used source generators in .NET.
+
+❌ **Wrong** — relying on runtime code for DI registration and regex:
+```csharp
+// Runtime DI scanning (slower startup):
+services.Scan(scan => scan.FromAssemblyOf<IOrderService>()...);
+
+// Runtime-compiled regex (first call is slow, no AOT):
+var regex = new Regex(@"\d{4}-\d{2}-\d{2}");
+```
+
+✅ **Correct** — source generators for DI and regex:
+```csharp
+// 1. Regex source generator — compiled at build time:
+[GeneratedRegex(@"\d{4}-\d{2}-\d{2}")]
+private static partial Regex DatePattern();
+
+bool match = DatePattern().IsMatch("2026-05-29"); // zero first-call cost
+
+// 2. Microsoft.Extensions.DependencyInjection source generator
+// (automatic in .NET 8 — generates registration code at compile time
+//  from IServiceCollection extension methods, reducing startup reflection)
+```
+
+---
+

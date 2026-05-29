@@ -626,3 +626,306 @@ happy to start a discussion in the engineering channel.
 
 LGTM otherwise — approving.
 ```
+
+---
+
+# 9. Memory Leaks & IDisposable
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/standard/garbage-collection/implementing-dispose
+> 📚 Memory: https://learn.microsoft.com/en-us/dotnet/core/diagnostics/memory-leaks
+
+---
+
+## 9.1 IDisposable & Finalizer Misuse
+
+### Q16. What memory leak patterns do you look for in a .NET code review?
+
+**Answer:**
+Missing `using` or `Dispose()` on `IDisposable` objects (streams, connections, HttpClient), event handler subscriptions never unsubscribed, static collections growing without bounds, and `CancellationTokenSource` never disposed. These won't be caught by the compiler — only code review or profiling reveals them.
+
+❌ **Wrong — HttpClient created per request (port exhaustion + socket leak), streams not disposed:**
+```csharp
+public async Task<string> GetDataAsync(string url) {
+    var client = new HttpClient();                    // never disposed, creates new TCP socket each time
+    var response = await client.GetAsync(url);        // HttpResponseMessage also IDisposable!
+    return await response.Content.ReadAsStringAsync();
+}
+// After ~30k calls: "Unable to connect — no ports available" (port exhaustion)
+
+public void ProcessFile(string path) {
+    var stream = new FileStream(path, FileMode.Open); // not in using — file stays locked
+    var reader = new StreamReader(stream);
+    var content = reader.ReadToEnd();
+    // stream.Dispose() never called — file handle leaked until GC
+}
+```
+
+✅ **Correct — IHttpClientFactory for HttpClient, using for all disposables:**
+```csharp
+// Program.cs — register once
+builder.Services.AddHttpClient<IDataService, DataService>();
+
+// Service — IHttpClientFactory manages lifetime (connection pooling, proper disposal)
+public class DataService(HttpClient client) : IDataService {
+    public async Task<string> GetDataAsync(string url) {
+        using var response = await client.GetAsync(url);  // using on HttpResponseMessage
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync();
+    }
+}
+
+// File operations — always in using
+public string ProcessFile(string path) {
+    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read);
+    using var reader = new StreamReader(stream);
+    return reader.ReadToEnd();
+}
+```
+
+---
+
+## 9.2 Event Handler Subscription Leaks
+
+### Q17. How do event handlers cause memory leaks and how do you spot them in a PR?
+
+**Answer:**
+When object A subscribes to an event on object B, B holds a reference to A. If B is long-lived (singleton, static), A is never garbage collected even when you think it's done. Look for `+=` event subscriptions in classes that don't have a corresponding `-=` in `Dispose` or `OnDestroy`.
+
+❌ **Wrong — subscribing to a long-lived service event without unsubscribing:**
+```csharp
+public class OrderProcessor {
+    private readonly IOrderEventService _events;
+
+    public OrderProcessor(IOrderEventService events) {
+        _events = events;
+        _events.OrderCompleted += OnOrderCompleted; // _events holds reference to this
+        // No Dispose, no -= ever → OrderProcessor instances never GC'd
+    }
+
+    private void OnOrderCompleted(object? s, OrderEventArgs e) { /* process */ }
+    // If 1000 OrderProcessors are created (per request), all 1000 stay in memory
+}
+```
+
+✅ **Correct — unsubscribe in Dispose, implement IDisposable:**
+```csharp
+public class OrderProcessor : IDisposable {
+    private readonly IOrderEventService _events;
+    private bool _disposed;
+
+    public OrderProcessor(IOrderEventService events) {
+        _events = events;
+        _events.OrderCompleted += OnOrderCompleted;
+    }
+
+    private void OnOrderCompleted(object? s, OrderEventArgs e) { /* process */ }
+
+    public void Dispose() {
+        if (!_disposed) {
+            _events.OrderCompleted -= OnOrderCompleted; // unsubscribe breaks the reference
+            _disposed = true;
+        }
+    }
+}
+// Register as Scoped in DI — framework calls Dispose at end of request
+```
+
+---
+
+# 10. Concurrency Bugs
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/csharp/asynchronous-programming/
+> 📚 Threading: https://learn.microsoft.com/en-us/dotnet/standard/threading/managed-threading-best-practices
+
+---
+
+## 10.1 Race Conditions
+
+### Q18. How do you identify race conditions in a PR review?
+
+**Answer:**
+Look for shared mutable state (static fields, singleton fields, class-level variables) accessed from multiple threads without synchronization. Check for read-modify-write operations that aren't atomic. `count++` is not atomic — it's three instructions (read, increment, write). `Interlocked.Increment` is.
+
+❌ **Wrong — non-atomic counter in a singleton accessed by concurrent requests:**
+```csharp
+public class RequestMetrics {  // registered as Singleton
+    private int _requestCount = 0;
+
+    public void RecordRequest() {
+        _requestCount++;           // NOT atomic: read → increment → write
+        // Two threads both read 100, both write 101 → count should be 102, is 101
+    }
+
+    public int GetCount() => _requestCount;
+}
+```
+
+✅ **Correct — use Interlocked for atomic counter, or ConcurrentDictionary for maps:**
+```csharp
+public class RequestMetrics {
+    private long _requestCount = 0;
+
+    public void RecordRequest() =>
+        Interlocked.Increment(ref _requestCount);  // atomic — safe from all threads
+
+    public long GetCount() =>
+        Interlocked.Read(ref _requestCount);       // atomic read of long on 32-bit
+
+    // For per-route counts:
+    private readonly ConcurrentDictionary<string, long> _routeCounts = new();
+    public void RecordRoute(string route) =>
+        _routeCounts.AddOrUpdate(route, 1, (_, prev) => prev + 1);
+}
+```
+
+---
+
+## 10.2 Deadlocks
+
+### Q19. What deadlock patterns should you flag in a .NET code review?
+
+**Answer:**
+Classic .NET deadlock: calling `.Result` or `.Wait()` on an async Task inside a context with a `SynchronizationContext` (ASP.NET classic, WinForms). The continuation is queued to the context thread, which is blocked waiting for the result — mutual wait. Also flag multiple `lock` statements acquired in different orders across methods.
+
+❌ **Wrong — `.Result` in an async context causes deadlock, nested locks in inconsistent order:**
+```csharp
+// DEADLOCK in ASP.NET classic (SynchronizationContext present)
+public string GetData() {
+    return _service.GetDataAsync().Result; // blocks thread A
+    // GetDataAsync continuation needs thread A to complete → mutual wait → deadlock
+}
+
+// DEADLOCK potential: two threads acquire lockA then lockB in different order
+public void MethodA() { lock(_lockA) { lock(_lockB) { /* work */ } } }
+public void MethodB() { lock(_lockB) { lock(_lockA) { /* work */ } } }
+// Thread 1: holds lockA, waits for lockB
+// Thread 2: holds lockB, waits for lockA → deadlock
+```
+
+✅ **Correct — async all the way, consistent lock ordering:**
+```csharp
+// Async all the way — no blocking
+public async Task<string> GetDataAsync() =>
+    await _service.GetDataAsync(); // never block on async from sync context
+
+// Consistent lock ordering prevents deadlock
+private readonly object _lock1 = new(), _lock2 = new();
+// Always acquire in same order: _lock1 then _lock2
+public void MethodA() { lock(_lock1) { lock(_lock2) { /* work */ } } }
+public void MethodB() { lock(_lock1) { lock(_lock2) { /* work */ } } }
+// No deadlock: both threads queue for _lock1 first
+
+// For async scenarios, use SemaphoreSlim instead of lock
+private readonly SemaphoreSlim _sem = new(1, 1);
+public async Task CriticalSectionAsync() {
+    await _sem.WaitAsync();
+    try { /* critical work */ }
+    finally { _sem.Release(); }
+}
+```
+
+---
+
+# 11. Database Migration Review
+
+> 📚 Reference: https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/
+> 📚 Zero-downtime: https://planetscale.com/blog/safely-making-database-schema-changes
+
+---
+
+## 11.1 Dangerous Migration Patterns
+
+### Q20. What makes a database migration dangerous and how do you review one safely?
+
+**Answer:**
+Dangerous migrations lock tables or break the currently-running application version. The golden rule: the database must be backward-compatible with both the old and new application code during the deployment window. Expand-then-contract: add new column (nullable), deploy code, backfill, add NOT NULL constraint, then drop old column.
+
+❌ **Wrong — adding a NOT NULL column without a default on a table with millions of rows:**
+```csharp
+// EF Core migration
+migrationBuilder.AddColumn<string>(
+    name: "PhoneNumber",
+    table: "Users",
+    nullable: false);  // ← DANGEROUS on large tables
+// SQL Server: rewrites the entire table to add the column → table lock for minutes
+// Postgres: table-level lock while backfilling values → app requests timeout
+```
+
+❌ **Wrong — renaming a column in a single deployment (breaks running instances):**
+```csharp
+migrationBuilder.RenameColumn("OldName", "Users", "NewName");
+// Old app code: SELECT OldName → breaks immediately
+// New app code: SELECT NewName → works
+// During rolling deploy: half the pods use old name, half use new → errors
+```
+
+✅ **Correct — expand-and-contract for zero-downtime:**
+```
+Step 1 — Migration: Add new nullable column (no lock, instant)
+  ALTER TABLE Users ADD PhoneNumber NVARCHAR(20) NULL;
+
+Step 2 — Deploy: New code writes to BOTH OldColumn and PhoneNumber
+  Old pods: read OldColumn (still works)
+  New pods: write both, read PhoneNumber
+
+Step 3 — Backfill: UPDATE Users SET PhoneNumber = OldColumn WHERE PhoneNumber IS NULL
+  Run in small batches (1000 rows) with short sleep — avoids full table lock
+
+Step 4 — Migration: Add NOT NULL constraint (after backfill)
+  ALTER TABLE Users ALTER COLUMN PhoneNumber NVARCHAR(20) NOT NULL;
+
+Step 5 — Deploy: New code reads ONLY PhoneNumber, stops writing OldColumn
+
+Step 6 — Migration: Drop OldColumn (safe — no code references it)
+
+Checklist for every migration PR:
+  □ Does the migration run in a transaction? (schema changes usually don't — note this)
+  □ Is there a Down() method for rollback?
+  □ Does it lock tables? (ALTER on large tables, adding indexes without CONCURRENTLY)
+  □ Is it backward-compatible with the currently-deployed version?
+  □ Are there indexes added? (should be ONLINE/CONCURRENT to avoid blocking reads)
+  □ Is there a data migration? (must be batched, not UPDATE all 100M rows at once)
+```
+
+---
+
+# 12. API Contract & Versioning Review
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design
+
+---
+
+## 12.1 Breaking API Changes
+
+### Q21. How do you identify breaking API changes during a code review?
+
+**Answer:**
+A breaking change forces all API consumers to update simultaneously. Breaking changes: removing a field from a response, making an optional field required, changing a field's type, renaming an endpoint URL, changing HTTP method. Non-breaking: adding new optional fields to response, adding new endpoints, adding new optional request parameters.
+
+❌ **Wrong — merging a PR that renames a response field without versioning:**
+```csharp
+// PR changes response DTO:
+public class OrderDto {
+    // Before: public string CustomerName { get; set; }
+    public string BuyerName { get; set; }  // renamed — all clients using CustomerName break!
+    public decimal TotalAmount { get; set; }
+    // Before: public decimal Total { get; set; } — also renamed
+}
+// Mobile app v1.2 (still in production) reads "CustomerName" → gets null after this deploy
+```
+
+✅ **Correct — additive changes only, or introduce a new API version:**
+```csharp
+// Non-breaking: keep old field, add new field
+public class OrderDto {
+    [Obsolete("Use BuyerName")] public string CustomerName => BuyerName; // keep compatibility
+    public string BuyerName { get; set; }       // new canonical name
+    public decimal Total { get; set; }          // keep original name
+    public decimal TotalAmount => Total;        // add alias if needed
+}
+
+// Breaking change? Introduce a new API version:
+// v1: GET /api/v1/orders → returns { customerName, total }
+// v2: GET /api/v2/orders → returns { buyerName, totalAmount }
+// Both versions run simultaneously, clients migrate on their own schedule
+```

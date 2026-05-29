@@ -1471,3 +1471,552 @@ If all N drivers reject → expand search radius and repeat.
 
 At high surge: relax acceptance_rate weight to include more drivers
 ```
+
+---
+
+# 14. Consistent Hashing
+
+> 📚 Reference: https://en.wikipedia.org/wiki/Consistent_hashing
+> 📚 Used in: distributed caches, load balancers, Cassandra, DynamoDB ring topology
+
+---
+
+## 14.1 Why Consistent Hashing?
+
+### Q22. What is consistent hashing and why is it superior to modular hashing for distributed systems?
+
+**Answer:**
+With modular hashing (`key % N`), adding or removing a node remaps nearly all keys — causing massive cache invalidation or data reshuffling. Consistent hashing places both nodes and keys on a virtual ring (0 to 2³²). A key is assigned to the first node clockwise from it. Adding/removing a node only remaps the keys in that node's segment — O(K/N) keys instead of O(K).
+
+❌ **Wrong — modular hashing, catastrophic reshuffling on node change:**
+```
+3 nodes, key → node = hash(key) % 3
+
+State:  Node0, Node1, Node2
+key "user:1" → hash = 100 → 100 % 3 = Node1
+
+Add Node3:
+key "user:1" → hash = 100 → 100 % 4 = Node0  ← MOVED!
+~75% of all keys reassigned to different nodes
+→ Cache miss storm, database overload during scale-out
+```
+
+✅ **Correct — consistent hashing, only O(K/N) keys remapped:**
+```
+Virtual ring (0 → 2³²):
+  Node0 at position 100
+  Node1 at position 300
+  Node2 at position 700
+
+key "user:1" hash = 150 → first node clockwise = Node1
+
+Add Node3 at position 200:
+  key "user:1" hash = 150 → first node clockwise = Node3  ← only keys between 100-200 affected
+  Keys between Node0 (100) and Node3 (200) move from Node1 → Node3
+  All other keys: unchanged
+
+→ Only ~25% of keys move (1/N proportion), not 75%
+
+Virtual nodes (vnodes): each physical node gets 100-150 positions on the ring
+→ Evens out load distribution even with heterogeneous node capacities
+```
+
+---
+
+## 14.2 Consistent Hashing in .NET
+
+### Q23. How would you implement consistent hashing in C# for a distributed cache?
+
+**Answer:**
+Use a sorted dictionary keyed by hash position. Virtual nodes improve distribution. `SortedDictionary` allows O(log N) lookup of the first key ≥ hash(key).
+
+❌ **Wrong — linear scan through all nodes to find the nearest, O(N) per lookup:**
+```csharp
+public string GetNode(string key) {
+    int hash = Math.Abs(key.GetHashCode());
+    string? best = null; int bestDist = int.MaxValue;
+    foreach (var (pos, node) in _ring) {
+        int dist = pos >= hash ? pos - hash : int.MaxValue;
+        if (dist < bestDist) { bestDist = dist; best = node; }
+    }
+    return best ?? _ring.Values.First();
+}
+```
+
+✅ **Correct — sorted dictionary with O(log N) lookup:**
+```csharp
+public class ConsistentHashRing {
+    private readonly SortedDictionary<int, string> _ring = new();
+    private readonly int _virtualNodes;
+    private readonly HashAlgorithm _hasher = MD5.Create();
+
+    public ConsistentHashRing(int virtualNodes = 150) => _virtualNodes = virtualNodes;
+
+    public void AddNode(string node) {
+        for (int i = 0; i < _virtualNodes; i++) {
+            int hash = GetHash($"{node}:vnode{i}");
+            _ring[hash] = node;
+        }
+    }
+
+    public void RemoveNode(string node) {
+        for (int i = 0; i < _virtualNodes; i++)
+            _ring.Remove(GetHash($"{node}:vnode{i}"));
+    }
+
+    public string GetNode(string key) {
+        if (_ring.Count == 0) throw new InvalidOperationException("No nodes in ring");
+        int hash = GetHash(key);
+        // Find first node with position >= hash (wrap around the ring)
+        var node = _ring.FirstOrDefault(kv => kv.Key >= hash);
+        return node.Value ?? _ring.Values.First(); // wrap around
+    }
+
+    private int GetHash(string input) {
+        var bytes = _hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
+        return Math.Abs(BitConverter.ToInt32(bytes, 0));
+    }
+}
+```
+
+---
+
+# 15. Circuit Breaker & Resilience
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/architecture/microservices/implement-resilient-applications/implement-circuit-breaker-pattern
+> 📚 Polly: https://github.com/App-vNext/Polly
+
+---
+
+## 15.1 Circuit Breaker Pattern
+
+### Q24. What is the Circuit Breaker pattern and what are its three states?
+
+**Answer:**
+Circuit Breaker prevents an application from repeatedly calling a failing service. Three states: **Closed** (normal operation, failures counted), **Open** (calls fail immediately without hitting the service — fast fail), **Half-Open** (probe: allow one call through; if it succeeds → Closed, if it fails → back to Open). Prevents cascade failures across microservices.
+
+❌ **Wrong — retrying indefinitely with no circuit breaker, cascading failure:**
+```csharp
+public async Task<Product?> GetProductAsync(int id) {
+    while (true) {                              // retry forever
+        try {
+            return await _httpClient.GetFromJsonAsync<Product>($"/products/{id}");
+        } catch {
+            await Task.Delay(1000);             // ProductService is down for 10 min
+            // This service's thread pool drains → this service also becomes unavailable
+            // Cascade failure: one service down takes down the whole system
+        }
+    }
+}
+```
+
+✅ **Correct — Polly circuit breaker with retry + exponential backoff:**
+```csharp
+// Program.cs — resilience pipeline with Polly v8
+builder.Services.AddHttpClient<IProductClient, ProductClient>()
+    .AddResilienceHandler("product-pipeline", pipeline => {
+        // 1. Retry with exponential backoff (for transient errors)
+        pipeline.AddRetry(new HttpRetryStrategyOptions {
+            MaxRetryAttempts = 3,
+            Delay = TimeSpan.FromMilliseconds(200),
+            BackoffType = DelayBackoffType.Exponential,
+            ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+                .HandleResult(r => r.StatusCode >= HttpStatusCode.InternalServerError)
+        });
+
+        // 2. Circuit breaker (stops retrying when service is consistently down)
+        pipeline.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions {
+            FailureRatio = 0.5,                          // open if 50%+ requests fail
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            MinimumThroughput = 10,                      // need at least 10 calls to evaluate
+            BreakDuration = TimeSpan.FromSeconds(30),    // stay open for 30s
+            OnOpened = args => { logger.LogWarning("Circuit opened for ProductService"); return default; }
+        });
+
+        // 3. Timeout (don't wait more than 3s per attempt)
+        pipeline.AddTimeout(TimeSpan.FromSeconds(3));
+    });
+```
+
+---
+
+## 15.2 Bulkhead Pattern
+
+### Q25. What is the Bulkhead pattern and how does it prevent resource exhaustion?
+
+**Answer:**
+Bulkhead isolates resources (thread pool slots, connection pool) per downstream service. If Service A is slow and consumes all threads, it doesn't starve requests to Service B. Named after watertight ship compartments — one flooded compartment doesn't sink the ship.
+
+❌ **Wrong — all outbound HTTP calls share the same HttpClient and thread pool:**
+```csharp
+// Single shared HttpClient for all downstream services
+// If InventoryService is slow → threads pile up waiting → OrderService can't call PaymentService
+builder.Services.AddSingleton<HttpClient>();
+```
+
+✅ **Correct — separate named HttpClients with concurrency limits per service:**
+```csharp
+// Each downstream service gets its own named client with its own connection pool
+builder.Services.AddHttpClient("inventory")
+    .AddResilienceHandler("inventory", p =>
+        p.AddConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = 20 }));
+
+builder.Services.AddHttpClient("payment")
+    .AddResilienceHandler("payment", p =>
+        p.AddConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = 10 }));
+
+// Inventory being slow only consumes its 20 slots — payment's 10 slots are unaffected
+```
+
+---
+
+# 16. CQRS & Read/Write Separation
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs
+> 📚 Event Sourcing: https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing
+
+---
+
+## 16.1 CQRS Pattern
+
+### Q26. What is CQRS and when does it add value?
+
+**Answer:**
+CQRS (Command Query Responsibility Segregation) separates the write model (commands that change state) from the read model (queries that return data). Write side uses a normalized domain model; read side uses denormalized projections optimized for query patterns. Valuable when read and write workloads have very different shapes, scale requirements, or consistency needs.
+
+❌ **Wrong — single model serving both reads and writes, complex queries on normalized schema:**
+```csharp
+// Same Order entity used for both creating orders AND generating the orders list page
+public class OrderService {
+    public async Task CreateOrderAsync(CreateOrderDto dto) {
+        // Write: validate, apply business rules, save normalized entity
+        var order = new Order(dto); // normalized domain object
+        await _db.Orders.AddAsync(order);
+    }
+
+    public async Task<List<Order>> GetOrdersForUserAsync(int userId) {
+        // Read: loading full Order + nested OrderItems + Customer + Product for every row
+        // Just to show order ID, date, and total on a list page — massive over-fetch
+        return await _db.Orders
+            .Include(o => o.Items).ThenInclude(i => i.Product)
+            .Include(o => o.Customer)
+            .Where(o => o.UserId == userId).ToListAsync();
+    }
+}
+```
+
+✅ **Correct — separate command handlers and query handlers with tailored projections:**
+```csharp
+// Command side — enforces business rules, uses domain model
+public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, Guid> {
+    public async Task<Guid> Handle(CreateOrderCommand cmd, CancellationToken ct) {
+        var order = Order.Create(cmd.UserId, cmd.Items);  // domain logic
+        await _repo.AddAsync(order, ct);
+        await _mediator.Publish(new OrderCreatedEvent(order.Id), ct); // update read model
+        return order.Id;
+    }
+}
+
+// Query side — dedicated read model, SQL projection, no domain object overhead
+public class GetUserOrdersQueryHandler : IRequestHandler<GetUserOrdersQuery, List<OrderSummaryDto>> {
+    public async Task<List<OrderSummaryDto>> Handle(GetUserOrdersQuery q, CancellationToken ct) {
+        // Direct SQL projection — returns exactly what the UI needs, nothing more
+        return await _db.Database.SqlQuery<OrderSummaryDto>(
+            $"SELECT o.Id, o.CreatedAt, o.TotalAmount, COUNT(i.Id) as ItemCount " +
+            $"FROM Orders o JOIN OrderItems i ON i.OrderId = o.Id " +
+            $"WHERE o.UserId = {q.UserId} GROUP BY o.Id, o.CreatedAt, o.TotalAmount").ToListAsync(ct);
+    }
+}
+```
+
+---
+
+## 16.2 Read Replicas
+
+### Q27. How do you route reads to replicas and writes to the primary in .NET?
+
+**Answer:**
+Use multiple `DbContext` registrations or a custom `IDbConnectionFactory` that returns the read replica connection string for queries. In EF Core, use two contexts sharing the same model but different connection strings.
+
+❌ **Wrong — all reads and writes go through the primary, primary becomes a bottleneck:**
+```csharp
+// Single DbContext, all queries hit the primary database
+builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlServer(config["DB:Primary"]));
+// For a read-heavy app (90% reads), the primary is overloaded and writes slow down
+```
+
+✅ **Correct — separate contexts for read replica and primary:**
+```csharp
+// Register two DbContexts
+builder.Services.AddDbContext<WriteDbContext>(o => o.UseSqlServer(config["DB:Primary"]));
+builder.Services.AddDbContext<ReadDbContext>(o =>
+    o.UseSqlServer(config["DB:ReadReplica"]).UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking));
+
+// Write operations use WriteDbContext (primary)
+public class OrderCommandService(WriteDbContext db) {
+    public async Task CreateAsync(Order order) { db.Orders.Add(order); await db.SaveChangesAsync(); }
+}
+
+// Read operations use ReadDbContext (replica, no tracking overhead)
+public class OrderQueryService(ReadDbContext db) {
+    public Task<List<OrderSummaryDto>> GetSummariesAsync(int userId) =>
+        db.Orders.Where(o => o.UserId == userId)
+                 .Select(o => new OrderSummaryDto(o.Id, o.CreatedAt, o.Total))
+                 .ToListAsync();
+}
+```
+
+---
+
+# 17. Service Discovery & Communication
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/core/extensions/service-discovery
+> 📚 Consul: https://developer.hashicorp.com/consul
+
+---
+
+## 17.1 Service Discovery
+
+### Q28. What is service discovery and what are the client-side vs server-side approaches?
+
+**Answer:**
+Service discovery lets microservices find each other without hardcoded URLs. **Server-side** (AWS ALB, Kubernetes Service): load balancer or DNS resolves service name — client calls a stable name, infrastructure routes to a healthy instance. **Client-side** (Consul, Eureka): client queries a registry, gets a list of instances, and picks one with its own load balancing logic.
+
+❌ **Wrong — hardcoded service URLs, breaks on scaling or deployment:**
+```csharp
+// Hardcoded URL — if InventoryService moves or scales, this breaks
+var response = await _http.GetAsync("http://10.0.1.45:8080/api/stock/123");
+// Different IPs in dev/staging/prod = manual config changes everywhere
+```
+
+✅ **Correct — Kubernetes DNS-based service discovery (server-side):**
+```csharp
+// In Kubernetes: InventoryService is exposed as a K8s Service named "inventory-svc"
+// DNS resolves "inventory-svc" to healthy pod IPs via kube-proxy
+
+// appsettings.json
+{ "Services": { "Inventory": "http://inventory-svc" } }
+
+// Program.cs — .NET 8 Microsoft.Extensions.ServiceDiscovery
+builder.Services.AddServiceDiscovery();
+builder.Services.ConfigureHttpClientDefaults(http =>
+    http.AddServiceDiscovery()); // resolves "inventory-svc" via DNS
+
+builder.Services.AddHttpClient<IInventoryClient, InventoryClient>(client =>
+    client.BaseAddress = new Uri("http://inventory-svc")); // K8s DNS handles routing
+
+// No IP addresses in code — works across all environments
+```
+
+---
+
+# 18. More System Design Problems
+
+> 📚 Reference: https://github.com/donnemartin/system-design-primer
+
+---
+
+## 18.1 Design Twitter
+
+### Q29. Walk through the design of a Twitter-like microblogging platform.
+
+**Answer:**
+
+**Requirements:** Post tweets (≤280 chars), follow users, home timeline (tweets from followed users), trending topics, search, notifications.
+
+**Scale:** 400M users, 500M tweets/day, 150M DAU reading timelines 8x/day = 1.2B timeline reads/day → ~14,000 reads/sec vs 6,000 writes/sec. Very read-heavy — cache is critical.
+
+**The Core Challenge — Timeline Fan-Out**
+
+Twitter's "celebrity problem" is more acute than Facebook's: Katy Perry has 100M followers. Each tweet must reach 100M timelines.
+
+```
+Write path:
+Tweet posted → Kafka "tweets" topic
+   ↓
+Fan-out Service reads Kafka:
+  - For regular users: push tweet_id to each follower's timeline cache (Redis sorted set)
+  - For celebrities (>1M followers): skip fan-out — use pull at read time
+
+Read path (home timeline):
+  1. Fetch pre-computed timeline from Redis
+  2. Merge in tweets from celebrities the user follows (pulled on read)
+  3. Sort merged result by time
+  4. Return top 200 tweets
+
+Why this hybrid?
+  - Katy Perry tweets → 100M Redis writes = 100M × 16 bytes = 1.6GB Redis writes per tweet
+  - Instead: store tweet once, read-merge for the 0.01% of users who ARE celebrities
+```
+
+**Data Model:**
+```sql
+Tweet (id BIGINT, user_id, content VARCHAR(280), created_at, like_count, retweet_count, reply_to_tweet_id)
+Follow (follower_id, followee_id, created_at)  INDEX on both columns
+UserTimeline: Redis sorted set  key=timeline:{user_id}  score=timestamp  value=tweet_id
+TrendingTopics: Redis sorted set  key=trending:{window}  score=mention_count  value=hashtag
+```
+
+**Trending Topics:**
+```
+Kafka consumer counts hashtag mentions with a 1-hour sliding window
+Top 50 hashtags by count per region stored in Redis
+Trending Service recomputes every 60 seconds
+```
+
+**Architecture:**
+```
+[Client] → [API Gateway]
+            ├── [Tweet Service]       → Cassandra (tweets), Kafka (fan-out events)
+            ├── [Timeline Service]    → Redis (pre-computed timelines), Celebrity pull
+            ├── [Search Service]      → Elasticsearch (full-text tweet search)
+            ├── [Trending Service]    → Redis (hashtag counts via Kafka consumer)
+            ├── [Notification Service]→ Push/email on likes, retweets, follows
+            └── [Media Service]       → S3 + CDN (images, videos in tweets)
+```
+
+---
+
+## 18.2 Design Google Drive / Dropbox
+
+### Q30. Walk through the design of a file storage and sync system like Google Drive.
+
+**Answer:**
+
+**Requirements:** Upload/download files, folder hierarchy, sync across devices, share files, version history, collaborative editing (for docs).
+
+**Scale:** 1B users, average 15GB free storage = 15 exabytes total. 10M concurrent syncing clients. Upload/download: 50M operations/day.
+
+**The Core Challenge — Chunked Upload & Delta Sync**
+
+❌ **Wrong — upload entire file on every change:**
+```
+User edits a 500MB video file, changes 1 frame:
+→ Upload all 500MB again → 500MB bandwidth × millions of users = petabytes/day wasted
+```
+
+✅ **Correct — chunked upload with delta sync:**
+```
+File split into fixed-size chunks (4MB each).
+Each chunk is content-addressed: id = SHA-256(chunk_bytes)
+
+Upload flow:
+  1. Client computes SHA-256 of each chunk
+  2. Client sends chunk IDs to server: "which of these do you already have?"
+  3. Server responds: "I'm missing chunks [3, 7, 12]"
+  4. Client uploads ONLY missing chunks → if file barely changed, ~0 data transferred
+  5. Server assembles file from chunks (deduplication: same chunk shared across users)
+
+Edit 1 line of a 100KB text file:
+  → Only 1 chunk (4KB) changed → upload 4KB, not 100KB
+```
+
+**Data Model:**
+```sql
+File    (id, owner_id, name, parent_folder_id, created_at, is_deleted)
+FileVersion (id, file_id, version_num, size_bytes, created_at, created_by)
+Chunk   (id=SHA256_hash, size_bytes, storage_path)  -- global dedup table
+FileVersionChunk (version_id, chunk_id, sequence_num)
+
+-- Redis: sync state per device
+device_sync_state:{device_id} → { last_sync_cursor: timestamp, pending_events: [...] }
+```
+
+**Sync Protocol:**
+```
+Long-polling or WebSocket per client device.
+Server maintains a change log (event stream): file_created, file_modified, file_deleted.
+Client subscribes to changes for its user_id.
+On reconnect: client sends last_sync_cursor, server returns all changes since then.
+Conflict resolution: last-write-wins for most files; for collaborative docs, OT/CRDT.
+```
+
+**Architecture:**
+```
+[Desktop/Mobile Client]
+    │
+    ├── Chunk Upload: Client → [Upload Service] → S3 (chunks) → Metadata DB
+    ├── Download: Client → [CDN] → S3 (cached chunks by SHA-256)
+    └── Sync: Client ←WebSocket→ [Sync Service] → Change Event Stream (Kafka)
+
+[Metadata Service] → PostgreSQL (folder tree, file metadata, permissions)
+[Version Service]  → stores version history, handles rollback
+[Share Service]    → ACL management, public link generation
+[Search Service]   → Elasticsearch (filename, content if text-extractable)
+[Thumbnail Service]→ async thumbnail generation for images/videos → CDN
+```
+
+---
+
+## 18.3 Design an E-Commerce Platform (Amazon)
+
+### Q31. Walk through the design of a large-scale e-commerce platform.
+
+**Answer:**
+
+**Requirements:** Product catalog, search, cart, checkout, order management, inventory, recommendations, seller management, reviews.
+
+**Scale:** 300M products, 1B+ users, 1M+ orders/day, 100K+ concurrent users during flash sales.
+
+**Domain Services (Microservices Decomposition):**
+```
+ProductService     — catalog, descriptions, images, pricing
+SearchService      — Elasticsearch for full-text + faceted search
+InventoryService   — stock levels, reservations, warehouse locations
+CartService        — user carts (Redis, short TTL)
+CheckoutService    — orchestrates: reserve inventory → charge → create order → notify
+OrderService       — order lifecycle, fulfillment, returns
+PaymentService     — payment processing, refunds (PCI-DSS isolated)
+UserService        — accounts, addresses, payment methods
+RecommendationService — "customers also bought", personalized homepage
+SellerService      — seller onboarding, listings, payouts
+NotificationService   — email, SMS, push for order updates
+```
+
+**Flash Sale / Inventory Contention:**
+
+❌ **Wrong — stock decrement in application layer with optimistic locking, thundering herd:**
+```
+10,000 users buy last 100 items simultaneously
+→ 10,000 concurrent SELECT + UPDATE on inventory row
+→ Database lock contention → timeouts → bad user experience
+```
+
+✅ **Correct — Redis atomic counter for hot inventory:**
+```
+Pre-sale: SET inventory:{product_id} 100  (atomic counter in Redis)
+
+On "Add to Cart" for flash sale item:
+  DECR inventory:{product_id}
+  If result >= 0: reservation succeeded (atomic, no DB involved)
+  If result < 0:  INCR (restore), return "sold out"
+
+Async reconciliation: Kafka consumer writes final inventory to DB every 5s
+Result: 1M+ reservation attempts/sec without database lock contention
+```
+
+**Product Search Architecture:**
+```
+Write path: Product created/updated → Kafka → Elasticsearch indexer
+            Indexed fields: name, description, brand, category, price, rating, seller_id
+
+Read path: Search query → Search Service
+  1. Elasticsearch: full-text + filters (category, price range, brand, rating ≥ 4★)
+  2. Apply personalization boost (user's past purchases, browsing history)
+  3. Apply business rules (promoted products, in-stock only)
+  4. Return ranked product IDs
+
+Elasticsearch cluster: 3 masters + 6 data nodes, 1 replica per shard
+Index size: 300M products × ~2KB = ~600GB → manageable on 6 data nodes
+```
+
+**Order State Machine:**
+```
+CART_ACTIVE → CHECKOUT_INITIATED → PAYMENT_PENDING → PAYMENT_CONFIRMED
+           → INVENTORY_RESERVED → AWAITING_FULFILLMENT → SHIPPED
+           → OUT_FOR_DELIVERY → DELIVERED → REVIEW_REQUESTED
+
+Cancellation paths:
+  Any state before SHIPPED: CANCELLED (inventory released, refund initiated)
+  After SHIPPED: RETURN_REQUESTED → RETURN_IN_TRANSIT → RETURNED → REFUNDED
+```
