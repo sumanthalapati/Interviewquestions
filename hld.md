@@ -1,6 +1,6 @@
 # 🌍 High Level Design (HLD) Interview Questions — Complete Guide
 
-> **50+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
+> **65+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
 > Use `Ctrl+F` / `Cmd+F` to jump to any topic.
 
 ---
@@ -14,6 +14,11 @@
 6. [Microservices & Service Design](#6-microservices--service-design)
 7. [CAP Theorem & Consistency](#7-cap-theorem--consistency)
 8. [Common HLD Problems](#8-common-hld-problems)
+9. [System Design — Google Calendar](#9-system-design--google-calendar)
+10. [System Design — WhatsApp](#10-system-design--whatsapp)
+11. [System Design — Facebook News Feed](#11-system-design--facebook-news-feed)
+12. [System Design — Netflix](#12-system-design--netflix)
+13. [System Design — Uber](#13-system-design--uber)
 
 ---
 
@@ -630,4 +635,839 @@ Architecture advantages:
 - Each channel scales independently
 - Failures in one channel don't affect others
 - Full audit trail of all notifications sent
+```
+
+---
+
+# 9. System Design — Google Calendar
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing
+> 📚 Calendar RFC: https://datatracker.ietf.org/doc/html/rfc5545
+
+---
+
+## 9.1 Requirements Clarification
+
+### Q17. Walk through the full design of Google Calendar from scratch.
+
+**Answer:**
+
+**Functional Requirements**
+- Create, read, update, delete events (single and recurring)
+- Invite attendees; attendees accept/decline
+- Notifications (email, push) before events
+- View: day, week, month, agenda
+- Multiple calendars per user (personal, work, shared)
+- Timezone support
+
+**Non-Functional Requirements**
+- 500M+ users, ~1B events created per day
+- Read-heavy: users view their calendar far more than they create events
+- High availability (99.99%) — users rely on it for business meetings
+- Eventual consistency acceptable for attendee responses, not for event creation
+- Low-latency calendar load (< 200ms for a week view)
+
+---
+
+## 9.2 Capacity Estimation
+
+```
+Users:            500M active
+Events/day:       1B creates → ~12,000 writes/sec (peak 3x = 36,000)
+Reads/day:        50B reads  → ~580,000 reads/sec (calendar opens all day)
+Event size:       ~1KB (title, description, time, attendees, recurrence rule)
+Storage/day:      1B × 1KB = 1TB/day → ~365TB/year
+```
+
+---
+
+## 9.3 API Design
+
+```
+POST   /calendars/{calId}/events                    → Create event
+GET    /calendars/{calId}/events?timeMin=&timeMax=  → List events in range
+GET    /calendars/{calId}/events/{eventId}           → Get event detail
+PUT    /calendars/{calId}/events/{eventId}           → Update event
+DELETE /calendars/{calId}/events/{eventId}           → Delete event
+POST   /calendars/{calId}/events/{eventId}/attendees → Invite attendees
+PUT    /events/{eventId}/attendees/{userId}          → Accept / decline
+```
+
+---
+
+## 9.4 Data Model
+
+```sql
+-- Core tables (PostgreSQL)
+Calendar (id, owner_user_id, name, color, timezone, is_public)
+Event (
+  id, calendar_id, creator_id,
+  title, description, location,
+  start_utc TIMESTAMPTZ, end_utc TIMESTAMPTZ,
+  timezone VARCHAR,                    -- user's local timezone at creation
+  recurrence_rule TEXT,               -- iCalendar RRULE string
+  recurrence_exception_dates TEXT[],  -- dates where recurrence is overridden
+  status ENUM(confirmed, tentative, cancelled),
+  created_at, updated_at
+)
+Attendee (event_id, user_id, response ENUM(accepted, declined, tentative, needs_action), notified_at)
+EventOverride (event_id, original_start_utc, new_start_utc, new_end_utc, title, ...)
+-- Overrides handle "edit this and following" for recurring events
+```
+
+---
+
+## 9.5 Architecture
+
+```
+                        ┌─────────────────────────────────────┐
+Client (Web/Mobile)     │         API Gateway                 │
+        ↓               │   (Auth, Rate Limiting, Routing)    │
+        └───────────────┤                                     │
+                        └──────────┬──────────────────────────┘
+                                   │
+          ┌────────────────────────┼────────────────────────┐
+          ↓                        ↓                        ↓
+  [Calendar Service]      [Notification Service]    [Sharing Service]
+  (CRUD events,           (schedules reminders,     (ACL, public cals,
+   recurrence expand)      fan-out to push/email)    shared calendars)
+          │                        │                        │
+          ↓                        ↓                        ↓
+  [PostgreSQL              [Message Queue          [Redis: permission
+   (events, attendees)]     Azure Service Bus]      cache for hot cals]
+          │
+  [Read Replicas ×N]  ← Most traffic hits read replicas
+  [Redis Cache]       ← Cache week-view results per user (TTL 5 min)
+  [Elasticsearch]     ← Full-text search across event titles/descriptions
+```
+
+---
+
+## 9.6 Key Design Decisions
+
+**Recurring Events — Expand on Read vs Store Instances**
+
+❌ **Wrong — pre-generate all recurrence instances at write time:**
+```
+Create "Daily standup, forever" → INSERT 365+ rows immediately
+Create "Weekly meeting, 5 years" → INSERT 260 rows
+Problem: infinite recurrences can't be stored; updates require updating thousands of rows
+```
+
+✅ **Correct — store the RRULE, expand on read within the requested time window:**
+```
+DB stores: recurrence_rule = "FREQ=DAILY;BYHOUR=9"
+Query for week of June 1–7:
+  CalendarService.ExpandRecurrence(rule, windowStart, windowEnd)
+  → returns 7 virtual event instances on the fly
+  → overrides table checked for any individual edits to specific instances
+
+Benefits:
+- 1 row per recurring event series (not thousands)
+- "Edit this and following" creates an EventOverride record
+- Deletion of one instance adds a date to recurrence_exception_dates
+```
+
+**Timezone Handling**
+
+❌ **Wrong — storing event times in the user's local time:**
+```csharp
+// Stored as "9:00 AM" with no timezone
+// When user travels to Tokyo, standup shows at the wrong time
+// Daylight saving time changes break all stored times
+```
+
+✅ **Correct — always store UTC, convert on read:**
+```csharp
+// Store: start_utc = 2024-06-10T07:00:00Z, timezone = "America/New_York"
+// Display: convert UTC → user's current timezone at render time
+// Recurrence expansion uses the original timezone to find the correct local time
+// DST transitions handled by the timezone conversion library (NodaTime in .NET)
+```
+
+**Notification Scheduling**
+
+```
+Approach: Delayed message queue
+1. On event create/update → publish message to Service Bus with a scheduledEnqueueTimeUtc
+   = event.start_utc - reminder_minutes
+2. NotificationService receives it at the right time
+3. Sends push + email to all attendees
+
+Why not a cron job polling the DB?
+- Polling 1B events every minute is expensive
+- Delayed messages are more efficient — only fire when needed
+```
+
+---
+
+# 10. System Design — WhatsApp
+
+> 📚 Reference: https://highscalability.com/blog/2014/2/26/the-whatsapp-architecture-facebook-bought-for-19-billion.html
+> 📚 WebSockets: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/websockets
+
+---
+
+## 10.1 Requirements Clarification
+
+### Q18. Walk through the full design of WhatsApp (messaging system).
+
+**Answer:**
+
+**Functional Requirements**
+- One-to-one and group messaging (up to 1024 members)
+- Message delivery statuses: sent ✓, delivered ✓✓, read ✓✓ (blue)
+- Media sharing (images, video, documents)
+- Online/last-seen presence
+- End-to-end encryption
+- Message history on new devices
+
+**Non-Functional Requirements**
+- 2B users, 100B messages/day → ~1.2M messages/sec
+- Messages delivered in < 500ms when both users are online
+- High availability (99.99%) — downtime is newsworthy
+- Store messages for 30 days on server (after delivery, messages live on device)
+
+---
+
+## 10.2 Capacity Estimation
+
+```
+Messages/day:     100B → 1.2M/sec
+Avg message size: 100 bytes text + metadata
+Media:            10% of messages include media → 10B media messages/day
+Media avg size:   200KB
+Storage/day:      100B × 100B text = 10TB text/day
+                  10B × 200KB media = 2PB media/day
+Connections:      500M concurrent open WebSocket connections (peak)
+```
+
+---
+
+## 10.3 API Design
+
+```
+WebSocket connection:
+  Client connects to: wss://chat.whatsapp.com/connect?token=JWT
+
+Messages (over WebSocket):
+  SEND_MESSAGE   { to, content, type, clientMsgId, timestamp }
+  ACK_DELIVERED  { msgId }
+  ACK_READ       { msgId }
+  TYPING_START   { conversationId }
+  TYPING_STOP    { conversationId }
+
+REST (for history/media):
+  POST   /media/upload          → Get upload URL (pre-signed S3)
+  GET    /messages/{convId}     → Message history (paginated)
+  GET    /users/{userId}/presence → Online status
+```
+
+---
+
+## 10.4 Data Model
+
+```sql
+-- Cassandra (write-heavy, time-series, horizontal scale)
+Messages (
+  conversation_id UUID,          -- partition key
+  message_id      TIMEUUID,      -- clustering key (time-ordered)
+  sender_id       UUID,
+  content         TEXT,
+  content_type    ENUM(text, image, video, doc, audio),
+  media_url       TEXT,          -- CDN URL if media
+  status          ENUM(sent, delivered, read),
+  created_at      TIMESTAMP
+) PRIMARY KEY (conversation_id, message_id)
+
+-- PostgreSQL (structured user/group data)
+User (id, phone_hash, display_name, avatar_url, last_seen, public_key)
+Conversation (id, type ENUM(direct, group), created_at)
+ConversationMember (conversation_id, user_id, joined_at, role)
+```
+
+---
+
+## 10.5 Architecture
+
+```
+Client A (online)                                  Client B (online)
+    │                                                    │
+    │ WebSocket                                WebSocket │
+    ↓                                                    ↓
+[Chat Server A] ─── Pub/Sub (Redis) ──────── [Chat Server B]
+    │                    │                              │
+    │           [Presence Service]             (delivers to B)
+    │           (Redis: who's online)
+    │
+    ↓
+[Message Queue (Kafka)]
+    │
+    ├── [Message Storage Service] → Cassandra (persist message)
+    ├── [Push Notification Service] → FCM/APNs (if B is offline)
+    └── [Delivery Receipt Service] → updates message status
+
+[Media Service]
+    ├── Upload: Client → Pre-signed URL → S3/Blob Storage
+    └── Download: Client → CDN (CloudFront/Azure CDN) → S3
+```
+
+---
+
+## 10.6 Key Design Decisions
+
+**WebSocket Connection Management**
+
+❌ **Wrong — HTTP polling for messages:**
+```
+Client polls every 2 seconds: GET /messages/new
+- 2B users × polling every 2s = massive wasted traffic
+- Minimum 2-second message delay
+- Server under constant unnecessary load even when no new messages
+```
+
+✅ **Correct — persistent WebSocket per client:**
+```
+Client establishes one WebSocket connection to a Chat Server
+Chat Server keeps connection open (heartbeat every 30s)
+New message → push to client immediately over existing socket
+Reconnection logic in client for dropped connections
+
+Challenge: 500M concurrent connections → need ~50,000 Chat Servers
+(each server handles ~10,000 concurrent WebSocket connections)
+Load balancer uses consistent hashing on user_id to route to same server
+```
+
+**Message Delivery When Receiver Is Offline**
+
+```
+Flow:
+1. Sender sends message → Chat Server A
+2. Chat Server A checks Presence Service → User B is OFFLINE
+3. Message saved to Cassandra via Message Storage Service
+4. Push Notification Service sends FCM/APNs notification to B's device
+5. B's device comes online → opens WebSocket
+6. Chat Server fetches undelivered messages from Cassandra
+7. Delivers to B, B sends ACK_DELIVERED
+8. Delivery receipt flows back to Sender → ✓✓ appears
+```
+
+**Group Messages Fan-Out**
+
+❌ **Wrong — synchronous fan-out to all group members in the request path:**
+```csharp
+// For a 1024-member group, sending to each member synchronously:
+foreach (var member in group.Members) // 1024 iterations
+    await chatServer.DeliverAsync(member.UserId, message); // each may be on different server
+// Request takes seconds, not milliseconds
+```
+
+✅ **Correct — async fan-out via message queue:**
+```
+1. Sender sends group message → saved to Cassandra once
+2. Fan-out Worker reads the message, publishes one delivery task per member
+3. Each Chat Server picks up delivery tasks for its connected users
+4. Offline members get push notifications via batch push service
+
+Optimization: for large groups, store one copy of the message,
+each member's read receipt tracked separately in a receipts table
+```
+
+---
+
+# 11. System Design — Facebook News Feed
+
+> 📚 Reference: https://engineering.fb.com/2021/02/22/production-engineering/news-feed-consistency/
+> 📚 Fan-out: https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber
+
+---
+
+## 11.1 Requirements Clarification
+
+### Q19. Walk through the full design of a Facebook-style News Feed.
+
+**Answer:**
+
+**Functional Requirements**
+- Users post text, images, videos
+- Follow/friend other users
+- News feed shows posts from followed users in ranked order
+- Like, comment on posts
+- Feed updates in near real-time
+
+**Non-Functional Requirements**
+- 3B users, 500M DAU
+- 500M posts/day → ~6,000 writes/sec
+- Feed reads: each user loads feed ~5x/day = 2.5B reads/day → ~30,000 reads/sec
+- Feed must load in < 500ms
+- High availability — feed must work even if some services are degraded
+
+---
+
+## 11.2 Core Architecture Challenge: Fan-Out Strategy
+
+The central problem: when a celebrity with 100M followers posts, how do you populate 100M feeds?
+
+**Fan-Out on Write (Push model)** vs **Fan-Out on Read (Pull model)**
+
+❌ **Wrong — pure Fan-Out on Write for all users including celebrities:**
+```
+Taylor Swift (100M followers) posts a photo:
+→ Write to 100M feed tables immediately
+→ 100M writes in seconds — overwhelms the write pipeline
+→ Writes for users who may never open the app (wasted work)
+→ Storage: 100M × post reference = massive fan-out amplification
+```
+
+❌ **Wrong — pure Fan-Out on Read for all users:**
+```
+User opens feed → query all N friends' posts → merge and rank
+→ A user with 5,000 friends = 5,000 queries per feed load
+→ 30,000 feed loads/sec × 5,000 queries = 150M queries/sec to post DB
+→ Completely unscalable
+```
+
+✅ **Correct — Hybrid: fan-out on write for regular users, fan-out on read for celebrities:**
+```
+Classify users: "regular" (< 10,000 followers) vs "celebrity" (≥ 10,000)
+
+Regular user posts:
+  → Fan-out on WRITE → push post_id to each follower's feed cache in Redis
+  → O(followers) writes, manageable
+
+Celebrity posts:
+  → Fan-out on READ → stored in Celebrity Post Store
+  → At feed load time: merge user's pre-populated feed + celebrity posts user follows
+
+Feed Load:
+  → Read user's feed from Redis (pre-populated, O(1))
+  → Add any celebrity posts from users they follow (small set of celebrities)
+  → Rank combined list
+  → Return top 20 posts
+```
+
+---
+
+## 11.3 Data Model
+
+```sql
+-- PostgreSQL (relational)
+User (id, name, profile_pic, created_at)
+Post (id, author_id, content, media_url[], created_at, like_count, comment_count)
+Follow (follower_id, followee_id, created_at)  -- INDEX on both columns
+
+-- Redis (feed cache per user)
+Key:   feed:{user_id}
+Type:  Sorted Set
+Score: post creation timestamp (for ranking)
+Value: post_id
+
+-- Cassandra (likes, comments — high write throughput)
+Like (post_id, user_id, created_at) PRIMARY KEY (post_id, user_id)
+Comment (post_id, comment_id TIMEUUID, author_id, text) PRIMARY KEY (post_id, comment_id)
+```
+
+---
+
+## 11.4 Architecture
+
+```
+[Client]
+    │
+    ↓
+[API Gateway]
+    │
+    ├─── [Post Service]          → PostgreSQL (posts)
+    │        │                      + Media Upload → CDN
+    │        └── on new post → [Kafka: post-created topic]
+    │
+    ├─── [Feed Service]
+    │        ├── Write: Fan-out Worker reads Kafka, populates Redis feed sets
+    │        └── Read:  Fetch from Redis + celebrity merge + rank → return feed
+    │
+    ├─── [Social Graph Service]  → Neo4j or PostgreSQL (follow relationships)
+    │
+    ├─── [Ranking Service]       → ML model scores posts (engagement prediction)
+    │
+    └─── [Notification Service]  → push when someone likes/comments your post
+
+[Redis Cluster]    ← pre-computed feeds per user (top 1000 posts kept per user)
+[CDN]              ← images and videos (cache at edge near user)
+[Elasticsearch]    ← search posts and people
+```
+
+---
+
+## 11.5 Feed Ranking
+
+❌ **Wrong — purely chronological feed (reverse time order):**
+```
+Show posts sorted by created_at DESC
+Problem: a post from a close friend 2 hours ago ranked below
+a post from a page the user barely follows posted 1 hour ago
+Engagement drops — users miss content they care about
+```
+
+✅ **Correct — scored ranking with engagement signals:**
+```
+Score = w1 × recency_score
+      + w2 × relationship_score   (close friend vs acquaintance)
+      + w3 × engagement_velocity  (likes/comments in first hour)
+      + w4 × content_type_preference  (user watches more videos)
+      + w5 × post_quality_score   (spam/clickbait penalty)
+
+Ranking Service uses a pre-trained ML model, runs on each feed load
+Top 20 scored posts returned to client
+Feed freshness check: if user scrolls, fetch next batch
+```
+
+---
+
+# 12. System Design — Netflix
+
+> 📚 Reference: https://netflixtechblog.com/
+> 📚 CDN: https://learn.microsoft.com/en-us/azure/cdn/cdn-overview
+
+---
+
+## 12.1 Requirements Clarification
+
+### Q20. Walk through the full design of Netflix (video streaming platform).
+
+**Answer:**
+
+**Functional Requirements**
+- Browse and search content catalog
+- Stream video in adaptive quality (360p → 4K based on bandwidth)
+- Resume playback where you left off
+- User profiles, watchlists, continue watching
+- Recommendations
+
+**Non-Functional Requirements**
+- 238M subscribers, ~100M concurrent streams at peak
+- Content: 15,000+ titles, each encoded in 10+ quality/codec variants
+- Streaming bandwidth: 100M × avg 5Mbps = 500 Tbps total throughput
+- Video must start in < 2 seconds, buffering < 1% of playback time
+- Catalog reads must be < 100ms
+
+---
+
+## 12.2 The Core Problem: Video Delivery at Scale
+
+```
+500 Tbps of video cannot be served from a central data center.
+The network alone would cost billions and latency would be terrible.
+Solution: Push content to the edge — Open Connect CDN.
+```
+
+---
+
+## 12.3 Architecture
+
+```
+UPLOAD / INGESTION PIPELINE (offline, before users see it)
+──────────────────────────────────────────────────────────
+[Studio Master File]
+    → [Transcoding Service (thousands of parallel FFmpeg jobs)]
+        Produces: 1080p H.264, 720p H.264, 4K HEVC, HDR, Dolby Atmos audio
+        × 10+ quality levels = ~50 files per title
+    → [Quality Validation]
+    → [Storage: AWS S3 (origin)]
+    → [CDN Population: push to Open Connect Appliances (OCAs)]
+       Netflix installs OCA servers inside ISPs worldwide
+       Popular content is proactively pushed to local OCAs
+
+PLAYBACK PIPELINE (real-time)
+──────────────────────────────────────────────────────────
+[Client]
+    │
+    │ 1. "Play Breaking Bad S1E1"
+    ↓
+[API Gateway]
+    │
+    ├─ [Steering Service]
+    │   → picks best OCA for this client (nearest, least loaded)
+    │   → returns CDN URLs for the video manifest
+    │
+    ├─ [License Service] → DRM token (Widevine/FairPlay)
+    │
+    └─ [Bookmark Service] → resume position
+
+[Client] ──── HTTPS ────→ [OCA (inside user's ISP)]
+                              serves video chunks directly
+                              no Netflix origin involved for popular content
+
+[Adaptive Bitrate Player (ABR)]
+    - Downloads video in 2-4 second chunks (MPEG-DASH or HLS)
+    - Measures download speed each chunk
+    - Selects quality level for next chunk to fill buffer
+    - Smooth transitions: 720p → 1080p as bandwidth improves
+```
+
+---
+
+## 12.4 Key Design Decisions
+
+**Adaptive Bitrate Streaming (ABR)**
+
+❌ **Wrong — serving fixed quality video regardless of network:**
+```
+Client requests 4K stream
+Network degrades → buffer empties → playback stalls
+User sees spinning wheel → bad experience
+```
+
+✅ **Correct — ABR with per-chunk quality selection:**
+```
+Video is segmented into 2-second chunks.
+Each chunk is available at multiple bitrates: 235kbps, 750kbps, 3Mbps, 15Mbps, 40Mbps
+
+ABR algorithm (BOLA / Buffer-Based):
+  - Buffer > 30s → try higher quality
+  - Buffer < 10s → drop quality immediately
+  - Buffer < 5s  → drop to lowest quality to prevent stall
+
+Client always plays the highest quality sustainable given current network.
+Quality changes happen at chunk boundaries — seamless to user.
+```
+
+**Recommendation System**
+
+```
+Two-stage: Candidate Generation → Ranking
+
+Candidate Generation:
+  - Collaborative Filtering: "users like you watched X" (matrix factorization)
+  - Content-Based: similar genre/director/cast to things you liked
+  - Trending: popular in your region this week
+
+Ranking:
+  - ML model scores each candidate for this specific user
+  - Signals: watch history, ratings, time of day, device type
+  - Contextual: Friday night → action/comedy; Sunday morning → documentaries
+
+Output: personalized rows on homepage
+  "Continue Watching", "Because you watched Stranger Things", "Top Picks for You"
+```
+
+**Watchlist & Bookmarks Service**
+
+```
+Data Model:
+  UserActivity (user_id, title_id, profile_id, last_watched_utc, progress_seconds, completed)
+  PRIMARY KEY (user_id, profile_id, title_id)
+
+Storage: Cassandra — high write throughput (progress saved every 30s during playback)
+Cache: Redis — "continue watching" list per profile, updated on each save
+```
+
+---
+
+## 12.5 Fault Tolerance
+
+❌ **Wrong — single point of failure if any one service goes down:**
+```
+Payment fails → user can't play anything
+Recommendations service down → homepage won't load
+DRM service slow → all playbacks timeout
+```
+
+✅ **Correct — graceful degradation with fallbacks:**
+```
+Recommendations down → show globally popular titles (no personalization, but page loads)
+Steering service slow → fall back to closest geographic OCA (not optimal but works)
+Bookmark service down → start from beginning (can't resume, but content plays)
+Each service has: circuit breaker, fallback response, timeout, retry with backoff
+Netflix pioneered Chaos Engineering (Chaos Monkey) — randomly kills services in production
+to ensure every service has a tested fallback path
+```
+
+---
+
+# 13. System Design — Uber
+
+> 📚 Reference: https://eng.uber.com/
+> 📚 Geospatial: https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/query/geospatial-query
+
+---
+
+## 13.1 Requirements Clarification
+
+### Q21. Walk through the full design of Uber (ride-hailing platform).
+
+**Answer:**
+
+**Functional Requirements**
+- Rider requests a ride from A to B
+- Match rider with nearby available driver
+- Real-time driver location tracking during ride
+- ETA and fare estimation
+- Trip lifecycle: requested → accepted → en route → arrived → in trip → completed
+- Payments, ratings
+
+**Non-Functional Requirements**
+- 5M trips/day → ~60 requests/sec (peaks 10x during rush hours = 600/sec)
+- 6M active drivers → location updates every 4 seconds
+- Location updates: 6M drivers × 1 update/4s = 1.5M location writes/sec
+- Match latency: driver must be assigned in < 3 seconds
+- High availability — riders stranded if system goes down
+
+---
+
+## 13.2 The Core Problem: Real-Time Geospatial Matching
+
+```
+Finding available drivers near a rider's location in < 3 seconds
+across millions of active drivers worldwide.
+```
+
+---
+
+## 13.3 Geospatial Indexing — S2 / Geohash
+
+❌ **Wrong — brute-force distance calculation across all drivers:**
+```sql
+SELECT driver_id,
+       SQRT(POW(lat - rider_lat, 2) + POW(lng - rider_lng, 2)) AS dist
+FROM driver_locations
+WHERE is_available = true
+ORDER BY dist ASC
+LIMIT 10;
+-- Scans ALL 6M drivers on every match request — impossible at scale
+```
+
+✅ **Correct — geohash cells for efficient spatial lookup:**
+```
+Divide the world into a grid using Geohash or Google S2 cells.
+Each cell has a string key (e.g., "dp3wj2").
+Nearby cells share a common prefix.
+
+Driver location update:
+  1. Compute geohash for driver's (lat, lng) at precision level 6 (~1.2km × 0.6km cell)
+  2. Store in Redis: GEOADD drivers_available {lng} {lat} {driver_id}
+     Redis Geo uses Geohash internally
+
+Match request:
+  1. Compute geohash cell for rider location
+  2. GEORADIUS drivers_available {rider_lng} {rider_lat} 5 km ASC COUNT 10
+     → returns up to 10 nearest available drivers in O(log N + M)
+  3. Apply surge pricing zone, driver rating filters
+  4. Select best driver, send offer
+```
+
+---
+
+## 13.4 Architecture
+
+```
+[Rider App]                                    [Driver App]
+    │                                               │
+    │ Request ride                                  │ Location update every 4s
+    ↓                                               ↓
+[API Gateway]                              [Location Service]
+    │                                           → Redis Geo (current positions)
+    ↓                                           → Kafka (location event stream)
+[Trip Service]                                  → DynamoDB (location history for trips)
+    │ "Find driver for rider at lat/lng"
+    ↓
+[Matching Service]
+    ├── GEORADIUS query → Redis (nearby drivers)
+    ├── ETA Service (road distance via Google Maps / OSRM)
+    ├── Surge Pricing Service
+    └── Driver Score / Acceptance Rate filter
+    │
+    │ Send offer to best driver
+    ↓
+[Notification Service] → push to Driver App
+    │
+    │ Driver accepts
+    ↓
+[Trip Service] updates trip state machine
+    │
+    ↓
+[Rider App] — real-time driver location via WebSocket / long-poll
+
+[Payment Service]   → Stripe / internal wallet
+[Rating Service]    → PostgreSQL
+[Analytics (Kafka)] → trip events streamed for fraud, surge pricing, ML
+```
+
+---
+
+## 13.5 Trip State Machine
+
+```
+REQUESTED
+    │ Driver accepts (< 30s timeout, else re-offer to next driver)
+    ↓
+ACCEPTED
+    │ Driver arrives at pickup
+    ↓
+DRIVER_ARRIVED
+    │ Rider boards
+    ↓
+IN_TRIP
+    │ Driver ends trip
+    ↓
+COMPLETED
+    │ Payment processed, rating prompted
+    ↓
+CLOSED
+
+Cancelation paths:
+  REQUESTED → CANCELLED_BY_RIDER (no charge)
+  ACCEPTED  → CANCELLED_BY_RIDER (possible cancellation fee)
+  ACCEPTED  → CANCELLED_BY_DRIVER (re-match rider)
+```
+
+---
+
+## 13.6 Surge Pricing
+
+❌ **Wrong — static pricing regardless of demand:**
+```
+Price = base_fare + (distance × rate) + (time × rate)
+Problem: during rain/rush hour, all drivers get taken immediately,
+riders can't get cars, drivers have no incentive to be available
+```
+
+✅ **Correct — dynamic surge pricing balances supply and demand:**
+```
+Surge Multiplier = f(demand_score, supply_score)
+  demand_score = ride requests in cell in last 5 minutes
+  supply_score = available drivers in cell right now
+
+Multiplier zones:
+  demand/supply < 1.5  → 1.0x  (normal)
+  demand/supply 1.5-3  → 1.5x
+  demand/supply 3-5    → 2.0x
+  demand/supply > 5    → 3.0x cap
+
+Implementation:
+- Geohash cells maintained as Redis counters
+- Supply: GEORADIUS query for available drivers per cell
+- Demand: Kafka consumer counts requests per cell per 5-minute window
+- Surge Service recomputes every 30 seconds
+- Rider shown surge multiplier and must confirm before booking
+```
+
+---
+
+## 13.7 Driver-Rider Matching Algorithm
+
+```
+Given: N nearby drivers (e.g., 10 candidates from GEORADIUS)
+Goal: assign the optimal driver
+
+Score each candidate driver:
+  score = w1 × (1 / eta_seconds)          ← closer is better
+        + w2 × acceptance_rate             ← drivers who accept get priority
+        + w3 × driver_rating               ← higher rated drivers preferred
+        + w4 × consecutive_trips_bonus     ← reward drivers working long shifts
+
+Send offer to top-scored driver.
+If no acceptance in 15s → offer to next driver.
+If all N drivers reject → expand search radius and repeat.
+
+At high surge: relax acceptance_rate weight to include more drivers
 ```
