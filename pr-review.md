@@ -929,3 +929,171 @@ public class OrderDto {
 // v2: GET /api/v2/orders → returns { buyerName, totalAmount }
 // Both versions run simultaneously, clients migrate on their own schedule
 ```
+
+---
+
+# ⚖️ PR Review Comparisons — Side-by-Side Differences
+
+---
+
+## PR-C1 — `async void` vs `async Task` vs `async Task<T>`
+
+| | `async void` | `async Task` | `async Task<T>` |
+|-|-------------|-------------|----------------|
+| Awaitable | ❌ Cannot be awaited | ✅ | ✅ |
+| Exception handling | ❌ Crashes process (unhandled) | ✅ Caught by caller | ✅ Caught by caller |
+| Testable | ❌ | ✅ | ✅ |
+| Valid use | Event handlers only | Fire-and-forget with await | Returns value |
+
+```csharp
+// ❌ async void — exception cannot be caught by caller
+public async void LoadData() { await _service.GetAsync(); } // if throws → process crash!
+
+// ✅ async Task — awaitable, exception propagates
+public async Task LoadData() { await _service.GetAsync(); }
+
+// Only acceptable async void: event handlers
+button.Click += async (s, e) => await DoWorkAsync(); // ✅ — must be void for event handler
+```
+
+---
+
+## PR-C2 — `IDisposable` vs `IAsyncDisposable` vs `using` vs `await using`
+
+| | `IDisposable` + `using` | `IAsyncDisposable` + `await using` |
+|-|------------------------|-----------------------------------|
+| Dispose | Synchronous | Asynchronous (flushes streams, closes connections) |
+| Blocks thread | ✅ (sync) | ❌ (async) |
+| Use for | File handles, GDI, sync resources | `DbContext`, `HttpClient`, network streams |
+| Syntax | `using var x = new X();` | `await using var x = new X();` |
+
+```csharp
+// ❌ Sync dispose on async resource
+using var db = new AppDbContext(); // DbContext implements IAsyncDisposable
+// Sync Dispose called — async flush may be lost
+
+// ✅ Async dispose
+await using var db = new AppDbContext(); // await DisposeAsync()
+```
+
+---
+
+## PR-C3 — `Task.Run` vs `await` vs `ConfigureAwait(false)` vs `ValueTask`
+
+| | `Task.Run(...)` | `await task` | `.ConfigureAwait(false)` | `ValueTask` |
+|-|----------------|-------------|-------------------------|------------|
+| Offloads to | Thread pool | Awaits I/O / Task | Skips sync context capture | Avoids heap allocation |
+| Use for | CPU-bound work off UI thread | I/O-bound async operations | Library code (no sync context needed) | Hot path returning cached result |
+| Risk | Over-parallelism, ThreadPool starvation | Deadlock if `.Result` used | Forgetting in UI code (breaks UI updates) | Awaiting multiple times |
+
+```csharp
+// Task.Run — only for CPU-bound work
+var result = await Task.Run(() => HeavyCpuComputation()); // off UI thread ✅
+
+// ❌ Task.Run wrapping I/O — wasteful (blocks thread pool thread)
+var result = await Task.Run(() => _db.Orders.ToList()); // sync I/O on thread pool
+
+// ✅ Just await the async version
+var result = await _db.Orders.ToListAsync();
+
+// ConfigureAwait(false) — library code, don't need sync context
+public async Task<string> LibraryMethod()
+    => await _http.GetStringAsync(url).ConfigureAwait(false);
+```
+
+---
+
+## PR-C4 — `lock` vs `SemaphoreSlim` vs `Interlocked` vs `ConcurrentDictionary`
+
+| | `lock` | `SemaphoreSlim` | `Interlocked` | `ConcurrentDictionary` |
+|-|--------|----------------|--------------|----------------------|
+| Async safe | ❌ | ✅ `WaitAsync()` | ✅ | ✅ |
+| Allows N concurrent | ❌ (1 only) | ✅ (`new SemaphoreSlim(N)`) | ❌ (atomic ops only) | ✅ |
+| Performance | Fast (CLR primitive) | Moderate | ✅ Fastest (CPU instruction) | Good |
+| Use for | Simple sync critical section | Async throttling | Counters, flags | Thread-safe map |
+
+```csharp
+// Interlocked — fastest for simple counters
+private long _requestCount = 0;
+Interlocked.Increment(ref _requestCount); // atomic, no lock overhead
+
+// SemaphoreSlim — async-compatible mutex
+private readonly SemaphoreSlim _lock = new(1, 1);
+await _lock.WaitAsync();
+try { await DoWorkAsync(); } finally { _lock.Release(); }
+
+// ConcurrentDictionary — atomic get-or-add
+var value = _cache.GetOrAdd(key, k => ExpensiveCompute(k)); // atomic
+```
+
+---
+
+## PR-C5 — `.Result` / `.Wait()` vs `await` vs `GetAwaiter().GetResult()`
+
+| | `.Result` / `.Wait()` | `await` | `.GetAwaiter().GetResult()` |
+|-|----------------------|---------|----------------------------|
+| Blocks thread | ✅ | ❌ (async yield) | ✅ |
+| Deadlock risk | ✅ High (sync context) | ❌ | ✅ Same risk as .Result |
+| Exception wrapping | `AggregateException` | Original exception | Original exception (unwrapped) |
+| Use | ❌ Almost never | ✅ Always in async code | Sync entry points only |
+
+```csharp
+// ❌ .Result — deadlock in ASP.NET sync context
+var order = _service.GetOrderAsync(id).Result; // deadlocks!
+
+// ✅ await — no blocking
+var order = await _service.GetOrderAsync(id);
+
+// Only acceptable sync call: top-level Program.cs sync main or true sync boundary
+// GetAwaiter().GetResult() unwraps AggregateException unlike .Result
+```
+
+---
+
+## PR-C6 — `throw` vs `throw ex` vs Custom Exception vs `ProblemDetails`
+
+| | `throw` | `throw ex` | Custom Exception | `ProblemDetails` (API) |
+|-|---------|-----------|-----------------|----------------------|
+| Stack trace | ✅ Preserved | ❌ Resets to here | ✅ | Via `traceId` |
+| Catches root cause | ✅ | ❌ | ✅ | N/A |
+| Typed error info | ❌ | ❌ | ✅ Properties | ✅ `type`, `title`, `errors` |
+| Client-facing | ❌ | ❌ | Sometimes | ✅ |
+
+```csharp
+// ❌ throw ex — destroys stack trace
+catch (Exception ex) { throw ex; }
+
+// ✅ throw — preserves original stack
+catch (Exception ex) { _log.LogError(ex, "Context"); throw; }
+
+// ✅ Custom exception — typed domain error
+public class OrderNotFoundException : NotFoundException
+{
+    public OrderNotFoundException(Guid id)
+        : base($"Order {id} not found") { OrderId = id; }
+    public Guid OrderId { get; }
+}
+
+// ✅ Map to ProblemDetails in global handler
+catch (NotFoundException ex) => new ProblemDetails { Status = 404, Detail = ex.Message }
+```
+
+---
+
+## PR-C7 — `string.IsNullOrEmpty` vs `string.IsNullOrWhiteSpace` vs `?.Length == 0`
+
+| | `== null \|\| == ""` | `IsNullOrEmpty` | `IsNullOrWhiteSpace` | `?.Length == 0` |
+|-|---------------------|----------------|---------------------|----------------|
+| Handles null | ✅ | ✅ | ✅ | ✅ (returns null→false) |
+| Handles empty `""` | ✅ | ✅ | ✅ | ✅ |
+| Handles whitespace `"  "` | ❌ | ❌ | ✅ | ❌ |
+| Use for | Verbose | General null/empty check | User input validation | Null-safe length check |
+
+```csharp
+// User input — should reject whitespace-only
+if (string.IsNullOrWhiteSpace(dto.Name)) throw new ValidationException("Name required");
+
+// Internal checks where whitespace is meaningful
+if (string.IsNullOrEmpty(content)) return; // whitespace OK (it's content)
+```
+

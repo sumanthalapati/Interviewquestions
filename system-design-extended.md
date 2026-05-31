@@ -1171,3 +1171,421 @@ public async Task<Order> CreateOrderAsync(CreateOrderCommand cmd)
 ---
 
 *Last updated: 2026 | .NET 8 / Kafka 3.x / Polly 8.x*
+
+---
+
+# ⚖️ System Design Comparisons — Side-by-Side Differences
+
+---
+
+## SD-C1 — Saga Choreography vs Orchestration
+
+| | Choreography | Orchestration |
+|-|-------------|---------------|
+| Central coordinator | ❌ None | ✅ Saga orchestrator |
+| Services know about | Events (react to them) | Only the orchestrator |
+| Coupling | Loose (event-based) | Tighter (orchestrator knows steps) |
+| Visibility | ❌ Hard to trace full flow | ✅ Saga state machine visible |
+| Cyclic dependency risk | ✅ Yes (services listen to each other) | ❌ One-directional |
+| Debugging | ❌ Events scattered across services | ✅ Single state machine |
+| Use for | Simple, few steps, low coordination | Complex, many steps, rollback needed |
+
+```
+Choreography:
+  OrderService → OrderPlaced event
+                     ↓
+              PaymentService listens → PaymentProcessed event
+                                           ↓
+                               InventoryService listens → StockReserved
+  Each service is autonomous — no one knows the full picture
+
+Orchestration:
+  SagaOrchestrator → tells PaymentService "charge card"
+                   → waits → tells InventoryService "reserve stock"
+                   → waits → tells ShippingService "schedule delivery"
+  Full flow visible in one place — easy to track, audit, retry
+```
+
+---
+
+## SD-C2 — At-Least-Once vs Exactly-Once vs At-Most-Once Delivery
+
+| | At-Most-Once | At-Least-Once | Exactly-Once |
+|-|-------------|--------------|-------------|
+| Guarantee | May be lost | Will be delivered (may duplicate) | Delivered once |
+| Data loss | ✅ Possible | ❌ | ❌ |
+| Duplicates | ❌ | ✅ Possible | ❌ |
+| Complexity | Low | Medium (idempotent consumer) | High (transactions) |
+| Use for | Metrics, logs (loss OK) | Most business events | Payments, financial |
+
+```csharp
+// At-least-once + idempotent consumer — the practical sweet spot
+public async Task Consume(ConsumeContext<OrderCreatedEvent> ctx)
+{
+    // Idempotency check prevents duplicate processing
+    if (await _db.ProcessedEvents.AnyAsync(e => e.EventId == ctx.Message.EventId))
+        return; // duplicate — skip safely
+
+    await ProcessAsync(ctx.Message);
+    await _db.ProcessedEvents.AddAsync(new ProcessedEvent { EventId = ctx.Message.EventId });
+    await _db.SaveChangesAsync();
+}
+// Result: event delivered at-least-once, but processed exactly-once
+```
+
+---
+
+## SD-C3 — Push vs Pull Architecture
+
+| | Push | Pull |
+|-|------|------|
+| Who initiates | Server pushes to consumer | Consumer polls for data |
+| Latency | ✅ Low (immediate) | ❌ Up to poll interval |
+| Consumer control | ❌ Server controls rate | ✅ Consumer controls pace |
+| Backpressure | ❌ Hard (server may overwhelm consumer) | ✅ Natural (consumer fetches when ready) |
+| Examples | WebSocket, webhooks, Server-Sent Events | Kafka consumer, REST polling, SQS |
+| Use for | Real-time notifications, live data | Batch processing, when consumer is slower |
+
+---
+
+## SD-C4 — DLQ vs Retry Queue vs Parking Lot Pattern
+
+| | Retry Queue | Dead Letter Queue (DLQ) | Parking Lot |
+|-|------------|------------------------|-------------|
+| When used | Transient failures (retry after delay) | Permanent failures (max retries exhausted) | Any failure — pause and resume later |
+| Auto-retry | ✅ Yes (with backoff) | ❌ Manual replay | ❌ Manual intervention |
+| Message preserved | ✅ | ✅ | ✅ |
+| Alert fires | ❌ | ✅ (DLQ messages = alert) | Optional |
+
+```
+Normal Queue → Process fails (transient)
+                     ↓
+              Retry Queue (wait 30s, retry)
+                     ↓ (if fails again × 3)
+              DLQ ← alert team
+                     ↓ (team fixes bug)
+              Replay from DLQ → Normal Queue → Success
+```
+
+---
+
+## SD-C5 — Synchronous vs Asynchronous vs Event-Driven Architecture
+
+| | Synchronous (REST) | Asynchronous (Queue) | Event-Driven |
+|-|------------------|---------------------|-------------|
+| Caller waits | ✅ Yes | ❌ No (fire and forget) | ❌ No |
+| Coupling | Tight (knows endpoint) | Loose (knows queue) | Loosest (knows event type) |
+| Failure isolation | ❌ Cascade | ✅ Queue buffers | ✅ Independent |
+| Data consistency | Strong | Eventual | Eventual |
+| Discoverability | Easy (REST docs) | Medium | ❌ Hard (events scattered) |
+| Debugging | ✅ Easy (call chain) | Medium | ❌ Hard |
+| Use for | Simple CRUD, queries | Long-running tasks, decoupling | Domain events, fan-out, audit |
+
+---
+
+## SD-C6 — Horizontal Sharding vs Vertical Partitioning vs Read Replicas
+
+| | Read Replicas | Vertical Partitioning | Horizontal Sharding |
+|-|--------------|----------------------|---------------------|
+| What splits | Read vs write traffic | Columns into separate tables | Rows across multiple DBs |
+| Helps with | Read scalability | Large wide tables, I/O | Write scalability, data volume |
+| Consistency | Replication lag | Fully consistent | Eventual (cross-shard) |
+| Complexity | Low | Low | ❌ High (routing, cross-shard queries) |
+| Use for | Read-heavy apps | Large BLOB columns, rarely-used fields | Massive scale (> 1TB, > 100k writes/sec) |
+
+```
+Read Replica:    [Primary (write)] → replicate → [Replica1 (read)] [Replica2 (read)]
+Vertical:        [Users table: id, name, email] + [UserProfile: id, bio, avatar_url]
+Sharding:        hash(userId) % 4 →
+                   Shard 0: users 0–24M
+                   Shard 1: users 25M–49M
+                   Shard 2: users 50M–74M
+                   Shard 3: users 75M–100M
+```
+
+---
+
+## SD-C7 — Idempotency Key vs Deduplication ID vs Correlation ID vs Trace ID
+
+| | Idempotency Key | Deduplication ID | Correlation ID | Trace ID |
+|-|----------------|-----------------|----------------|---------|
+| Set by | Client | Producer | First service in chain | First service / gateway |
+| Purpose | Safe retry (same result) | Prevent duplicate messages | Link related logs across services | Link all spans in a distributed trace |
+| Scope | Single operation | Single message | Business transaction | Request journey |
+| Example | `POST /payments` header | Kafka message key | `X-Correlation-Id` header | OpenTelemetry `traceparent` |
+
+```csharp
+// All four in a payment request:
+POST /payments
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000  // retry safely
+X-Correlation-Id: order-flow-abc123                     // link order→payment→notification logs
+traceparent: 00-abc123def456-span001-01                 // distributed trace span
+// Message to queue includes deduplication key = Idempotency-Key value
+```
+
+---
+
+## SD-C8 — Rate Limiting Algorithms Compared
+
+| Algorithm | Memory | Burst handling | Smoothness | Best for |
+|-----------|--------|---------------|------------|---------|
+| Fixed Window | Low | ❌ Edge burst (double rate at boundary) | ❌ Bursty | Simple, approximate |
+| Sliding Window Log | High (log all requests) | ❌ No burst | ✅ Smooth | Strict limits, low volume |
+| Sliding Window Counter | Medium | ⚠️ Partial | ✅ Good | General purpose |
+| Token Bucket | Low | ✅ Controlled burst (up to capacity) | ✅ Good | **Most APIs** |
+| Leaky Bucket | Low | ❌ Excess dropped | ✅ Very smooth | Constant output rate |
+
+```
+Token Bucket — visualise a bucket:
+  - Bucket holds max 100 tokens
+  - Refills at 10 tokens/second
+  - Each request costs 1 token
+  - Burst: can use all 100 tokens at once (burst capacity)
+  - Sustained: max 10 req/sec
+
+Fixed Window problem:
+  Window: 12:00:00 - 12:00:59 → 100 req limit
+  100 requests at 12:00:58
+  100 requests at 12:01:00 → both windows, 200 req in 2 seconds!
+  Token bucket doesn't have this — bucket must refill between bursts
+```
+
+
+---
+
+# 📊 System Design Flow Diagrams — Visual Reference
+
+---
+
+## SD-D1 — URL Shortener Architecture
+
+```mermaid
+flowchart TD
+    C([Client]) --> CDN[CDN Edge Cache]
+    CDN -->|HIT| C
+    CDN -->|MISS| LB[Load Balancer]
+    LB --> SVC[URL Service]
+
+    subgraph Write["Write Path: POST /shorten"]
+        SVC --> IDG[ID Generator\nSnowflake ID]
+        IDG --> B62[Base62 Encode\ne.g. 'aB3xZ9']
+        B62 --> PG[(PostgreSQL\nPrimary)]
+        PG -->|warm cache| REDIS[(Redis)]
+    end
+
+    subgraph Read["Read Path: GET /aB3xZ9"]
+        SVC --> REDIS
+        REDIS -->|HIT| REDIR[301/302 Redirect]
+        REDIS -->|MISS| PGR[(PostgreSQL\nRead Replica)]
+        PGR --> REDIS
+        PGR --> REDIR
+    end
+
+    style CDN fill:#FF9800,color:#fff
+    style REDIS fill:#f44336,color:#fff
+    style PG fill:#2196F3,color:#fff
+    style IDG fill:#9C27B0,color:#fff
+```
+
+---
+
+## SD-D2 — Notification System Fan-Out
+
+```mermaid
+flowchart TD
+    TRIGGER([Order Service\nor any trigger]) --> NS[Notification Service]
+    NS --> PREF{Check User\nPreferences}
+    PREF -->|opted out| DROP[🗑️ Drop notification]
+    PREF -->|opted in| TMPL[Render Template\n{{ orderId }} shipped!]
+    TMPL --> MQ[Message Broker]
+
+    MQ --> EQ[[Email Queue]]
+    MQ --> SQ[[SMS Queue]]
+    MQ --> PQ[[Push Queue]]
+
+    EQ --> EW[Email Worker] --> SG[SendGrid]
+    SQ --> SW[SMS Worker] --> TW[Twilio]
+    PQ --> PW[Push Worker] --> FCM[FCM / APNs]
+
+    SG -->|failed| DLQ1[[Email DLQ]]
+    TW -->|failed| DLQ2[[SMS DLQ]]
+
+    style TRIGGER fill:#4CAF50,color:#fff
+    style DROP fill:#9e9e9e,color:#fff
+    style MQ fill:#9C27B0,color:#fff
+    style DLQ1 fill:#f44336,color:#fff
+    style DLQ2 fill:#f44336,color:#fff
+```
+
+---
+
+## SD-D3 — Rate Limiter (Token Bucket)
+
+```mermaid
+flowchart TD
+    REQ([Incoming Request]) --> CHECK[Check Token Bucket\nRedis Lua Script atomic]
+
+    subgraph Bucket["Token Bucket State"]
+        TOKENS[tokens = 85\nmax = 100]
+        REFILL[Refill: +10 tokens/sec]
+    end
+
+    CHECK --> AVAIL{tokens ≥ 1?}
+    AVAIL -->|YES| DEDUCT[tokens -= 1\nAllow request]
+    AVAIL -->|NO| REJECT[429 Too Many Requests\nRetry-After header]
+
+    DEDUCT --> HANDLER[Request Handler]
+    REFILL -->|every second| TOKENS
+
+    style REQ fill:#4CAF50,color:#fff
+    style REJECT fill:#f44336,color:#fff
+    style DEDUCT fill:#4CAF50,color:#fff
+```
+
+---
+
+## SD-D4 — Chunked File Upload Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client (Browser)
+    participant API as Upload API
+    participant BLOB as Azure Blob Storage
+    participant WORKER as Background Worker
+
+    C->>API: POST /uploads/initiate\n{ filename, sizeBytes }
+    API->>BLOB: Generate presigned URLs\nfor each 5MB chunk
+    API-->>C: { uploadId, presignedUrls[] }
+
+    par Parallel chunk uploads
+        C->>BLOB: PUT presignedUrls[0] chunk1
+        C->>BLOB: PUT presignedUrls[1] chunk2
+        C->>BLOB: PUT presignedUrls[2] chunk3
+    end
+
+    C->>API: POST /uploads/{id}/complete
+    API->>BLOB: CommitBlockList\nassemble chunks
+    API->>WORKER: Publish FileUploadedEvent
+
+    par Background processing
+        WORKER->>WORKER: Virus scan
+        WORKER->>WORKER: Generate thumbnail
+        WORKER->>WORKER: CDN invalidation
+    end
+
+    API-->>C: 200 { fileId, downloadUrl }
+```
+
+---
+
+## SD-D5 — Payment System (Idempotency)
+
+```mermaid
+flowchart TD
+    C([Client]) -->|POST /payments\nIdempotency-Key: uuid| PS[Payment Service]
+
+    PS --> IDM{Idempotency\nkey in store?}
+    IDM -->|YES| CACHED[Return cached\nsame response]
+    IDM -->|NO| LOCK[Acquire distributed lock\non idempotency key]
+
+    LOCK --> INTENT[Record PENDING intent\nin DB first]
+    INTENT --> STRIPE[Call Stripe/Braintree API]
+
+    STRIPE -->|Success| SUCCESS[Update status = succeeded\nStore response]
+    STRIPE -->|Declined| FAIL[Update status = failed\nStore response]
+
+    SUCCESS --> EVENT[Publish PaymentSucceeded\nevent to bus]
+    SUCCESS --> CACHE[Store in idempotency store\nTTL 24h]
+    FAIL --> CACHE
+
+    style IDM fill:#FF9800,color:#fff
+    style CACHED fill:#4CAF50,color:#fff
+    style STRIPE fill:#9C27B0,color:#fff
+    style FAIL fill:#f44336,color:#fff
+```
+
+---
+
+## SD-D6 — Retry + Circuit Breaker State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed : Initial state
+
+    Closed --> Closed : Request succeeds ✅
+    Closed --> Open : Failure rate > 50%\nin 10s window
+
+    Open --> HalfOpen : After 30s break duration
+    Open --> Open : Fail fast\n(no requests sent)
+
+    HalfOpen --> Closed : Test request succeeds ✅\ncircuit healed
+    HalfOpen --> Open : Test request fails ❌\nback to open
+
+    note right of Open
+        All calls fail immediately
+        No requests to downstream
+        Downstream gets recovery time
+    end note
+```
+
+---
+
+## SD-D7 — Kafka Producer → Consumer Flow
+
+```mermaid
+flowchart LR
+    P[Producer\nOrder Service] -->|key = customerId| TOPIC
+
+    subgraph TOPIC["Topic: orders (6 partitions)"]
+        P0[Partition 0\nCustomer-A events]
+        P1[Partition 1\nCustomer-B events]
+        P2[Partition 2\nCustomer-C events]
+        P3[Partition 3]
+        P4[Partition 4]
+        P5[Partition 5]
+    end
+
+    subgraph CG["Consumer Group: payment-service"]
+        C1[Consumer 1\nP0 + P1]
+        C2[Consumer 2\nP2 + P3]
+        C3[Consumer 3\nP4 + P5]
+    end
+
+    P0 --> C1
+    P1 --> C1
+    P2 --> C2
+    P3 --> C2
+    P4 --> C3
+    P5 --> C3
+
+    style P fill:#4CAF50,color:#fff
+    style C1 fill:#2196F3,color:#fff
+    style C2 fill:#2196F3,color:#fff
+    style C3 fill:#2196F3,color:#fff
+```
+
+---
+
+## SD-D8 — Dead Letter Queue Pattern
+
+```mermaid
+flowchart TD
+    Q[[Normal Queue]] --> W[Consumer Worker]
+    W -->|Success| DONE([✅ Complete\nDelete message])
+    W -->|Transient error| AB[Abandon message\nDeliveryCount++]
+    AB --> Q
+    AB -->|DeliveryCount > 10| DLQ[[💀 Dead Letter Queue]]
+
+    W -->|Permanent error| DL2[DeadLetter immediately\nwith reason]
+    DL2 --> DLQ
+
+    DLQ --> ALERT[🚨 Alert fired\nSlack / PagerDuty]
+    ALERT --> DEV[Developer\ninvestigates]
+    DEV -->|Fix bug| REPLAY[Replay DLQ\nback to normal queue]
+    REPLAY --> Q
+
+    style DLQ fill:#f44336,color:#fff
+    style DONE fill:#4CAF50,color:#fff
+    style ALERT fill:#FF9800,color:#fff
+```
+

@@ -2258,3 +2258,374 @@ Error occurs in stream
 ---
 
 *Generated for interview preparation — covers RxJS 7/8 with Angular 15-17+ patterns.*
+
+---
+
+# ⚖️ RxJS Comparisons — Side-by-Side Differences
+
+---
+
+## RX-C1 — `map` vs `switchMap` vs `mergeMap` vs `concatMap` vs `exhaustMap`
+
+| | `map` | `switchMap` | `mergeMap` | `concatMap` | `exhaustMap` |
+|-|-------|------------|-----------|------------|-------------|
+| Input → Output | Value → Value | Observable → Observable | Observable → Observable | Observable → Observable | Observable → Observable |
+| Concurrency | N/A | Cancels previous | ✅ All concurrent | Sequential (queue) | Ignores new until current done |
+| Use for | Simple transform | Search autocomplete, navigation | Parallel HTTP calls | Ordered sequential calls | Login button (ignore double clicks) |
+| Memory | N/A | Low (cancels) | Can accumulate | Sequential | Low (ignores) |
+
+```typescript
+// map — transform value (sync)
+search$.pipe(
+  map(term => term.toUpperCase())
+);
+
+// switchMap — cancel previous inner observable on new emission
+searchInput$.pipe(
+  debounceTime(300),
+  switchMap(term => this.http.get(`/search?q=${term}`))
+  // If user types again while request is in-flight → previous request cancelled
+);
+
+// mergeMap — all inner observables run concurrently
+userIds$.pipe(
+  mergeMap(id => this.http.get(`/users/${id}`))
+  // All requests fire simultaneously, results arrive in any order
+);
+
+// concatMap — queue: wait for each to complete before starting next
+actions$.pipe(
+  concatMap(action => this.http.post('/log', action))
+  // Actions logged in order, one at a time
+);
+
+// exhaustMap — ignore new emissions while inner is active
+loginButton$.pipe(
+  exhaustMap(() => this.auth.login(credentials))
+  // Double-click ignored — only first click processed until login completes
+);
+```
+
+---
+
+## RX-C2 — `debounceTime` vs `throttleTime` vs `auditTime` vs `sampleTime`
+
+| | `debounceTime(n)` | `throttleTime(n)` | `auditTime(n)` | `sampleTime(n)` |
+|-|-----------------|-----------------|----------------|----------------|
+| Emits | After n ms of silence | First event, then silence | Last event after n ms window | Latest value every n ms |
+| Rapid events | Waits until pause | Emits first, silences rest | Emits last | Emits latest at interval |
+| Use for | Search autocomplete | Scroll/resize handlers | UI updates | Periodic polling |
+
+```typescript
+// debounceTime — wait for typing to stop
+searchInput.valueChanges.pipe(
+  debounceTime(400), // only search after 400ms of no typing
+  switchMap(term => this.searchService.search(term))
+);
+
+// throttleTime — limit scroll events
+fromEvent(window, 'scroll').pipe(
+  throttleTime(100) // handle scroll max once per 100ms
+);
+```
+
+---
+
+## RX-C3 — `takeUntil` vs `takeWhile` vs `take` vs `first`
+
+| | `take(n)` | `first(predicate?)` | `takeUntil(signal$)` | `takeWhile(condition)` |
+|-|----------|-------------------|---------------------|----------------------|
+| Completes after | n emissions | First matching | Signal emits | Condition is false |
+| Auto-unsubscribe | ✅ | ✅ | ✅ | ✅ |
+| Error if no match | ❌ | ✅ (by default) | ❌ | ❌ |
+
+```typescript
+// takeUntil — most common pattern for component cleanup
+export class MyComponent implements OnInit, OnDestroy {
+  private destroy$ = new Subject<void>();
+
+  ngOnInit() {
+    this.orderService.orders$.pipe(
+      takeUntil(this.destroy$) // auto-unsubscribe on destroy
+    ).subscribe(orders => this.orders = orders);
+  }
+
+  ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+}
+
+// Angular 16+ — takeUntilDestroyed (cleaner)
+orders$ = this.orderService.orders$.pipe(
+  takeUntilDestroyed(this.destroyRef) // inject DestroyRef
+);
+```
+
+---
+
+## RX-C4 — `combineLatest` vs `forkJoin` vs `zip` vs `withLatestFrom`
+
+| | `combineLatest` | `forkJoin` | `zip` | `withLatestFrom` |
+|-|----------------|-----------|-------|-----------------|
+| Emits when | Any source emits (all have emitted at least once) | All sources complete | All emit in sync pairs | Source emits (uses latest from other) |
+| Requires completion | ❌ | ✅ | ❌ | ❌ |
+| Use for | Live combined state | Parallel HTTP (fire and wait) | Strict pairing | Snapshot of another stream |
+
+```typescript
+// combineLatest — reactive dashboard (emits on any change)
+combineLatest([user$, settings$, permissions$]).pipe(
+  map(([user, settings, permissions]) => ({ user, settings, permissions }))
+).subscribe(state => this.updateUI(state));
+
+// forkJoin — parallel HTTP calls, wait for all to complete
+forkJoin({
+  user: this.http.get('/api/user'),
+  orders: this.http.get('/api/orders'),
+  config: this.http.get('/api/config')
+}).subscribe(({ user, orders, config }) => this.init(user, orders, config));
+
+// withLatestFrom — take snapshot of currentUser when action fires
+saveButton$.pipe(
+  withLatestFrom(this.currentUser$), // doesn't subscribe to user$, just peeks
+  switchMap(([_, user]) => this.save({ ...formData, userId: user.id }))
+);
+```
+
+---
+
+## RX-C5 — Hot vs Cold Observables
+
+| | Cold Observable | Hot Observable |
+|-|----------------|----------------|
+| Data producer | Created per subscriber | Shared, exists independently |
+| Each subscriber | Gets own data stream from start | Gets values from current point onward |
+| Examples | `http.get()`, `of()`, `from()` | `Subject`, DOM events, WebSocket |
+| Multicast | ❌ (each sub triggers new HTTP call) | ✅ (all subs share same stream) |
+
+```typescript
+// Cold — each subscriber gets own HTTP call
+const orders$ = this.http.get('/api/orders');
+orders$.subscribe(x => console.log('Sub1:', x)); // makes HTTP call
+orders$.subscribe(x => console.log('Sub2:', x)); // makes ANOTHER HTTP call!
+
+// Hot — share single HTTP call with shareReplay
+const sharedOrders$ = this.http.get('/api/orders').pipe(shareReplay(1));
+sharedOrders$.subscribe(x => console.log('Sub1:', x)); // HTTP call made
+sharedOrders$.subscribe(x => console.log('Sub2:', x)); // gets cached value — no extra call
+
+// Hot — Subject (always hot)
+const clicks$ = new Subject<MouseEvent>();
+document.addEventListener('click', e => clicks$.next(e));
+// All subscribers share same click stream
+```
+
+---
+
+## RX-C6 — `catchError` vs `retry` vs `retryWhen` vs `onErrorResumeNext`
+
+| | `catchError` | `retry(n)` | `retryWhen` | `onErrorResumeNext` |
+|-|------------|-----------|------------|---------------------|
+| On error | Replace with fallback observable | Resubscribe n times | Resubscribe with custom logic | Continue with next observable |
+| Stream terminates | With replacement | After n retries | Based on notifier | Completes normally |
+| Use for | Fallback data, graceful error | Transient errors | Backoff retry strategy | Fire-and-forget sequences |
+
+```typescript
+this.http.get('/api/orders').pipe(
+  retry(3),  // retry 3 times on error
+  catchError(err => {
+    this.log.error(err);
+    return of([]); // return empty array as fallback
+  })
+);
+
+// Exponential backoff retry
+this.http.get('/api/data').pipe(
+  retryWhen(errors$ => errors$.pipe(
+    delayWhen((_, i) => timer(Math.pow(2, i) * 1000)), // 1s, 2s, 4s delays
+    take(4) // max 4 retries
+  ))
+);
+```
+
+
+---
+
+# ⚖️ RxJS Comparisons — Side-by-Side Differences
+
+---
+
+## RX-C1 — `switchMap` vs `mergeMap` vs `concatMap` vs `exhaustMap`
+
+This is the **most asked RxJS interview question**. All four flatten inner Observables but handle concurrency differently.
+
+| | `switchMap` | `mergeMap` (flatMap) | `concatMap` | `exhaustMap` |
+|-|------------|---------------------|-------------|-------------|
+| Concurrency | Cancels previous inner | All run concurrently | One at a time, queued | Ignores new until current completes |
+| Order | ❌ Not guaranteed | ❌ Not guaranteed | ✅ FIFO guaranteed | ❌ Not guaranteed |
+| Memory | Low (only last active) | ❌ Unbounded concurrent | Low (only one) | Low (only one) |
+| Use for | Search autocomplete, latest-wins | Parallel independent tasks | Sequential tasks, upload queue | Login button (ignore spam clicks) |
+
+```ts
+// switchMap — cancel previous, only care about latest (typeahead search)
+this.searchInput.valueChanges.pipe(
+  debounceTime(300),
+  switchMap(term => this.http.get(`/api/search?q=${term}`))
+  // If user types fast, old requests cancelled — only last one matters
+).subscribe(results => this.results = results);
+
+// mergeMap — all concurrent, order not preserved (parallel uploads)
+from(files).pipe(
+  mergeMap(file => this.uploadService.upload(file)) // all upload simultaneously
+).subscribe(result => this.onFileUploaded(result));
+
+// concatMap — queued sequentially, order preserved (ordered payment steps)
+from(paymentSteps).pipe(
+  concatMap(step => this.processStep(step)) // step 2 waits for step 1
+).subscribe();
+
+// exhaustMap — ignores new events while busy (login button debounce)
+this.loginBtn.clicks.pipe(
+  exhaustMap(() => this.auth.login(this.form.value))
+  // Double-click ignored — login already in progress
+).subscribe(user => this.onLoggedIn(user));
+```
+
+---
+
+## RX-C2 — `map` vs `tap` vs `filter` vs `scan`
+
+| | `map` | `tap` | `filter` | `scan` |
+|-|-------|-------|---------|--------|
+| Transforms value | ✅ | ❌ (passthrough) | ❌ | ✅ (accumulates) |
+| Side effects | ❌ | ✅ Purpose: side effects | ❌ | ❌ |
+| Filters items | ❌ | ❌ | ✅ | ❌ |
+| Stateful | ❌ | ❌ | ❌ | ✅ (accumulator) |
+
+```ts
+source$.pipe(
+  tap(v => console.log('Before map:', v)),    // side-effect, doesn't change value
+  map(v => v * 2),                            // transforms each value
+  filter(v => v > 10),                        // drops values below threshold
+  scan((acc, v) => acc + v, 0)               // running total (like reduce but emits each step)
+).subscribe(total => this.runningTotal = total);
+```
+
+---
+
+## RX-C3 — `combineLatest` vs `zip` vs `forkJoin` vs `withLatestFrom`
+
+| | `combineLatest` | `zip` | `forkJoin` | `withLatestFrom` |
+|-|----------------|-------|-----------|----------------|
+| Emits when | Any source emits (after all emitted once) | All sources emit together | All sources complete | Source emits + latest from other |
+| Number of emissions | Multiple | Paired | Once (on complete) | Source-driven |
+| Use for | Live dashboard combining streams | Paired sequences | Parallel HTTP calls | Event + current state |
+
+```ts
+// combineLatest — re-emits whenever any changes (dashboard)
+combineLatest([price$, quantity$]).pipe(
+  map(([price, qty]) => price * qty)
+).subscribe(total => this.total = total);
+
+// forkJoin — wait for ALL to complete, emit once (parallel HTTP)
+forkJoin({
+  user:     this.http.get('/api/user'),
+  orders:   this.http.get('/api/orders'),
+  settings: this.http.get('/api/settings')
+}).subscribe(({ user, orders, settings }) => {
+  this.initPage(user, orders, settings);
+});
+
+// withLatestFrom — trigger from source, sample latest from other
+this.saveBtn.clicks.pipe(
+  withLatestFrom(this.formValues$) // take current form value on each click
+).subscribe(([_, formValue]) => this.save(formValue));
+```
+
+---
+
+## RX-C4 — `takeUntil` vs `takeWhile` vs `take` vs `first`
+
+| | `take(n)` | `first(pred?)` | `takeWhile(pred)` | `takeUntil(notifier$)` |
+|-|----------|---------------|------------------|----------------------|
+| Completes after | n items | 1 item | Condition becomes false | Notifier emits |
+| Unsubscribes | ✅ Auto | ✅ Auto | ✅ Auto | ✅ Auto |
+| Use for | Limit stream | Get first value | While-loop semantics | Component destroy cleanup |
+
+```ts
+// takeUntil — essential for preventing memory leaks in Angular
+@Component({...})
+export class MyComponent implements OnDestroy {
+  private destroy$ = new Subject<void>();
+
+  ngOnInit() {
+    this.dataService.stream$.pipe(
+      takeUntil(this.destroy$)  // auto-unsubscribe on destroy
+    ).subscribe(data => this.data = data);
+  }
+
+  ngOnDestroy() { this.destroy$.next(); this.destroy$.complete(); }
+}
+
+// Angular 16+ takeUntilDestroyed — no manual Subject needed
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+this.dataService.stream$.pipe(
+  takeUntilDestroyed(this.destroyRef) // auto from DestroyRef
+).subscribe(data => this.data = data);
+```
+
+---
+
+## RX-C5 — `catchError` vs `retry` vs `retryWhen` vs `onErrorResumeNext`
+
+| | `catchError` | `retry(n)` | `retryWhen` | `onErrorResumeNext` |
+|-|-------------|-----------|------------|-------------------|
+| On error | Replace with fallback | Resubscribe n times | Resubscribe with custom logic | Continue with next Observable |
+| Completes stream | ❌ (continues with fallback) | After n retries | Depends | After source errors |
+
+```ts
+this.http.get('/api/data').pipe(
+  retry(3),                        // retry up to 3 times on error
+  catchError(err => {
+    console.error(err);
+    return of([]);                 // fallback to empty array — stream continues
+  })
+).subscribe(data => this.data = data);
+
+// retryWhen with exponential backoff
+this.http.get('/api/data').pipe(
+  retryWhen(errors => errors.pipe(
+    delayWhen((_, i) => timer(Math.pow(2, i) * 1000)) // 1s, 2s, 4s delays
+  ))
+).subscribe();
+```
+
+---
+
+## RX-C6 — Hot vs Cold Observables
+
+| | Cold Observable | Hot Observable |
+|-|----------------|---------------|
+| Data producer | Created per subscriber | Shared, exists independently |
+| Unicast/Multicast | Unicast (each subscriber gets own stream) | Multicast (all subscribers share) |
+| Late subscribers | Get all values from start | Miss past values |
+| Examples | `http.get()`, `of()`, `from()` | `Subject`, `fromEvent()`, WebSocket |
+
+```ts
+// Cold — each subscriber triggers a new HTTP request
+const cold$ = this.http.get('/api/data');
+cold$.subscribe(d => console.log('A', d)); // triggers HTTP request #1
+cold$.subscribe(d => console.log('B', d)); // triggers HTTP request #2
+
+// Hot — all subscribers share the same WebSocket
+const hot$ = new Subject<Message>();
+webSocket.onmessage = (msg) => hot$.next(msg);
+hot$.subscribe(m => console.log('A', m)); // share the connection
+hot$.subscribe(m => console.log('B', m)); // same messages, no extra connection
+
+// Make cold hot: share() operator
+const shared$ = this.http.get('/api/data').pipe(share());
+shared$.subscribe(d => console.log('A', d)); // triggers ONE HTTP request
+shared$.subscribe(d => console.log('B', d)); // reuses same request
+```
+

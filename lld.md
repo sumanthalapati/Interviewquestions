@@ -2319,3 +2319,288 @@ var rubberDuck = new Duck(new NoFly(), new Squeak()); // no fly, different quack
 var mallard    = new Duck(new FlyWithWings(), new Quack());
 ```
 
+
+---
+
+# 📊 LLD Flow Diagrams — Visual Reference
+
+---
+
+## LLD-D1 — Design Pattern Classification
+
+```mermaid
+flowchart TD
+    GoF[GoF Design Patterns] --> CR[Creational\nHow objects are CREATED]
+    GoF --> ST[Structural\nHow objects are COMPOSED]
+    GoF --> BH[Behavioral\nHow objects COMMUNICATE]
+
+    CR --> SG[Singleton]
+    CR --> FM[Factory Method]
+    CR --> AF[Abstract Factory]
+    CR --> BD[Builder]
+    CR --> PT[Prototype]
+
+    ST --> AD[Adapter]
+    ST --> DC[Decorator]
+    ST --> FA[Facade]
+    ST --> PX[Proxy]
+    ST --> BR[Bridge]
+    ST --> CO[Composite]
+
+    BH --> OB[Observer]
+    BH --> STR[Strategy]
+    BH --> CMD[Command]
+    BH --> COR[Chain of Responsibility]
+    BH --> STA[State]
+    BH --> TM[Template Method]
+    BH --> MD[Mediator]
+    BH --> IT[Iterator]
+
+    style CR fill:#2196F3,color:#fff
+    style ST fill:#4CAF50,color:#fff
+    style BH fill:#FF9800,color:#fff
+```
+
+---
+
+## LLD-D2 — Decorator Pattern Class Diagram
+
+```mermaid
+classDiagram
+    class IOrderService {
+        <<interface>>
+        +GetOrderAsync(id) Task~Order~
+    }
+
+    class OrderService {
+        -db AppDbContext
+        +GetOrderAsync(id) Task~Order~
+    }
+
+    class CachingOrderService {
+        -inner IOrderService
+        -cache IMemoryCache
+        +GetOrderAsync(id) Task~Order~
+    }
+
+    class LoggingOrderService {
+        -inner IOrderService
+        -logger ILogger
+        +GetOrderAsync(id) Task~Order~
+    }
+
+    IOrderService <|.. OrderService : implements
+    IOrderService <|.. CachingOrderService : implements
+    IOrderService <|.. LoggingOrderService : implements
+    CachingOrderService o-- IOrderService : wraps
+    LoggingOrderService o-- IOrderService : wraps
+```
+
+---
+
+## LLD-D3 — Strategy Pattern Class Diagram
+
+```mermaid
+classDiagram
+    class IDiscountStrategy {
+        <<interface>>
+        +Apply(price) decimal
+        +Name string
+    }
+
+    class NoDiscount {
+        +Apply(price) decimal
+        +Name = "None"
+    }
+
+    class RegularDiscount {
+        +Apply(price) decimal
+        +Name = "Regular -10%"
+    }
+
+    class VipDiscount {
+        +Apply(price) decimal
+        +Name = "VIP -30%"
+    }
+
+    class OrderPricer {
+        -strategy IDiscountStrategy
+        +SetStrategy(strategy)
+        +Calculate(price) decimal
+    }
+
+    IDiscountStrategy <|.. NoDiscount
+    IDiscountStrategy <|.. RegularDiscount
+    IDiscountStrategy <|.. VipDiscount
+    OrderPricer o-- IDiscountStrategy : uses
+```
+
+---
+
+## LLD-D4 — Observer Pattern Class Diagram
+
+```mermaid
+classDiagram
+    class IOrderEventObserver {
+        <<interface>>
+        +OnOrderStatusChanged(event) Task
+    }
+
+    class EmailNotifier {
+        +OnOrderStatusChanged(event) Task
+    }
+
+    class AuditLogger {
+        +OnOrderStatusChanged(event) Task
+    }
+
+    class InventoryUpdater {
+        +OnOrderStatusChanged(event) Task
+    }
+
+    class OrderService {
+        -observers List~IOrderEventObserver~
+        +UpdateStatusAsync(order, newStatus)
+        -NotifyAll(event)
+    }
+
+    IOrderEventObserver <|.. EmailNotifier
+    IOrderEventObserver <|.. AuditLogger
+    IOrderEventObserver <|.. InventoryUpdater
+    OrderService o-- IOrderEventObserver : notifies
+```
+
+---
+
+## LLD-D5 — BookMyShow Seat Booking State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Available : Seat created
+
+    Available --> Held : holdSeat(userId)\n10 minute timer starts
+
+    Held --> Available : holdExpired()\nTimer ran out
+    Held --> Available : releaseSeat()\nUser cancelled
+    Held --> Booked : confirmBooking()\nPayment successful
+
+    Booked --> Available : cancelBooking()\nRefund issued
+
+    note right of Held
+        ShowSeat.HeldUntil = DateTime.UtcNow + 10min
+        Only HeldByUser can confirm
+    end note
+
+    note right of Booked
+        Permanent — requires
+        explicit cancellation
+    end note
+```
+
+---
+
+## LLD-D6 — Splitwise Expense Calculation Flow
+
+```mermaid
+flowchart TD
+    EXP([Add Expense\n₹3000, paid by Alice\nequal split among 3]) --> STRAT{ISplitStrategy}
+
+    STRAT -->|EqualSplitStrategy| EQUAL[Each person: ₹1000\nBob owes Alice ₹1000\nCarol owes Alice ₹1000]
+
+    STRAT -->|PercentageSplitStrategy\n50%/30%/20%| PCT[Alice: ₹1500\nBob: ₹900\nCarol: ₹600]
+
+    STRAT -->|ExactSplitStrategy| EXACT[Custom amounts\nmust sum to ₹3000]
+
+    EQUAL --> BS[BalanceService\nCalculate net balances]
+    PCT --> BS
+    EXACT --> BS
+
+    BS --> SIMP[SimplifyDebts\nGreedy algorithm\nMinimise transactions]
+    SIMP --> RESULT["Bob → Alice: ₹1000\nCarol → Alice: ₹1000\n(2 transactions, not N×M)"]
+
+    style EXP fill:#4CAF50,color:#fff
+    style RESULT fill:#2196F3,color:#fff
+```
+
+---
+
+## LLD-D7 — SOLID Principles at a Glance
+
+```mermaid
+flowchart TD
+    SOLID --> S["S — Single Responsibility\nOne class = one reason to change\n\nFix: Split UserService + EmailService"]
+    SOLID --> O["O — Open/Closed\nOpen for extension, closed for modification\n\nFix: IDiscountStrategy + new classes"]
+    SOLID --> L["L — Liskov Substitution\nSubclass must be usable as base class\n\nFix: Favour composition over inheritance"]
+    SOLID --> I["I — Interface Segregation\nMany small interfaces > one fat interface\n\nFix: IReadable + IWritable not IRepository"]
+    SOLID --> D["D — Dependency Inversion\nDepend on abstractions not concretions\n\nFix: Inject IOrderRepository not SqlOrderRepository"]
+
+    style S fill:#2196F3,color:#fff
+    style O fill:#4CAF50,color:#fff
+    style L fill:#FF9800,color:#fff
+    style I fill:#9C27B0,color:#fff
+    style D fill:#f44336,color:#fff
+```
+
+---
+
+## LLD-D8 — Parking Lot Class Diagram
+
+```mermaid
+classDiagram
+    class ParkingLot {
+        -levels List~ParkingLevel~
+        -ticketCounter int
+        +Park(vehicle) ParkingTicket
+        +Unpark(ticket) Payment
+        +GetAvailableSpots(type) int
+    }
+
+    class ParkingLevel {
+        -levelNumber int
+        -spots List~ParkingSpot~
+        +FindAvailableSpot(type) ParkingSpot
+    }
+
+    class ParkingSpot {
+        -spotNumber int
+        -type SpotType
+        -isOccupied bool
+        -vehicle Vehicle
+        +CanFit(vehicle) bool
+        +Park(vehicle)
+        +Unpark()
+    }
+
+    class Vehicle {
+        <<abstract>>
+        -licensePlate string
+        +GetType() VehicleType
+    }
+
+    class Car { }
+    class Motorcycle { }
+    class Bus { }
+
+    class ParkingTicket {
+        -ticketId string
+        -vehicle Vehicle
+        -spot ParkingSpot
+        -entryTime DateTime
+    }
+
+    class FeeCalculator {
+        <<interface>>
+        +Calculate(ticket) decimal
+    }
+
+    ParkingLot "1" *-- "many" ParkingLevel
+    ParkingLevel "1" *-- "many" ParkingSpot
+    ParkingSpot o-- Vehicle
+    ParkingTicket o-- Vehicle
+    ParkingTicket o-- ParkingSpot
+    Vehicle <|-- Car
+    Vehicle <|-- Motorcycle
+    Vehicle <|-- Bus
+    ParkingLot o-- FeeCalculator
+```
+

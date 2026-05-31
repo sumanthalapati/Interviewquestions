@@ -677,3 +677,342 @@ Example: Stripe payment events, GitHub webhooks
 ---
 
 *Last updated: 2026 | .NET 8 / ASP.NET Core 8*
+
+---
+
+# ⚖️ API Design Comparisons — Side-by-Side Differences
+
+---
+
+## API-C1 — REST vs GraphQL vs gRPC
+
+| | REST | GraphQL | gRPC |
+|-|------|---------|------|
+| Protocol | HTTP/1.1 or HTTP/2 | HTTP/1.1 or HTTP/2 | HTTP/2 only |
+| Data format | JSON (usually) | JSON | Protocol Buffers (binary) |
+| Contract | Implicit (docs/OpenAPI) | Schema (SDL) | Strict `.proto` file |
+| Over-fetching | ✅ Common | ❌ Client picks fields | ❌ Fixed message |
+| Under-fetching | ✅ Multiple requests | ❌ Single request | ❌ Fixed message |
+| Caching | ✅ HTTP caching native | ❌ POST = no HTTP cache | ❌ No standard |
+| Browser support | ✅ Universal | ✅ Universal | ❌ Needs grpc-web proxy |
+| Streaming | Limited (SSE/WebSocket) | Subscriptions | ✅ Native bidirectional |
+| Performance | Medium | Medium | ✅ Fastest (binary + HTTP/2) |
+| Use for | Public APIs, CRUD, simple | Complex queries, BFF, mobile | Internal microservices, low-latency |
+
+```
+Decision guide:
+Public API exposed to third parties → REST (familiar, cacheable, tooling)
+BFF aggregating multiple services for mobile → GraphQL (one request, exact fields)
+Internal microservice-to-microservice → gRPC (fastest, strict contract, streaming)
+```
+
+---
+
+## API-C2 — PUT vs PATCH
+
+| | PUT | PATCH |
+|-|-----|-------|
+| Semantics | Full replace — send entire resource | Partial update — send only changed fields |
+| Idempotent | ✅ Yes | ❌ Not always (depends on patch format) |
+| Missing fields | Set to null / default | Unchanged |
+| Payload size | Always full resource | Only changed fields |
+| Use for | Replace entire document | Update specific fields |
+
+```csharp
+// PUT — replace entire order (missing fields → null)
+[HttpPut("{id}")]
+public async Task<IActionResult> Replace(Guid id, [FromBody] OrderDto dto)
+{
+    // dto must contain ALL fields; missing = overwritten with null/default
+    await _svc.ReplaceAsync(id, dto);
+    return NoContent();
+}
+
+// PATCH — update only what's sent (RFC 6902 JSON Patch)
+[HttpPatch("{id}")]
+public async Task<IActionResult> Update(Guid id, [FromBody] JsonPatchDocument<OrderDto> patch)
+{
+    var order = await _svc.GetAsync(id);
+    patch.ApplyTo(order, ModelState);          // only patched fields change
+    await _svc.SaveAsync(order);
+    return NoContent();
+}
+// PATCH body: [{ "op": "replace", "path": "/status", "value": "Shipped" }]
+```
+
+---
+
+## API-C3 — Offset Pagination vs Cursor Pagination vs Keyset Pagination
+
+| | Offset (`?page=2&size=20`) | Cursor (`?after=eyJ...`) | Keyset (`?lastId=abc`) |
+|-|--------------------------|------------------------|----------------------|
+| DB query | `SKIP (page-1)*size TAKE size` | `WHERE id > cursor` | `WHERE id > lastId` |
+| Performance | O(offset) — degrades with depth | O(log n) constant | O(log n) constant |
+| Stable under inserts | ❌ Items shift, duplicates/skips | ✅ Stable | ✅ Stable |
+| Random page access | ✅ Jump to page 50 | ❌ Forward/backward only | ❌ Forward/backward only |
+| Cursor opacity | N/A | ✅ Opaque (base64 encoded) | ❌ Exposed (raw ID) |
+| Use for | Small data, admin UIs | Feeds, timelines, APIs | High-performance lists |
+
+```csharp
+// Offset — simple but slow on deep pages
+var items = await _db.Orders
+    .OrderBy(o => o.CreatedAt)
+    .Skip((page - 1) * size)   // scans all prior rows!
+    .Take(size).ToListAsync();
+
+// Keyset — fast regardless of depth
+var items = await _db.Orders
+    .Where(o => o.Id > lastSeenId)  // index seek, not scan
+    .OrderBy(o => o.Id)
+    .Take(size).ToListAsync();
+```
+
+---
+
+## API-C4 — 401 Unauthorized vs 403 Forbidden vs 404 Not Found (for missing auth)
+
+| | 401 | 403 | 404 |
+|-|-----|-----|-----|
+| Meaning | Not authenticated | Authenticated but not authorised | Resource doesn't exist (from this user's view) |
+| Token present | ❌ No / invalid | ✅ Valid token | Any |
+| Retry with auth | ✅ Might help | ❌ Won't help | ❌ Won't help |
+| Security note | — | — | Return 404 instead of 403 to hide existence of resource |
+
+```csharp
+// Return 404 instead of 403 when user shouldn't know a resource exists
+var order = await _db.Orders
+    .FirstOrDefaultAsync(o => o.Id == id && o.UserId == currentUserId);
+// If order exists but belongs to another user → return 404, not 403
+// Prevents enumeration: attacker can't tell "forbidden" from "not found"
+return order is null ? NotFound() : Ok(order);
+```
+
+---
+
+## API-C5 — Synchronous vs Asynchronous API Response
+
+| | Synchronous (return result) | Asynchronous (202 + polling) | Webhook (server push) |
+|-|---------------------------|-----------------------------|-----------------------|
+| Client waits | ✅ Yes (blocks connection) | ❌ No (polls separately) | ❌ No (server calls client) |
+| Timeout risk | ✅ If > 30s | ❌ None | ❌ None |
+| Infrastructure | Simple | Job store + polling endpoint | Client must expose HTTP endpoint |
+| Use for | < 3 second operations | Long-running jobs, bulk import | Payment callbacks, GitHub events |
+
+```
+Sync:  POST /reports → 200 { data: [...] }          (< 3s)
+Async: POST /reports → 202 { jobId: "abc" }          (return immediately)
+       GET  /jobs/abc → 200 { status: "completed", result: [...] }  (poll)
+Webhook: POST https://client.com/webhook { event: "report.ready", data: [...] }
+```
+
+---
+
+## API-C6 — API Versioning Strategies
+
+| Strategy | URL Example | Pros | Cons |
+|----------|-------------|------|------|
+| URL Path | `/api/v1/orders` | Obvious, easy to test | Version in URL (purists object) |
+| Query String | `/api/orders?version=1` | No URL change | Can be missed, less visible |
+| Header | `Api-Version: 1` | Clean URLs | Hard to test in browser |
+| Media Type | `Accept: application/vnd.api.v1+json` | REST-pure | Complex, rarely adopted |
+
+```csharp
+// URL path — recommended (most visible and tooling-friendly)
+[ApiVersion("1.0")]
+[Route("api/v{version:apiVersion}/orders")]
+public class OrdersV1Controller : ControllerBase { }
+
+[ApiVersion("2.0")]
+[Route("api/v{version:apiVersion}/orders")]
+public class OrdersV2Controller : ControllerBase { }
+
+// Non-breaking additions stay on same version
+// Breaking changes (rename field, remove field, change type) → bump version
+```
+
+---
+
+## API-C7 — Error Response Formats: Custom vs RFC 7807 ProblemDetails
+
+| | Custom Error Format | RFC 7807 ProblemDetails |
+|-|--------------------|------------------------|
+| Standardised | ❌ Each API invents own | ✅ Industry standard |
+| Machine-readable type | ❌ No URI | ✅ `type` URI identifies error class |
+| HTTP status | Sometimes duplicated in body | ✅ `status` field matches HTTP code |
+| Field-level errors | Custom | Extension fields (`errors` object) |
+| Tooling support | Limited | ✅ Swagger, clients auto-parse |
+
+```json
+// ❌ Custom — clients must know your format
+{ "success": false, "message": "Validation failed", "errorCode": 1042 }
+
+// ✅ RFC 7807 ProblemDetails
+{
+  "type":     "https://api.myapp.com/errors/validation-failed",
+  "title":    "Validation Failed",
+  "status":   400,
+  "detail":   "One or more fields are invalid",
+  "instance": "/api/orders",
+  "traceId":  "00-abc123-00",
+  "errors": {
+    "customerName": ["Name is required"],
+    "total":        ["Must be greater than 0"]
+  }
+}
+```
+
+
+---
+
+# 📊 API Design Flow Diagrams — Visual Reference
+
+---
+
+## API-D1 — REST Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as API Gateway
+    participant MW as Middleware Pipeline
+    participant CTL as Controller
+    participant SVC as Service
+    participant DB as Database
+
+    C->>GW: GET /api/v1/orders?status=pending
+    GW->>GW: Rate limit check
+    GW->>GW: Auth token validate
+    GW->>MW: Forward request
+    MW->>MW: UseAuthentication (set User)
+    MW->>MW: UseAuthorization (check policy)
+    MW->>CTL: Route to OrdersController.List()
+    CTL->>CTL: Model binding + validation
+    CTL->>SVC: GetOrdersAsync(filter)
+    SVC->>DB: SELECT ... WHERE Status='pending'
+    DB-->>SVC: Order rows
+    SVC-->>CTL: List<OrderDto>
+    CTL-->>MW: 200 OK + JSON body
+    MW-->>GW: Response
+    GW-->>C: 200 OK + Cache-Control header
+```
+
+---
+
+## API-D2 — Idempotency Key Flow
+
+```mermaid
+flowchart TD
+    C([Client]) -->|POST /payments\nIdempotency-Key: uuid-123| API[API]
+
+    API --> CHECK{Key 'uuid-123'\nin idempotency store?}
+    CHECK -->|YES| REPLAY[Return SAME cached response\nNo re-processing ✅]
+    CHECK -->|NO| LOCK[Acquire lock on key]
+
+    LOCK --> PROCESS[Process payment]
+    PROCESS --> STORE[Store result with TTL 24h\n'uuid-123' → { status: 200, body: ... }]
+    STORE --> RESP[Return response to client]
+
+    subgraph Retry["Client retry on network failure"]
+        C2([Client retries\nsame Idempotency-Key: uuid-123]) -->|Same key| API
+    end
+
+    REPLAY --> C
+    RESP --> C
+
+    style REPLAY fill:#4CAF50,color:#fff
+    style CHECK fill:#FF9800,color:#fff
+```
+
+---
+
+## API-D3 — API Versioning Strategies
+
+```mermaid
+flowchart LR
+    CLIENT([Client]) --> V1{Version\nStrategy}
+
+    V1 -->|URL Path| URL["/api/v1/orders\n/api/v2/orders\n✅ Most visible\n✅ Easy to test in browser"]
+    V1 -->|Query String| QS["/api/orders?api-version=2\n✅ Non-breaking\n⚠️ Can be ignored"]
+    V1 -->|Header| HDR["Api-Version: 2\n✅ Clean URLs\n⚠️ Harder to test"]
+    V1 -->|Media Type| MT["Accept: application/vnd.api.v2+json\n✅ REST-pure\n❌ Complex"]
+
+    URL --> REC["✅ RECOMMENDED\nfor most APIs"]
+    style REC fill:#4CAF50,color:#fff
+    style URL fill:#4CAF50,color:#fff
+```
+
+---
+
+## API-D4 — Pagination: Offset vs Cursor
+
+```mermaid
+flowchart TD
+    subgraph Offset["Offset Pagination\n?page=2&size=20"]
+        OQ["SELECT * FROM Orders\nSKIP 20 TAKE 20"] --> OSCAN["DB scans ALL 20 rows\nthen discards first 20\nO(n) cost grows with page number"]
+        OSCAN --> OISSUE["❌ Page 1000 → DB scans 20,000 rows\n❌ New insert shifts all pages\n(duplicates/skipped items)"]
+    end
+
+    subgraph Cursor["Cursor Pagination\n?after=eyJpZCI6MTAwfQ"]
+        CQ["SELECT * FROM Orders\nWHERE Id > {lastId}\nTAKE 20"] --> CIDX["B-tree index lookup\nO(log n) always"]
+        CIDX --> COK["✅ Same speed on any page\n✅ No duplicates with live data\n❌ Cannot jump to page 50"]
+    end
+
+    style OISSUE fill:#ffcdd2,color:#333
+    style COK fill:#c8e6c9,color:#333
+```
+
+---
+
+## API-D5 — RFC 7807 Problem Details Error Response
+
+```mermaid
+flowchart LR
+    subgraph Old["❌ Old Style — inconsistent"]
+        E1["{\"error\": \"Something went wrong\"}"]
+        E2["{\"message\": \"Not found\", \"code\": 404}"]
+        E3["Plain text error message"]
+    end
+
+    subgraph New["✅ RFC 7807 Problem Details — standardised"]
+        PD["{
+  type: 'https://api/errors/validation',
+  title: 'Validation Failed',
+  status: 400,
+  detail: 'Request body invalid',
+  instance: '/api/orders',
+  traceId: 'abc123',
+  errors: {
+    customerName: ['Required'],
+    total: ['Must be > 0']
+  }
+}"]
+    end
+
+    Old --> WHY["Problems:\n❌ No standard field names\n❌ No traceId for support\n❌ Machine can't parse reliably"]
+    New --> BENEFIT["Benefits:\n✅ Standard type URI\n✅ Field-level errors\n✅ traceId links to logs\n✅ HTTP status consistent"]
+
+    style WHY fill:#ffcdd2,color:#333
+    style BENEFIT fill:#c8e6c9,color:#333
+```
+
+---
+
+## API-D6 — REST vs GraphQL vs gRPC
+
+```mermaid
+flowchart TD
+    Q{What are you building?} --> PUBLIC{Public API\nfor external devs?}
+    PUBLIC -->|YES| REST["REST\n✅ Universal browser support\n✅ HTTP caching\n✅ Easy to understand"]
+
+    PUBLIC -->|NO| COMPLEX{Complex queries\nover-fetching problem?}
+    COMPLEX -->|YES| GQL["GraphQL\n✅ Client specifies exact fields\n✅ Single endpoint\n❌ No HTTP caching\n❌ N+1 risk"]
+
+    COMPLEX -->|NO| INTERNAL{Internal\nmicroservice\ncommunication?}
+    INTERNAL -->|YES| GRPC["gRPC\n✅ Fastest (binary, HTTP/2)\n✅ Strong types (proto)\n✅ Streaming support\n❌ No browser support"]
+    INTERNAL -->|NO| REST
+
+    style REST fill:#4CAF50,color:#fff
+    style GQL fill:#E91E63,color:#fff
+    style GRPC fill:#2196F3,color:#fff
+```
+

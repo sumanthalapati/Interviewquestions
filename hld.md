@@ -2147,3 +2147,238 @@ A shopping cart can be eventually consistent (user adds items).
 The final payment deduction must be strongly consistent.
 ```
 
+
+---
+
+# 📊 HLD Flow Diagrams — Visual Reference
+
+---
+
+## HLD-D1 — Microservices Architecture
+
+```mermaid
+flowchart TD
+    Client([🌐 Client]) --> GW[API Gateway\nAuth · Rate Limit · Routing]
+
+    GW --> OS[Order Service]
+    GW --> PS[Payment Service]
+    GW --> IS[Inventory Service]
+    GW --> NS[Notification Service]
+
+    OS -->|OrderPlaced event| BUS[[Message Bus\nKafka / Service Bus]]
+    BUS --> PS
+    BUS --> IS
+    BUS --> NS
+
+    OS --> ODB[(Orders DB\nPostgreSQL)]
+    PS --> PDB[(Payments DB\nPostgreSQL)]
+    IS --> IDB[(Inventory DB\nMongoDB)]
+    NS --> EMAIL[SendGrid]
+    NS --> SMS[Twilio]
+
+    OS <-->|sync| CACHE[(Redis Cache)]
+
+    style GW fill:#FF9800,color:#fff
+    style BUS fill:#9C27B0,color:#fff
+    style CACHE fill:#f44336,color:#fff
+```
+
+---
+
+## HLD-D2 — Caching Layers (Cache-Aside Pattern)
+
+```mermaid
+flowchart LR
+    Client([Client]) --> App[Application]
+    App -->|1. Check cache| Redis[(Redis\nCache)]
+    Redis -->|2a. HIT → return| App
+    Redis -->|2b. MISS| DB[(Database)]
+    DB -->|3. Fetch data| App
+    App -->|4. Store in cache\nwith TTL| Redis
+    App -->|5. Return to client| Client
+
+    style Redis fill:#f44336,color:#fff
+    style DB fill:#2196F3,color:#fff
+    style Client fill:#4CAF50,color:#fff
+```
+
+---
+
+## HLD-D3 — Load Balancer Algorithms
+
+```mermaid
+flowchart TD
+    LB[Load Balancer] -->|Round Robin| A[Server A]
+    LB -->|Round Robin| B[Server B]
+    LB -->|Round Robin| C[Server C]
+
+    subgraph Algorithms
+        RR[Round Robin\nRequests 1→A, 2→B, 3→C, 4→A...]
+        LC[Least Connections\nRoute to server with fewest active]
+        IH[IP Hash\nhash client IP → always same server]
+    end
+
+    style LB fill:#FF9800,color:#fff
+    style A fill:#4CAF50,color:#fff
+    style B fill:#4CAF50,color:#fff
+    style C fill:#4CAF50,color:#fff
+```
+
+---
+
+## HLD-D4 — SQL vs NoSQL Decision Tree
+
+```mermaid
+flowchart TD
+    Q1{Need ACID\ntransactions?} -->|YES| SQL[(SQL\nPostgreSQL / SQL Server)]
+    Q1 -->|NO| Q2{Data is\nrelational?}
+    Q2 -->|YES| SQL
+    Q2 -->|NO| Q3{High write\nthroughput\n> 100k/sec?}
+    Q3 -->|YES| CASS[(Cassandra\nDynamoDB)]
+    Q3 -->|NO| Q4{Flexible\nschema?}
+    Q4 -->|YES| MONGO[(MongoDB)]
+    Q4 -->|NO| Q5{Key-value\nonly?}
+    Q5 -->|YES| REDIS[(Redis)]
+    Q5 -->|NO| SQL
+
+    style SQL fill:#2196F3,color:#fff
+    style CASS fill:#9C27B0,color:#fff
+    style MONGO fill:#4CAF50,color:#fff
+    style REDIS fill:#f44336,color:#fff
+```
+
+---
+
+## HLD-D5 — CAP Theorem Venn Diagram
+
+```mermaid
+flowchart LR
+    subgraph CAP["CAP Theorem — Pick 2 of 3"]
+        C[Consistency\nEvery read = latest write]
+        A[Availability\nEvery request gets response]
+        P[Partition\nTolerance\nWorks despite network split]
+
+        CP["CP Systems\nZooKeeper · HBase\n'Better unavailable than wrong'"]
+        AP["AP Systems\nCassandra · DynamoDB\n'Better stale than unavailable'"]
+        CA["CA — Impossible\nin distributed systems\n(partitions always happen)"]
+    end
+
+    C --- CP
+    P --- CP
+    A --- AP
+    P --- AP
+    C --- CA
+    A --- CA
+
+    style CP fill:#2196F3,color:#fff
+    style AP fill:#4CAF50,color:#fff
+    style CA fill:#9e9e9e,color:#fff
+```
+
+---
+
+## HLD-D6 — Event-Driven Architecture vs Synchronous
+
+```mermaid
+flowchart TD
+    subgraph Sync["❌ Synchronous — Tight Coupling"]
+        OS1[Order Service] -->|HTTP call| PAY1[Payment Service]
+        PAY1 -->|HTTP call| INV1[Inventory Service]
+        INV1 -->|HTTP call| SHIP1[Shipping Service]
+        Note1[If any service is down\n→ entire chain fails]
+    end
+
+    subgraph Async["✅ Event-Driven — Loose Coupling"]
+        OS2[Order Service] -->|OrderPlaced| BUS[Message Broker\nKafka]
+        BUS --> PAY2[Payment Service]
+        BUS --> INV2[Inventory Service]
+        BUS --> SHIP2[Shipping Service]
+        BUS --> EMAIL2[Email Service]
+        Note2[Services independent\nAdd new consumers without changing Order Service]
+    end
+
+    style BUS fill:#9C27B0,color:#fff
+    style Note1 fill:#ffcdd2,color:#333
+    style Note2 fill:#c8e6c9,color:#333
+```
+
+---
+
+## HLD-D7 — Read/Write Scaling Patterns
+
+```mermaid
+flowchart TD
+    subgraph Write["Write Path"]
+        W[Write Request] --> Primary[(Primary DB\nSQL Server)]
+        Primary -->|async replication| R1[(Read Replica 1)]
+        Primary -->|async replication| R2[(Read Replica 2)]
+    end
+
+    subgraph Read["Read Path"]
+        RR[Read Request] --> CACHE[(Redis Cache)]
+        CACHE -->|HIT| RR
+        CACHE -->|MISS| R1
+        R1 --> CACHE
+    end
+
+    style Primary fill:#f44336,color:#fff
+    style R1 fill:#4CAF50,color:#fff
+    style R2 fill:#4CAF50,color:#fff
+    style CACHE fill:#FF9800,color:#fff
+```
+
+---
+
+## HLD-D8 — Saga Pattern (Order Flow)
+
+```mermaid
+sequenceDiagram
+    participant O as Order Service
+    participant P as Payment Service
+    participant I as Inventory Service
+    participant S as Shipping Service
+
+    O->>P: ProcessPayment
+    P-->>O: PaymentSuccess
+
+    O->>I: ReserveInventory
+    I-->>O: InventoryReserved
+
+    O->>S: ScheduleShipping
+    S-->>O: ShippingScheduled ✅
+
+    note over O,S: Happy Path ✅
+
+    rect rgb(255, 200, 200)
+        note over O,S: Failure Path — Compensating Transactions
+        O->>I: ReserveInventory
+        I-->>O: InventoryUnavailable ❌
+        O->>P: RefundPayment (compensate)
+        P-->>O: Refunded
+        O->>O: CancelOrder
+    end
+```
+
+---
+
+## HLD-D9 — Consistent Hashing Ring
+
+```mermaid
+flowchart TD
+    subgraph Ring["Hash Ring (0 → 2³²)"]
+        direction LR
+        P0["Position 0"] --> A["🔵 Server A\n(pos 10)"]
+        A --> B["🟢 Server B\n(pos 30)"]
+        B --> C["🟡 Server C\n(pos 70)"]
+        C --> P0
+    end
+
+    K1["Key 'user:123'\nhash=15 → clockwise → Server B"] --> B
+    K2["Key 'order:456'\nhash=25 → clockwise → Server B"] --> B
+    K3["Key 'session:789'\nhash=55 → clockwise → Server C"] --> C
+
+    style A fill:#2196F3,color:#fff
+    style B fill:#4CAF50,color:#fff
+    style C fill:#FF9800,color:#fff
+```
+

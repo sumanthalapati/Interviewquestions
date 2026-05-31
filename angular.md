@@ -2558,3 +2558,455 @@ export const FEATURE_FLAGS = new InjectionToken<FeatureFlags>('FeatureFlags', {
 });
 ```
 
+
+---
+
+# ⚖️ Angular Comparisons — Side-by-Side Differences
+
+---
+
+## ANG-C1 — Component vs Directive vs Pipe
+
+| | Component | Directive | Pipe |
+|-|-----------|----------|------|
+| Has template | ✅ Yes | ❌ No | ❌ No |
+| Has selector | Element (`<app-x>`) | Attribute (`[appX]`) / structural (`*appX`) | Used in template `{{ val \| myPipe }}` |
+| Purpose | UI building block with view | Add behaviour / modify DOM | Transform display values |
+| Types | — | Structural (`*ngIf`, `*ngFor`) / Attribute | Pure / Impure |
+
+```typescript
+// Component — has template
+@Component({ selector: 'app-card', template: `<div>{{title}}</div>` })
+export class CardComponent { @Input() title = ''; }
+
+// Attribute Directive — modifies host element behaviour
+@Directive({ selector: '[appHighlight]' })
+export class HighlightDirective {
+  @HostListener('mouseenter') onEnter() {
+    this.el.nativeElement.style.background = 'yellow';
+  }
+  constructor(private el: ElementRef) {}
+}
+
+// Pipe — transforms template value
+@Pipe({ name: 'truncate', pure: true })
+export class TruncatePipe implements PipeTransform {
+  transform(value: string, limit = 50): string {
+    return value.length > limit ? value.slice(0, limit) + '...' : value;
+  }
+}
+// Usage: {{ longText | truncate:30 }}
+```
+
+---
+
+## ANG-C2 — `ChangeDetectionStrategy.Default` vs `OnPush`
+
+| | Default | OnPush |
+|-|---------|--------|
+| When CD runs | Every event anywhere in app | Only when `@Input` ref changes, event from template, `async` pipe, or `markForCheck()` |
+| Performance | ❌ Checks entire tree | ✅ Skips subtrees with unchanged inputs |
+| Mutation detection | ✅ Detects object mutations | ❌ Must use immutable updates |
+| Use for | Simple/small components | Performance-critical, large lists |
+
+```typescript
+@Component({
+  selector: 'app-order-list',
+  changeDetection: ChangeDetectionStrategy.OnPush, // only check when inputs change
+  template: `<li *ngFor="let o of orders">{{ o.id }}</li>`
+})
+export class OrderListComponent {
+  @Input() orders: Order[] = [];
+}
+
+// ❌ Wrong with OnPush — mutating array doesn't trigger CD
+this.orders.push(newOrder); // reference unchanged → no update!
+
+// ✅ Correct — new array reference triggers OnPush
+this.orders = [...this.orders, newOrder];
+```
+
+---
+
+## ANG-C3 — Observable vs Promise
+
+| | Observable | Promise |
+|-|-----------|---------|
+| Values emitted | Multiple (stream) | Single |
+| Lazy / Eager | ✅ Lazy (execute on subscribe) | ❌ Eager (executes immediately) |
+| Cancellable | ✅ Unsubscribe | ❌ No |
+| Operators | ✅ Rich (`map`, `filter`, `switchMap`, etc.) | Limited (`.then`, `.catch`) |
+| Retry / retry logic | ✅ `retry(3)`, `retryWhen()` | Manual |
+| Use for | HTTP streams, events, real-time | Single async result (non-Angular code) |
+
+```typescript
+// Promise — eager, single value
+const p = fetch('/api/orders'); // starts immediately
+const data = await p;
+
+// Observable — lazy, can be cancelled
+const orders$ = this.http.get('/api/orders'); // NOT started yet
+const sub = orders$.subscribe(data => console.log(data)); // starts here
+sub.unsubscribe(); // cancel mid-flight ✅
+```
+
+---
+
+## ANG-C4 — `ngOnInit` vs Constructor vs `ngAfterViewInit`
+
+| | `constructor` | `ngOnInit` | `ngAfterViewInit` |
+|-|--------------|------------|-------------------|
+| When called | Class instantiation (DI) | After `@Input` bindings set | After view + child views initialised |
+| `@Input` values | ❌ Not yet set | ✅ Available | ✅ Available |
+| Child `@ViewChild` | ❌ Not yet set | ❌ Not yet set | ✅ Available |
+| Use for | DI injection only | Data fetching, init logic | DOM access, child component interaction |
+
+```typescript
+export class OrderDetailComponent implements OnInit, AfterViewInit {
+  @Input() orderId!: string;
+  @ViewChild('mapRef') mapRef!: ElementRef;
+
+  constructor(private svc: OrderService) {
+    // this.orderId is undefined here — don't use inputs in constructor
+  }
+
+  ngOnInit() {
+    // this.orderId is set — fetch data
+    this.svc.getOrder(this.orderId).subscribe(o => this.order = o);
+  }
+
+  ngAfterViewInit() {
+    // this.mapRef is now available — interact with DOM
+    initMap(this.mapRef.nativeElement);
+  }
+}
+```
+
+---
+
+## ANG-C5 — `*ngIf` vs `[hidden]` vs `@if` (Angular 17+)
+
+| | `*ngIf` | `[hidden]` | `@if` (new control flow) |
+|-|---------|----------|--------------------------|
+| Removes from DOM | ✅ Yes | ❌ No (just hides with CSS) | ✅ Yes |
+| Performance | ✅ No DOM for hidden content | ❌ DOM exists, rendering cost | ✅ No DOM |
+| Animations | Works with `*ngIf` animation | N/A | Works with `@if` animation |
+| `else` block | `*ngIf="x; else tpl"` | Separate element | `@else { }` |
+| Syntax | Structural directive | Property binding | Template block |
+
+```html
+<!-- *ngIf — removes from DOM -->
+<app-chart *ngIf="showChart"></app-chart>
+
+<!-- [hidden] — keeps in DOM, just invisible (use for perf when toggle is frequent) -->
+<app-chart [hidden]="!showChart"></app-chart>
+
+<!-- @if — Angular 17+ preferred syntax -->
+@if (showChart) {
+  <app-chart />
+} @else {
+  <p>No data</p>
+}
+```
+
+---
+
+## ANG-C6 — `Subject` vs `BehaviorSubject` vs `ReplaySubject` vs `AsyncSubject`
+
+| | `Subject` | `BehaviorSubject` | `ReplaySubject(n)` | `AsyncSubject` |
+|-|----------|------------------|-------------------|----------------|
+| Initial value | ❌ None | ✅ Required | ❌ None | ❌ None |
+| Late subscriber gets | Nothing | ✅ Latest value | ✅ Last n values | ✅ Last value (on complete) |
+| Use for | Event bus | State/current value | Cache last N events | Single async result |
+| `.value` property | ❌ | ✅ | ❌ | ❌ |
+
+```typescript
+// BehaviorSubject — perfect for shared state
+private cartItems$ = new BehaviorSubject<CartItem[]>([]);
+
+// Late subscriber always gets current state
+this.cartItems$.subscribe(items => console.log(items)); // gets [] immediately
+this.cartItems$.next([item1]); // all subscribers get [item1]
+console.log(this.cartItems$.value); // sync access to current value
+
+// ReplaySubject — perfect for event history
+const log$ = new ReplaySubject<string>(5); // replay last 5 events
+log$.next('event1'); log$.next('event2');
+log$.subscribe(e => console.log(e)); // gets event1, event2 immediately
+```
+
+---
+
+## ANG-C7 — Service `providedIn: 'root'` vs Module Providers vs Component Providers
+
+| | `providedIn: 'root'` | Module `providers` | Component `providers` |
+|-|---------------------|-------------------|----------------------|
+| Scope | App-wide singleton | Module scope | Component + children scope |
+| Tree-shakeable | ✅ Yes | ❌ No | ✅ Yes |
+| Lazy-loaded module | Shared singleton | Module-scoped (separate) | Component-scoped |
+| Use for | Global services | Module-specific services | Per-component state |
+
+```typescript
+// Singleton — shared across entire app
+@Injectable({ providedIn: 'root' })
+export class AuthService { }
+
+// Component-scoped — fresh instance per component
+@Component({
+  providers: [FormValidationService] // new instance for this component tree
+})
+export class CheckoutComponent { }
+// Each CheckoutComponent gets its own FormValidationService instance
+```
+
+
+---
+
+# ⚖️ Angular Comparisons — Side-by-Side Differences
+
+---
+
+## ANG-C1 — Component vs Directive vs Pipe
+
+| | Component | Attribute Directive | Structural Directive | Pipe |
+|-|-----------|---------------------|---------------------|------|
+| Has template | ✅ | ❌ | ❌ | ❌ |
+| Selector | Element: `<app-card>` | Attribute: `[highlight]` | Attribute: `*ngIf` | Pipe: `{{ x \| currency }}` |
+| Modifies | Creates UI section | Host element appearance/behaviour | DOM structure (add/remove elements) | Transforms values in template |
+| Use for | Reusable UI blocks | Behaviour without UI | Conditional/loop rendering | Format data for display |
+
+```ts
+// Component — has own template
+@Component({ selector: 'app-card', template: '<div>{{title}}</div>' })
+export class CardComponent { @Input() title = ''; }
+
+// Attribute Directive — modifies host element
+@Directive({ selector: '[highlight]' })
+export class HighlightDirective {
+  @HostListener('mouseenter') onEnter() {
+    this.el.nativeElement.style.backgroundColor = 'yellow';
+  }
+  constructor(private el: ElementRef) {}
+}
+
+// Structural Directive — changes DOM
+@Directive({ selector: '[appUnless]' })
+export class UnlessDirective {
+  @Input() set appUnless(condition: boolean) {
+    condition ? this.vcr.clear() : this.vcr.createEmbeddedView(this.tpl);
+  }
+  constructor(private tpl: TemplateRef<any>, private vcr: ViewContainerRef) {}
+}
+
+// Pipe — transforms template values
+@Pipe({ name: 'truncate' })
+export class TruncatePipe implements PipeTransform {
+  transform(value: string, limit = 50): string {
+    return value.length > limit ? value.slice(0, limit) + '...' : value;
+  }
+}
+// Usage: {{ longText | truncate:100 }}
+```
+
+---
+
+## ANG-C2 — `ChangeDetectionStrategy.Default` vs `OnPush`
+
+| | Default | OnPush |
+|-|---------|--------|
+| When CD runs | Every event anywhere in app | Only when: input ref changes, async pipe emits, `markForCheck()` called, event in component |
+| Performance | ❌ Checks entire tree | ✅ Skips subtrees (dramatically faster) |
+| Requires | Nothing special | Immutable inputs or Observables |
+| Debug difficulty | Easy | Harder (can miss updates with mutable objects) |
+| Use for | Simple components | Presentational / "dumb" components, large lists |
+
+```ts
+// OnPush — only re-renders when @Input reference changes
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<ul><li *ngFor="let item of items">{{item.name}}</li></ul>`
+})
+export class ListComponent {
+  @Input() items: Item[] = []; // must pass NEW array reference to trigger CD
+}
+
+// ❌ This will NOT update OnPush component
+this.items.push(newItem);    // mutates existing array — same reference
+
+// ✅ This WILL update OnPush component
+this.items = [...this.items, newItem]; // new array reference → CD triggered
+```
+
+---
+
+## ANG-C3 — `Observable` vs `Promise` in Angular
+
+| | `Observable` | `Promise` |
+|-|-------------|---------|
+| Values | Multiple over time | Single |
+| Lazy | ✅ Only executes when subscribed | ❌ Executes immediately |
+| Cancellable | ✅ `unsubscribe()` | ❌ |
+| Operators | Rich (`map`, `filter`, `switchMap`…) | `.then().catch()` only |
+| Angular HttpClient | Returns Observable | ❌ |
+| Use for | HTTP, events, streams | One-off async operations |
+
+```ts
+// Observable — lazy, cancellable, composable
+this.http.get<Order[]>('/api/orders')  // does NOT execute yet
+  .pipe(
+    map(orders => orders.filter(o => o.status === 'pending')),
+    catchError(err => of([]))
+  )
+  .subscribe(orders => this.orders = orders); // executes HERE
+
+// Convert to Promise when needed (e.g. legacy code)
+const orders = await this.http.get<Order[]>('/api/orders').toPromise();
+
+// Angular async pipe — auto-subscribes AND auto-unsubscribes
+// orders$ | async never leaks memory unlike manual subscribe
+```
+
+---
+
+## ANG-C4 — `*ngIf` vs `*ngSwitch` vs `@if` / `@switch` (Angular 17+)
+
+| | `*ngIf` | `*ngSwitch` | `@if` / `@switch` (new syntax) |
+|-|---------|-------------|-------------------------------|
+| Use for | Boolean show/hide | Multiple conditions on same value | Same as ngIf/ngSwitch but cleaner |
+| Else template | `; else ref` | `*ngSwitchDefault` | `} @else {` |
+| Performance | Removes from DOM | Removes from DOM | Removes from DOM |
+| Available from | Angular 2+ | Angular 2+ | Angular 17+ |
+
+```html
+<!-- *ngIf with else -->
+<div *ngIf="isLoggedIn; else loginBlock">Welcome!</div>
+<ng-template #loginBlock><app-login /></ng-template>
+
+<!-- *ngSwitch -->
+<div [ngSwitch]="status">
+  <p *ngSwitchCase="'pending'">Waiting...</p>
+  <p *ngSwitchCase="'shipped'">On the way!</p>
+  <p *ngSwitchDefault>Unknown</p>
+</div>
+
+<!-- Angular 17+ control flow — no ngSwitch boilerplate -->
+@switch (status) {
+  @case ('pending')  { <p>Waiting...</p> }
+  @case ('shipped')  { <p>On the way!</p> }
+  @default           { <p>Unknown</p> }
+}
+```
+
+---
+
+## ANG-C5 — `Subject` vs `BehaviorSubject` vs `ReplaySubject` vs `AsyncSubject`
+
+| | `Subject` | `BehaviorSubject` | `ReplaySubject(n)` | `AsyncSubject` |
+|-|-----------|------------------|-------------------|---------------|
+| Initial value | ❌ None | ✅ Required | ❌ None | ❌ None |
+| Late subscriber gets | Nothing past | ✅ Current value | ✅ Last n values | ✅ Last value (on complete) |
+| Use for | Events, one-time signals | Shared state (current value needed) | Caching last N, replay | Only care about final value |
+
+```ts
+// BehaviorSubject — always has current value, new subscribers get it immediately
+const currentUser$ = new BehaviorSubject<User | null>(null);
+currentUser$.next(loggedInUser);          // update
+currentUser$.getValue();                  // read current synchronously
+currentUser$.subscribe(u => /* always gets current value */);
+
+// ReplaySubject — caches last N values for late subscribers
+const log$ = new ReplaySubject<string>(5); // cache last 5
+log$.next("step 1"); log$.next("step 2");
+log$.subscribe(msg => /* gets "step 1", "step 2" immediately */);
+
+// Subject — no memory, late subscribers miss past values
+const click$ = new Subject<Event>();
+click$.next(event); // subscriber must already be subscribed to receive this
+```
+
+---
+
+## ANG-C6 — `@Input()` vs `@Output()` vs Signals (`input()` / `output()`) — Angular 17+
+
+| | `@Input()` / `@Output()` | `input()` / `output()` Signals |
+|-|--------------------------|-------------------------------|
+| Syntax | Decorator | Function call |
+| Reactive | ❌ Need `ngOnChanges` for reactions | ✅ `computed()`, `effect()` |
+| Required | `@Input({ required: true })` | `input.required<T>()` |
+| Two-way binding | `[(value)]` with EventEmitter | `model()` |
+| Change detection | Default / OnPush | ✅ Fine-grained (no zone.js needed) |
+
+```ts
+// Classic decorators
+@Component({...})
+export class CardComponent {
+  @Input()  title = '';
+  @Output() clicked = new EventEmitter<void>();
+}
+
+// Signal-based (Angular 17+ preferred)
+@Component({...})
+export class CardComponent {
+  title   = input.required<string>();     // required signal input
+  clicked = output<void>();               // signal output
+
+  // React to input changes automatically
+  titleUpper = computed(() => this.title().toUpperCase());
+}
+```
+
+---
+
+## ANG-C7 — `providedIn: 'root'` vs Module Provider vs Component Provider
+
+| | `providedIn: 'root'` | Module `providers: []` | Component `providers: []` |
+|-|---------------------|----------------------|-----------------------------|
+| Scope | Application singleton | Module singleton | New instance per component |
+| Tree-shakeable | ✅ Yes | ❌ Always bundled | ✅ |
+| Use for | Global services (HTTP, Auth, Store) | Feature-module scoped services | Component-specific state |
+
+```ts
+// Root singleton — one instance, lazy-loaded, tree-shakeable
+@Injectable({ providedIn: 'root' })
+export class AuthService { }
+
+// Component provider — fresh instance per component (isolated state)
+@Component({
+  providers: [FormStateService]  // new instance for THIS component tree
+})
+export class CheckoutComponent { }
+```
+
+---
+
+## ANG-C8 — Template-Driven Forms vs Reactive Forms
+
+| | Template-Driven | Reactive |
+|-|----------------|---------|
+| Definition | HTML template (`ngModel`) | TypeScript (`FormBuilder`) |
+| Validation | HTML attributes | Validator functions |
+| Testing | Hard (requires DOM) | ✅ Easy (pure TS) |
+| Dynamic fields | ❌ Hard | ✅ `FormArray` |
+| Value access | `ngForm.value` | `form.value` |
+| Use for | Simple forms | Complex, dynamic, testable forms |
+
+```ts
+// Reactive — defined in TypeScript, fully testable
+export class OrderFormComponent {
+  form = this.fb.group({
+    customer: ['', [Validators.required, Validators.minLength(3)]],
+    items:    this.fb.array([]),
+    total:    [0, Validators.min(0.01)]
+  });
+
+  addItem() {
+    (this.form.get('items') as FormArray).push(
+      this.fb.group({ name: '', qty: 1 })
+    );
+  }
+}
+
+// Template-driven — defined in HTML, less code but less control
+// <input [(ngModel)]="order.customer" required minlength="3">
+```
+

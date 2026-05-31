@@ -2820,3 +2820,353 @@ svc.PlaceOrder(new Order()); // No global state required
 *Why good:* All dependencies are explicit, required, and visible. Tests trivially provide mocks. No global state. Compile errors if a dependency is missing.
 
 ---
+
+---
+
+# ⚖️ OOP & Design Pattern Comparisons — Side-by-Side Differences
+
+---
+
+## OOP-C1 — Encapsulation vs Abstraction vs Information Hiding
+
+| | Encapsulation | Abstraction | Information Hiding |
+|-|--------------|-------------|-------------------|
+| What it does | Bundles data + methods in one unit | Hides implementation, exposes interface | Hides internal details from outside |
+| Mechanism | Access modifiers (`private`, `public`) | Abstract class / interface | `private` fields, public API |
+| Focus | HOW data is protected | WHAT functionality is exposed | WHICH details are hidden |
+| Example | `private decimal _balance; public Deposit()` | `abstract void Speak()` | DB connection string private |
+
+```csharp
+// All three working together:
+public class BankAccount
+{
+    private decimal _balance;            // Encapsulation + Information Hiding
+    private string _connectionString;   // Information Hiding — callers never see this
+
+    public void Deposit(decimal amount) // Abstraction — caller uses this, not _balance directly
+    {
+        if (amount <= 0) throw new ArgumentException();
+        _balance += amount;
+    }
+
+    public decimal GetBalance() => _balance; // Controlled access to hidden state
+}
+```
+
+---
+
+## OOP-C2 — Overloading vs Overriding vs Hiding (`new`)
+
+| | Overloading | Overriding | Hiding (`new`) |
+|-|------------|-----------|----------------|
+| Same method name | ✅ | ✅ | ✅ |
+| Different signature | ✅ (required) | ❌ (same) | ❌ (same) |
+| Resolved at | Compile time | Runtime (polymorphism) | Compile time |
+| Polymorphic | ❌ | ✅ | ❌ |
+| Keyword | None | `virtual` + `override` | `new` |
+
+```csharp
+// Overloading — same name, different params (compile-time resolution)
+void Log(string msg) { }
+void Log(string msg, LogLevel level) { }
+void Log(Exception ex) { }
+
+// Overriding — runtime polymorphism
+class Animal     { public virtual  void Speak() => Console.Write("..."); }
+class Dog : Animal { public override void Speak() => Console.Write("Woof"); }
+Animal a = new Dog(); a.Speak(); // "Woof" — runtime dispatch ✅
+
+// Hiding — NOT polymorphic (breaks at base reference)
+class Cat : Animal { public new void Speak() => Console.Write("Meow"); }
+Animal c = new Cat(); c.Speak(); // "..." — Animal.Speak called! NOT Cat ❌
+```
+
+---
+
+## OOP-C3 — `abstract` class vs `interface` vs `sealed` class vs `record`
+
+| | `abstract` class | `interface` | `sealed` class | `record` |
+|-|----------------|-------------|---------------|---------|
+| Instantiatable | ❌ | ❌ | ✅ | ✅ |
+| Inheritance | Single | Multiple | ❌ (no subclassing) | ✅ (with `record`) |
+| State (fields) | ✅ | ❌ | ✅ | ✅ (init-only) |
+| Default impl | ✅ | ✅ (C# 8+) | ✅ | ✅ |
+| Value equality | ❌ (reference) | ❌ | ❌ | ✅ Generated |
+| Use for | Base with shared logic | Contract, multiple impl | Security, immutable | Immutable DTOs, value objects |
+
+---
+
+## OOP-C4 — SOLID Principles Violations Quick Reference
+
+```csharp
+// S — SRP violation: class does too much
+class OrderService { void Create() {} void SendEmail() {} void GeneratePdf() {} } // 3 reasons to change
+
+// O — OCP violation: adding behaviour by modifying existing code
+if (type == "circle") { } else if (type == "square") { } // add shape = edit this method
+
+// L — LSP violation: subclass breaks base class contract
+class Rectangle { public virtual int Width { get; set; } public virtual int Height { get; set; } }
+class Square : Rectangle {
+    public override int Width { set { base.Width = value; base.Height = value; } } // breaks substitution!
+}
+
+// I — ISP violation: fat interface forces unused implementation
+interface IWorker { void Work(); void Eat(); void Sleep(); }
+class RobotWorker : IWorker { public void Eat() => throw new NotSupportedException(); } // ❌
+
+// D — DIP violation: depends on concrete class
+class OrderService { private SqlOrderRepo _repo = new SqlOrderRepo(); } // tight coupling ❌
+```
+
+---
+
+## OOP-C5 — Cohesion vs Coupling
+
+| | High Cohesion (✅ Good) | Low Cohesion (❌ Bad) |
+|-|----------------------|---------------------|
+| What it means | Class has one focused responsibility | Class does many unrelated things |
+| Change impact | Small — one class changed per feature | Large — many classes touched |
+
+| | Loose Coupling (✅ Good) | Tight Coupling (❌ Bad) |
+|-|------------------------|----------------------|
+| What it means | Classes interact via interfaces/events | Classes directly depend on concrete types |
+| Testability | ✅ Easy to mock dependencies | ❌ Hard — must instantiate everything |
+| Change impact | Small — change one without breaking others | Large — cascade changes |
+
+```csharp
+// High cohesion + loose coupling (✅)
+public class OrderService              // focused: only order business logic
+{
+    private readonly IOrderRepository _repo;      // depends on abstraction
+    private readonly IEmailService _email;        // injected — can mock
+    public OrderService(IOrderRepository r, IEmailService e) { _repo = r; _email = e; }
+}
+
+// Low cohesion + tight coupling (❌)
+public class OrderService {
+    private SqlOrderRepository _repo = new();    // tight — concrete type
+    public void Create() { }
+    public void SendEmail() { }     // unrelated responsibility
+    public void GeneratePdf() { }  // another unrelated responsibility
+    public void UpdateInventory() { } // yet another
+}
+```
+
+---
+
+## OOP-C6 — Creational Patterns Comparison
+
+| Pattern | Problem solved | Creates | Key mechanism |
+|---------|---------------|---------|---------------|
+| Singleton | Ensure one instance | One object | Lazy init + private constructor |
+| Factory Method | Decouple creation from use | One product type | Subclass decides which class |
+| Abstract Factory | Create consistent product families | Family of related objects | Factory of factories |
+| Builder | Complex object construction | One complex object | Step-by-step, fluent API |
+| Prototype | Copy existing object | Copy of existing | `Clone()` |
+
+```
+When to choose:
+"I need exactly one instance globally" → Singleton (or DI AddSingleton)
+"I need to create different types at runtime" → Factory Method
+"I need consistent UI families (Win/Mac)" → Abstract Factory
+"My object has 10+ optional fields" → Builder
+"I need to copy a complex object" → Prototype (ICloneable)
+```
+
+---
+
+## OOP-C7 — Structural Patterns Comparison
+
+| Pattern | Purpose | Wraps same interface? | Adds behaviour? | Converts interface? |
+|---------|---------|----------------------|----------------|---------------------|
+| Decorator | Add behaviour dynamically | ✅ | ✅ | ❌ |
+| Proxy | Control access | ✅ | Optionally | ❌ |
+| Adapter | Bridge incompatible interfaces | ❌ | ❌ | ✅ |
+| Facade | Simplify complex subsystem | ❌ | ❌ | Simplifies |
+| Bridge | Separate abstraction from implementation | — | — | — |
+| Composite | Tree structures (part-whole) | ✅ | — | ❌ |
+| Flyweight | Share many fine-grained objects | ❌ | ❌ | ❌ |
+
+---
+
+## OOP-C8 — Behavioral Patterns Comparison
+
+| Pattern | Who controls flow | Key feature | Example |
+|---------|------------------|-------------|---------|
+| Strategy | Context (holds strategy) | Swap algorithm at runtime | Payment method, discount calc |
+| Command | Invoker (holds commands) | Undo/redo, queue commands | Text editor undo |
+| Observer | Subject (notifies) | Decoupled event notification | Event bus, UI bindings |
+| Template Method | Abstract class (skeleton) | Invariant algorithm, variable steps | Report generation |
+| Chain of Responsibility | Request passed up chain | Dynamic handler selection | Middleware, approval chain |
+| State | Context (delegates to state) | Behaviour changes with state | ATM, vending machine, order lifecycle |
+| Mediator | Mediator (centralises comms) | Reduce many-to-many coupling | MediatR, air traffic control |
+| Iterator | Iterator object | Traverse without exposing internals | `foreach`, `IEnumerator<T>` |
+
+
+---
+
+# ⚖️ OOP & Design Pattern Comparisons — Side-by-Side Differences
+
+---
+
+## OOP-C1 — Creational vs Structural vs Behavioral Patterns
+
+| Category | Purpose | Patterns |
+|----------|---------|---------|
+| **Creational** | HOW objects are created (hide creation logic) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
+| **Structural** | HOW objects are composed (class/object structure) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
+| **Behavioral** | HOW objects communicate (responsibility assignment) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
+
+---
+
+## OOP-C2 — Encapsulation vs Abstraction vs Information Hiding
+
+| | Encapsulation | Abstraction | Information Hiding |
+|-|--------------|-------------|-------------------|
+| What | Bundle data + methods | Show only relevant interface | Hide implementation details |
+| How | Private fields + public methods | Interfaces / abstract classes | Access modifiers |
+| Why | Protect state | Reduce complexity | Limit dependencies |
+
+```csharp
+// All three together:
+public abstract class BankAccount      // Abstraction — only shows Deposit/Withdraw
+{
+    private decimal _balance;          // Encapsulation — data bundled with class
+                                       // Information Hiding — balance not directly accessible
+    public abstract void Deposit(decimal amount);
+
+    protected void SetBalance(decimal amount) => _balance = amount;
+    public decimal GetBalance() => _balance; // controlled access only
+}
+```
+
+---
+
+## OOP-C3 — Inheritance vs Composition vs Aggregation vs Association
+
+| Relationship | Meaning | Lifetime | C# example |
+|-------------|---------|---------|------------|
+| **Inheritance** (is-a) | Child extends parent | Same | `class Dog : Animal` |
+| **Composition** (has-a, strong) | Owner owns component, component dies with owner | Shared | `class Car { Engine engine = new(); }` |
+| **Aggregation** (has-a, weak) | Owner references component, component lives independently | Independent | `class Team { List<Player> players; }` |
+| **Association** (uses-a) | Knows about / uses temporarily | Independent | Method parameter |
+
+```csharp
+// Composition — Engine dies when Car dies
+class Car { private Engine _engine = new Engine(); }
+
+// Aggregation — Players exist independently of Team
+class Team { public List<Player> Players { get; init; } = []; }
+// Players can belong to multiple teams, outlive the team
+
+// Association — temporary use
+class OrderProcessor
+{
+    public void Process(Order order) { /* uses order but doesn't own it */ }
+}
+```
+
+---
+
+## OOP-C4 — Abstract Class vs Interface vs Concrete Class
+
+| | Concrete Class | Abstract Class | Interface |
+|-|---------------|---------------|-----------|
+| Instantiate | ✅ | ❌ | ❌ |
+| Multiple inheritance | ❌ | ❌ | ✅ |
+| State / fields | ✅ | ✅ | ❌ |
+| Constructor | ✅ | ✅ | ❌ |
+| Default method body | ✅ | ✅ (partial) | ✅ (C# 8+ default impl) |
+| Design intent | "Here is a complete thing" | "Here is a partial blueprint" | "Here is a contract" |
+
+---
+
+## OOP-C5 — Overloading vs Overriding vs Hiding (`new` keyword)
+
+| | Overloading | Overriding | Hiding (`new`) |
+|-|------------|-----------|----------------|
+| Same name | ✅ | ✅ | ✅ |
+| Same signature | ❌ (different params) | ✅ (same params) | ✅ (same params) |
+| Runtime polymorphism | ❌ Compile-time | ✅ | ❌ |
+| Requires `virtual` | ❌ | ✅ base needs `virtual` | ❌ |
+| Risk | None | None | ❌ Breaks polymorphism |
+
+```csharp
+class Logger
+{
+    // Overloading — same name, different params (compile-time resolution)
+    public void Log(string msg) { }
+    public void Log(string msg, int level) { }
+
+    // Virtual — allows overriding
+    public virtual void Write(string msg) => Console.WriteLine(msg);
+}
+
+class FileLogger : Logger
+{
+    // Overriding — runtime polymorphism ✅
+    public override void Write(string msg) => File.AppendAllText("log.txt", msg);
+
+    // Hiding — breaks polymorphism ❌
+    public new void Log(string msg) => Console.WriteLine($"[File] {msg}");
+}
+
+Logger log = new FileLogger();
+log.Write("test");  // ✅ calls FileLogger.Write (override works)
+log.Log("test");    // ❌ calls Logger.Log (hidden method not visible via base ref)
+```
+
+---
+
+## OOP-C6 — SOLID: Each Principle with Common Violation
+
+| Principle | Violation | Fix |
+|-----------|----------|-----|
+| **S** — SRP | `UserService` also sends emails | Split into `UserService` + `EmailService` |
+| **O** — OCP | `if (type == "pdf") ... else if (type == "csv")` | `IExporter` interface + `PdfExporter`, `CsvExporter` |
+| **L** — LSP | `Rectangle.SetWidth()` breaks `Square` subclass | Favour composition over inheritance |
+| **I** — ISP | `IWorker` with `Work()`, `Eat()`, `Sleep()` | Split into `IWorker`, `IEater`, `ISleeper` |
+| **D** — DIP | `new SqlRepository()` inside service | Inject `IRepository` via constructor |
+
+---
+
+## OOP-C7 — Four GoF Creational Patterns Compared
+
+| | Singleton | Factory Method | Abstract Factory | Builder |
+|-|-----------|---------------|-----------------|---------|
+| Creates how many | Exactly ONE | One product, type varies | Family of products | One complex product |
+| Controlled by | Self | Subclass / method | Factory class | Builder + Director |
+| Use for | Config, Logger | Plugin systems | Platform-specific UI | Complex object construction |
+| DI equivalent | `AddSingleton` | `AddTransient` with factory | Named factory | `OptionsBuilder<T>` |
+
+---
+
+## OOP-C8 — Cohesion vs Coupling
+
+| | Cohesion | Coupling |
+|-|---------|---------|
+| Definition | How related are a class's responsibilities | How dependent classes are on each other |
+| Goal | ✅ HIGH cohesion | ✅ LOW coupling |
+| Violation | God class with 50 methods | Concrete dependency `new SqlRepo()` |
+| Fix | Split classes by SRP | Depend on interfaces (DIP) |
+
+```csharp
+// ❌ Low cohesion + high coupling
+class OrderManager  // does EVERYTHING
+{
+    private SqlOrderRepository _repo = new(); // high coupling to SQL
+    public void CreateOrder() { }
+    public void SendEmail()   { }   // not order's job
+    public void GeneratePdf() { }   // not order's job
+    public void UpdateStock() { }   // not order's job
+}
+
+// ✅ High cohesion + low coupling
+class OrderService(IOrderRepository repo, IEventBus bus)
+{
+    public async Task CreateOrderAsync(CreateOrderDto dto) { /* only order logic */ }
+}
+// Each class has one clear purpose; depends on abstractions
+```
+

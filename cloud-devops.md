@@ -882,3 +882,356 @@ public class OrdersController : ControllerBase
 ---
 
 *Last updated: 2026 | .NET 8 / Kubernetes 1.29 / Docker 25*
+
+---
+
+# ⚖️ Cloud & DevOps Comparisons — Side-by-Side Differences
+
+---
+
+## CD-C1 — Docker Container vs Virtual Machine
+
+| | Docker Container | Virtual Machine |
+|-|----------------|----------------|
+| Isolation | Process-level (shared OS kernel) | Full OS isolation (hypervisor) |
+| Size | MBs (layers, shared base) | GBs (full OS per VM) |
+| Startup time | Seconds | Minutes |
+| Performance | Near-native | ~5–10% overhead |
+| Security boundary | Weaker (shared kernel) | Stronger (separate kernel) |
+| Use for | App packaging, microservices, CI | Full OS isolation, legacy apps, compliance |
+
+```
+Container: App → Container Runtime → Host OS Kernel
+VM:        App → Guest OS → Hypervisor → Host OS
+
+Docker shares the host kernel — a Linux container on a Linux host
+Windows containers on Windows host do the same
+"Docker on Mac/Windows" = runs a lightweight Linux VM first, then containers inside it
+```
+
+---
+
+## CD-C2 — Blue-Green vs Canary vs Rolling Deployment
+
+| | Blue-Green | Canary | Rolling |
+|-|-----------|--------|---------|
+| Traffic split | 0% / 100% instant flip | Gradual % (1% → 10% → 100%) | Pod-by-pod replacement |
+| Rollback | ✅ Instant (flip back) | ✅ Fast (reduce canary %) | Slow (roll back each pod) |
+| Resource cost | 2x (both envs live) | 1x + small canary | 1x + extra pods during update |
+| Risk exposure | All users at once after flip | Small % first | Growing % as pods update |
+| Best for | Instant rollback, critical releases | Validate with real traffic first | Resource-constrained clusters |
+
+```
+Blue-Green:  [v1 100%] → flip → [v2 100%]          instant, all-or-nothing
+Canary:      [v1 99% + v2 1%] → [v1 90% + v2 10%] → [v2 100%]
+Rolling:     [v1 v1 v1 v1] → [v2 v1 v1 v1] → [v2 v2 v1 v1] → [v2 v2 v2 v2]
+```
+
+---
+
+## CD-C3 — Kubernetes Liveness vs Readiness vs Startup Probes
+
+| | Liveness Probe | Readiness Probe | Startup Probe |
+|-|---------------|----------------|---------------|
+| Question | "Is the app alive?" | "Is it ready for traffic?" | "Has the app finished starting?" |
+| Fails → K8s does | Restart the pod | Remove from Service (no traffic) | Keep checking; don't kill yet |
+| Use for | Deadlock detection | Warm-up, dependency check | Slow-starting apps (JVM, heavy init) |
+| Failure is serious | ✅ Pod restarted | ❌ Pod not killed, just isolated | ❌ Pod not killed, just waiting |
+
+```yaml
+livenessProbe:    # restart if app is stuck/deadlocked
+  httpGet: { path: /health/live, port: 8080 }
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:   # remove from LB if not ready (DB migration running, warming up)
+  httpGet: { path: /health/ready, port: 8080 }
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+startupProbe:     # give slow apps more time before liveness kicks in
+  httpGet: { path: /health/live, port: 8080 }
+  failureThreshold: 30   # 30 × 10s = 5 minutes to start
+  periodSeconds: 10
+```
+
+---
+
+## CD-C4 — Horizontal Pod Autoscaler vs Vertical Pod Autoscaler vs KEDA
+
+| | HPA | VPA | KEDA |
+|-|-----|-----|------|
+| Scales | Number of pods | CPU/memory per pod | Pods based on external metrics |
+| Trigger | CPU/memory utilisation | Observed resource usage | Queue depth, Kafka lag, custom metrics |
+| Live adjustments | ✅ | ❌ (needs pod restart) | ✅ |
+| Use for | Stateless services under load | Right-sizing containers | Event-driven workloads |
+
+```yaml
+# HPA — scale pods when CPU > 70%
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+
+# KEDA — scale based on Azure Service Bus queue depth
+triggers:
+- type: azure-servicebus
+  metadata:
+    queueName: orders
+    messageCount: "5"   # scale up when > 5 messages per pod
+```
+
+---
+
+## CD-C5 — Layer 4 vs Layer 7 Load Balancer
+
+| | L4 (Transport Layer) | L7 (Application Layer) |
+|-|---------------------|----------------------|
+| Routes based on | IP + TCP/UDP port | HTTP URL, headers, cookies |
+| SSL termination | ❌ Pass-through | ✅ Yes |
+| Content-based routing | ❌ | ✅ `/api` → backend, `/static` → CDN |
+| Sticky sessions | IP hash only | ✅ Cookie-based |
+| Performance | ✅ Faster (less parsing) | Slightly slower |
+| Azure equivalent | Azure Load Balancer | Application Gateway / Front Door |
+| Nginx role | Stream module | HTTP module (default) |
+
+---
+
+## CD-C6 — CI vs CD (Continuous Delivery vs Continuous Deployment)
+
+| | Continuous Integration (CI) | Continuous Delivery (CD) | Continuous Deployment |
+|-|----------------------------|--------------------------|-----------------------|
+| What | Auto build + test on every push | Auto deploy to staging; manual prod approval | Auto deploy to production on every green build |
+| Human approval | N/A | ✅ Required for prod | ❌ Fully automated |
+| Risk | None | Low | Higher (needs excellent test coverage) |
+| Use for | All teams | Most teams | High-maturity orgs |
+
+```
+CI:   Push → Build → Test → ✅ Green
+CD:   CI → Deploy Staging → Auto tests → [Approval Gate] → Deploy Prod
+Continuous Deployment: CI → Deploy Staging → Auto tests → Deploy Prod (no gate)
+```
+
+---
+
+## CD-C7 — Metrics vs Logs vs Traces (Observability Pillars)
+
+| | Metrics | Logs | Traces |
+|-|---------|------|--------|
+| Data type | Numeric time-series | Discrete text events | Request journey spans |
+| Cardinality | Low (aggregated) | High (per event) | Medium (per request) |
+| Storage cost | ✅ Low | ❌ High | Medium |
+| Real-time alerting | ✅ Yes (Prometheus alerts) | Possible (log-based alerts) | Not typical |
+| Answers | "How many? How fast? Error rate?" | "What happened and when?" | "Where is the bottleneck?" |
+| Tools | Prometheus, Datadog metrics | Seq, ELK, Splunk | Jaeger, Zipkin, Azure Monitor |
+| .NET package | `System.Diagnostics.Metrics` | `ILogger<T>` / Serilog | `System.Diagnostics.Activity` |
+
+```csharp
+// All three in one request handler
+public async Task<Order> CreateOrderAsync(CreateOrderCommand cmd)
+{
+    using var activity = _activitySource.StartActivity("CreateOrder"); // TRACE
+    _log.LogInformation("Creating order for {CustomerId}", cmd.CustomerId); // LOG
+    var sw = Stopwatch.StartNew();
+
+    var order = await _repo.CreateAsync(cmd);
+
+    _ordersCreated.Add(1);                      // METRIC — counter
+    _orderDuration.Record(sw.ElapsedMilliseconds); // METRIC — histogram
+    return order;
+}
+```
+
+---
+
+## CD-C8 — Infrastructure as Code: Terraform vs Bicep vs ARM vs Pulumi
+
+| | ARM Templates | Bicep | Terraform | Pulumi |
+|-|-------------|-------|-----------|--------|
+| Language | JSON (verbose) | Bicep DSL (concise) | HCL | TypeScript/Python/C# |
+| Azure-native | ✅ | ✅ (compiles to ARM) | ✅ (via provider) | ✅ (via provider) |
+| Multi-cloud | ❌ | ❌ | ✅ | ✅ |
+| State management | Azure | Azure | Terraform state file | Pulumi Cloud / file |
+| Learning curve | High | Medium | Medium | Low (familiar language) |
+| Use for | Azure-only, simple | Azure-only, readable | Multi-cloud, mature IaC | Code-first, multi-cloud |
+
+
+---
+
+# 📊 Cloud & DevOps Flow Diagrams — Visual Reference
+
+---
+
+## CD-D1 — CI/CD Pipeline Stages
+
+```mermaid
+flowchart LR
+    DEV([👨‍💻 Developer\npushes code]) --> GIT[Git Repository\nmain branch]
+
+    subgraph CI["CI — Continuous Integration"]
+        GIT --> BUILD[dotnet build]
+        BUILD --> TEST[dotnet test\nunit + integration]
+        TEST --> COVER[Code Coverage\n> 80% required]
+        COVER --> SCAN[Security Scan\nOWASP / Snyk]
+        SCAN --> DOCKER[Docker Build\n& Push to ACR]
+    end
+
+    subgraph CD_STAGING["CD — Staging"]
+        DOCKER --> DEPLOY_S[kubectl apply\nStaging]
+        DEPLOY_S --> SMOKE[Smoke Tests]
+        SMOKE --> INT[Integration Tests]
+    end
+
+    subgraph CD_PROD["CD — Production (Manual Gate)"]
+        INT --> APPROVAL{👤 Manual\nApproval}
+        APPROVAL -->|Approved| DEPLOY_P[Rolling Deploy\nProduction]
+        DEPLOY_P --> HEALTH[Health Check\nValidation]
+        HEALTH -->|Fail| ROLLBACK[Auto Rollback]
+    end
+
+    style DEV fill:#4CAF50,color:#fff
+    style APPROVAL fill:#FF9800,color:#fff
+    style ROLLBACK fill:#f44336,color:#fff
+```
+
+---
+
+## CD-D2 — Blue-Green Deployment
+
+```mermaid
+flowchart TD
+    LB[Load Balancer] -->|100% traffic| BLUE[🔵 Blue Environment\nv1.4 — LIVE]
+    LB -.->|0% traffic| GREEN[🟢 Green Environment\nv1.5 — Idle]
+
+    subgraph Deploy["Deployment Steps"]
+        D1[1. Deploy v1.5 to Green] --> D2[2. Run smoke tests\non Green]
+        D2 --> D3{Tests pass?}
+        D3 -->|YES| D4[3. Switch LB to Green\nInstant cutover]
+        D3 -->|NO| D5[Fix and redeploy]
+        D4 --> D6[4. Blue = standby\nInstant rollback available]
+    end
+
+    style BLUE fill:#2196F3,color:#fff
+    style GREEN fill:#4CAF50,color:#fff
+    style LB fill:#FF9800,color:#fff
+    style D5 fill:#f44336,color:#fff
+```
+
+---
+
+## CD-D3 — Kubernetes Pod Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : kubectl apply
+
+    Pending --> Running : Image pulled\nContainer started
+    Pending --> Failed : Image pull error\nOOM
+
+    Running --> Running : Liveness probe ✅
+    Running --> Succeeded : Job completed
+    Running --> Failed : Liveness probe ❌\nOOM
+
+    Failed --> Pending : Restart policy\n(Always / OnFailure)
+    Succeeded --> [*]
+
+    note right of Running
+        Readiness probe controls
+        whether pod receives traffic
+        from Service (load balancer)
+    end note
+```
+
+---
+
+## CD-D4 — Liveness vs Readiness vs Startup Probes
+
+```mermaid
+flowchart TD
+    subgraph Probes["Kubernetes Health Probes"]
+        SP[Startup Probe\n/health/start\nApp initialising?] -->|PASS| LP
+        SP -->|FAIL repeatedly| RESTART1[🔄 Restart pod]
+
+        LP[Liveness Probe\n/health/live\nApp alive?] -->|PASS| RP[Readiness Probe\n/health/ready\nApp ready for traffic?]
+        LP -->|FAIL| RESTART2[🔄 Restart pod]
+
+        RP -->|PASS| TRAFFIC[✅ Pod added to\nService endpoints\nreceives traffic]
+        RP -->|FAIL| REMOVE[⛔ Pod removed from\nService endpoints\nNO traffic — no restart]
+    end
+
+    style RESTART1 fill:#f44336,color:#fff
+    style RESTART2 fill:#f44336,color:#fff
+    style TRAFFIC fill:#4CAF50,color:#fff
+    style REMOVE fill:#FF9800,color:#fff
+```
+
+---
+
+## CD-D5 — Observability: Three Pillars
+
+```mermaid
+flowchart LR
+    APP[.NET Application] -->|structured logs\nSerilog| LOGS[📋 Logs\nSeq / ELK / Splunk]
+    APP -->|counters histograms\nOpenTelemetry| METRICS[📊 Metrics\nPrometheus → Grafana]
+    APP -->|trace spans\nOpenTelemetry| TRACES[🔍 Traces\nJaeger / Azure Monitor]
+
+    LOGS --> Q1["What happened?\nWhen? What error?"]
+    METRICS --> Q2["How many req/sec?\nP99 latency?\nError rate?"]
+    TRACES --> Q3["Which service\nis slow?\nWhere did it fail?"]
+
+    METRICS -->|alert rules| ALERT[🚨 Alertmanager\nPagerDuty / Slack]
+
+    style APP fill:#4CAF50,color:#fff
+    style ALERT fill:#f44336,color:#fff
+```
+
+---
+
+## CD-D6 — Docker Multi-Stage Build
+
+```mermaid
+flowchart LR
+    subgraph Stage1["Stage 1: Build (SDK ~900MB)"]
+        SDK[FROM dotnet/sdk:8.0] --> RESTORE[dotnet restore]
+        RESTORE --> BUILD[dotnet build]
+        BUILD --> PUBLISH[dotnet publish\n/app/publish]
+    end
+
+    subgraph Stage2["Stage 2: Runtime (~200MB)"]
+        RT[FROM dotnet/aspnet:8.0] --> COPY[COPY --from=build\n/app/publish .]
+        COPY --> USER[USER appuser\nnon-root]
+        USER --> RUN[ENTRYPOINT dotnet MyApp.dll]
+    end
+
+    Stage1 -->|only /app/publish copied| Stage2
+    RUN --> IMAGE[🐳 Final Image\n~200MB\nNo SDK · No source]
+
+    style SDK fill:#2196F3,color:#fff
+    style IMAGE fill:#4CAF50,color:#fff
+```
+
+---
+
+## CD-D7 — Feature Flag Rollout Strategy
+
+```mermaid
+flowchart TD
+    DEV[Deploy code with feature OFF] --> T1{Internal\ntesting}
+    T1 -->|Pass| T2[Enable for 1% users]
+    T2 --> M1{Monitor metrics\nerror rate · latency}
+    M1 -->|Issue detected| OFF[🚨 Toggle OFF instantly\nKill switch]
+    M1 -->|Healthy| T3[Enable for 10%]
+    T3 --> M2{Monitor}
+    M2 -->|Healthy| T4[Enable for 50%]
+    T4 --> M3{Monitor}
+    M3 -->|Healthy| FULL[✅ Enable for 100%\nFull rollout]
+    FULL --> CLEAN[Clean up flag code\nRemove feature flag]
+
+    style OFF fill:#f44336,color:#fff
+    style FULL fill:#4CAF50,color:#fff
+```
+

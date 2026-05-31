@@ -823,3 +823,161 @@ var hash = SHA256.HashData(Encoding.UTF8.GetBytes(password)); // NEVER for passw
 | Use for | Simple external APIs, webhooks | User-facing APIs, fine-grained scopes | Microservice mesh (zero-trust) |
 | Risk if leaked | Anyone can use | Short expiry limits damage | Cannot be used without private key |
 
+
+---
+
+# 📊 Security Flow Diagrams — Visual Reference
+
+---
+
+## SEC-D1 — JWT Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as API Server
+    participant DB as Database
+
+    C->>API: POST /auth/login { email, password }
+    API->>DB: Validate credentials
+    DB-->>API: User record found
+    API->>API: BCrypt.Verify(password, hash) ✅
+    API->>API: Build claims: sub, email, role, exp
+    API->>API: Sign with HMACSHA256(secret)
+    API-->>C: 200 { access_token, refresh_token }
+
+    Note over C: Stores token (httpOnly cookie preferred)
+
+    C->>API: GET /api/orders\nAuthorization: Bearer eyJ...
+    API->>API: UseAuthentication middleware
+    API->>API: Validate signature ✅
+    API->>API: Check exp claim (not expired) ✅
+    API->>API: Set HttpContext.User (ClaimsPrincipal)
+    API->>API: UseAuthorization → check [Authorize]
+    API-->>C: 200 [ orders... ]
+```
+
+---
+
+## SEC-D2 — OAuth 2.0 + OIDC Login Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant APP as Your App
+    participant IDP as Identity Provider\n(Google / Microsoft)
+    participant API as Your API
+
+    U->>APP: Click "Login with Google"
+    APP->>U: Redirect to Google consent screen\n?response_type=code&scope=openid+email
+    U->>IDP: User approves
+    IDP->>APP: Redirect back with code=abc123
+    APP->>IDP: POST /token { code, client_secret }
+    IDP-->>APP: { id_token (JWT), access_token, refresh_token }
+    APP->>APP: Validate id_token signature\nExtract: sub, email, name
+    APP->>API: API calls with access_token
+    API->>IDP: Validate token (or use JWKS)
+    API-->>APP: Protected resource
+```
+
+---
+
+## SEC-D3 — TLS Handshake (Simplified)
+
+```mermaid
+sequenceDiagram
+    participant C as Client (Browser)
+    participant S as Server
+
+    C->>S: ClientHello\n[TLS version, cipher suites, random]
+    S->>C: ServerHello\n[chosen cipher, server random]
+    S->>C: Certificate\n[public key, signed by CA]
+
+    C->>C: Verify certificate:\n✅ Trusted CA?\n✅ Hostname matches?\n✅ Not expired?
+
+    C->>S: Pre-master secret\nencrypted with server public key
+    S->>S: Decrypt with private key
+
+    C->>C: Derive session key
+    S->>S: Derive session key
+
+    C-->>S: 🔒 All traffic encrypted\nwith symmetric session key
+    S-->>C: 🔒 All traffic encrypted
+```
+
+---
+
+## SEC-D4 — SQL Injection Attack vs Defence
+
+```mermaid
+flowchart TD
+    subgraph Attack["❌ SQL Injection Attack"]
+        INPUT1["Input: ' OR 1=1 --"] --> CONCAT["String concat:\n\"SELECT * FROM Users WHERE Name = '\" + input + \"'\""]
+        CONCAT --> EVIL["Executed SQL:\nSELECT * FROM Users WHERE Name = '' OR 1=1 --'"]
+        EVIL --> RESULT1[🔓 Returns ALL users\nAuthentication bypassed!]
+    end
+
+    subgraph Defence["✅ Parameterised Query Defence"]
+        INPUT2["Input: ' OR 1=1 --"] --> PARAM["EF LINQ / Parameters:\n_db.Users.Where(u => u.Name == input)"]
+        PARAM --> SAFE["Generated SQL:\nSELECT * FROM Users WHERE Name = @p0\n@p0 = ''' OR 1=1 --' (literal string)"]
+        SAFE --> RESULT2[✅ Returns 0 users\nAttack neutralised]
+    end
+
+    style RESULT1 fill:#f44336,color:#fff
+    style RESULT2 fill:#4CAF50,color:#fff
+```
+
+---
+
+## SEC-D5 — CSRF Attack vs SameSite Defence
+
+```mermaid
+sequenceDiagram
+    participant A as Alice (victim)
+    participant BANK as bank.com (trusted)
+    participant EVIL as evil.com (attacker)
+
+    A->>BANK: Login → session cookie set\nCookie: session=abc; HttpOnly
+    A->>EVIL: Visit evil.com (attacker's site)
+
+    rect rgb(255, 200, 200)
+        note over EVIL,BANK: ❌ Without SameSite protection
+        EVIL->>A: Hidden form that auto-submits\nPOST bank.com/transfer { to: hacker, amount: 10000 }
+        A->>BANK: Browser auto-sends session cookie!
+        BANK->>BANK: Valid session → executes transfer 💸
+    end
+
+    rect rgb(200, 255, 200)
+        note over EVIL,BANK: ✅ With SameSite=Strict cookie
+        EVIL->>A: Same hidden form auto-submits
+        A->>BANK: Browser blocks cookie (cross-site request)
+        BANK->>BANK: No session cookie → 401 Unauthorized ✅
+    end
+```
+
+---
+
+## SEC-D6 — Secret Management with Azure Key Vault
+
+```mermaid
+flowchart LR
+    subgraph Bad["❌ Secrets in Code"]
+        CODE["appsettings.json\n{ \"Jwt\": { \"Key\": \"secret123\" } }"]
+        GIT[Git Repository] --> CODE
+        ATTACKER[😈 Attacker reads repo\n= has all secrets]
+        CODE --> GIT
+        GIT --> ATTACKER
+    end
+
+    subgraph Good["✅ Azure Key Vault + Managed Identity"]
+        APP[.NET Application] -->|DefaultAzureCredential\nNo passwords in code| KV[Azure Key Vault]
+        KV -->|returns secret at runtime| APP
+        MI[Managed Identity\nassigned to App Service] -->|authenticates| KV
+        APP --> MI
+    end
+
+    style ATTACKER fill:#f44336,color:#fff
+    style KV fill:#4CAF50,color:#fff
+    style MI fill:#2196F3,color:#fff
+```
+

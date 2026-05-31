@@ -2040,3 +2040,159 @@ int LengthOfLongestSubstring(string s)
 }
 ```
 
+
+---
+
+# 📊 DSA Flow Diagrams — Visual Reference
+
+---
+
+## DSA-D1 — Binary Search Tree Operations
+
+```mermaid
+flowchart TD
+    ROOT([8]) --> L4([4])
+    ROOT --> R12([12])
+    L4 --> L2([2])
+    L4 --> L6([6])
+    R12 --> R10([10])
+    R12 --> R14([14])
+
+    subgraph BST_OPS["BST Properties"]
+        P1[Left subtree < node]
+        P2[Right subtree > node]
+        P3[In-order traversal = sorted: 2,4,6,8,10,12,14]
+        P4[Search: O log n average]
+    end
+```
+
+---
+
+## DSA-D2 — BFS vs DFS Traversal Order
+
+```mermaid
+flowchart TD
+    subgraph Graph["Graph (undirected)"]
+        A((A)) --- B((B))
+        A --- C((C))
+        B --- D((D))
+        B --- E((E))
+        C --- F((F))
+    end
+
+    subgraph BFS["BFS Order (Queue)"]
+        BFS1[Start: A] --> BFS2[Queue: A\nVisit: A]
+        BFS2 --> BFS3[Queue: B,C\nVisit: B,C]
+        BFS3 --> BFS4[Queue: D,E,F\nVisit: D,E,F]
+        BFS4 --> BFS5[Order: A→B→C→D→E→F]
+    end
+
+    subgraph DFS["DFS Order (Stack/Recursion)"]
+        DFS1[Start: A] --> DFS2[Visit A → go deep into B]
+        DFS2 --> DFS3[Visit B → go deep into D]
+        DFS3 --> DFS4[Visit D → backtrack]
+        DFS4 --> DFS5[Order: A→B→D→E→C→F]
+    end
+
+    style BFS5 fill:#4CAF50,color:#fff
+    style DFS5 fill:#2196F3,color:#fff
+```
+
+---
+
+## DSA-D3 — Sorting Algorithm Comparison
+
+```mermaid
+flowchart LR
+    subgraph BigO["Time Complexity"]
+        Q[QuickSort\nO n log n avg\nO n² worst]
+        M[MergeSort\nO n log n always\nO n extra space]
+        H[HeapSort\nO n log n always\nO 1 in-place]
+        B[BubbleSort\nO n² — avoid!]
+        I[Insertion Sort\nO n² but fast for small/sorted]
+    end
+
+    subgraph USE["When to Use"]
+        Q --> UQ[General purpose\nBest cache perf]
+        M --> UM[Need stable sort\nLinked lists]
+        H --> UH[Guaranteed O n log n\nNo extra space]
+        I --> UI[n < 20\nNearly sorted input]
+    end
+
+    style Q fill:#4CAF50,color:#fff
+    style M fill:#2196F3,color:#fff
+    style H fill:#FF9800,color:#fff
+    style B fill:#f44336,color:#fff
+```
+
+---
+
+## DSA-D4 — Dynamic Programming vs Greedy Decision
+
+```mermaid
+flowchart TD
+    PROB([Problem]) --> Q1{Does optimal solution\nuse optimal sub-solutions?}
+    Q1 -->|YES| Q2{Greedy choice\nalways safe?}
+    Q1 -->|NO| BT[Backtracking\nExhaustive search]
+    Q2 -->|YES| GREEDY[Greedy Algorithm\nO n or O n log n]
+    Q2 -->|NO| DP[Dynamic Programming\nMemo / Tabulation]
+
+    GREEDY --> GEX["Examples:\nActivity selection\nHuffman encoding\nDijkstra shortest path"]
+    DP --> DPEX["Examples:\nLongest common subsequence\nKnapsack\nCoin change"]
+    BT --> BTEX["Examples:\nN-Queens\nSudoku solver\nPermutations"]
+
+    style GREEDY fill:#4CAF50,color:#fff
+    style DP fill:#2196F3,color:#fff
+    style BT fill:#FF9800,color:#fff
+```
+
+---
+
+## DSA-D5 — Two Pointers Pattern
+
+```mermaid
+flowchart LR
+    subgraph Inward["Pair Sum in Sorted Array\nTwo pointers moving inward"]
+        ARR1["[1, 3, 5, 7, 9]  target=10"]
+        L1[L=0 ①] --> CHECK1{arr[L]+arr[R]\n= 1+9 = 10 ✅}
+        R1[R=4 ⑨] --> CHECK1
+        CHECK1 -->|found!| ANS1[Return indices 0,4]
+    end
+
+    subgraph Same["Sliding Window\nTwo pointers same direction"]
+        ARR2["abcabcbb  — longest without repeat"]
+        L2[L=0] --> WIN[window expands right]
+        R2[R moves right] --> WIN
+        WIN --> SHRINK[When duplicate found\nL moves right to shrink]
+        SHRINK --> MAX[Track max window size]
+    end
+
+    style ANS1 fill:#4CAF50,color:#fff
+    style MAX fill:#2196F3,color:#fff
+```
+
+---
+
+## DSA-D6 — Big O Complexity Chart
+
+```mermaid
+flowchart LR
+    subgraph Complexity["Complexity Tiers — n=1000"]
+        O1["O(1) Constant\n~1 operation\nHash lookup, array index"]
+        OLOGN["O(log n) Logarithmic\n~10 operations\nBinary search, BST"]
+        ON["O(n) Linear\n~1000 operations\nLinear scan, sum array"]
+        ONLOGN["O(n log n)\n~10,000 operations\nMergeSort, HeapSort"]
+        ON2["O(n²) Quadratic\n~1,000,000 operations\nNested loops, BubbleSort"]
+        O2N["O(2ⁿ) Exponential\n~10³⁰⁰ operations\nNaive Fibonacci, subsets"]
+    end
+
+    O1 --> OLOGN --> ON --> ONLOGN --> ON2 --> O2N
+
+    style O1 fill:#4CAF50,color:#fff
+    style OLOGN fill:#8BC34A,color:#fff
+    style ON fill:#FFC107,color:#333
+    style ONLOGN fill:#FF9800,color:#fff
+    style ON2 fill:#f44336,color:#fff
+    style O2N fill:#B71C1C,color:#fff
+```
+

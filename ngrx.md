@@ -514,3 +514,352 @@ export class ProductsComponent implements OnInit {
 ```
 
 ---
+
+---
+
+# ⚖️ NgRx Comparisons — Side-by-Side Differences
+
+---
+
+## NGRX-C1 — NgRx Store vs Service + BehaviorSubject vs Angular Signals
+
+| | NgRx Store | Service + BehaviorSubject | Angular Signals |
+|-|-----------|--------------------------|-----------------|
+| Boilerplate | ❌ High (actions, reducers, effects, selectors) | Low | ✅ Minimal |
+| DevTools / time-travel | ✅ Yes (Redux DevTools) | ❌ No | Limited |
+| Immutability enforced | ✅ Yes (reducers are pure) | ❌ Manual | ✅ Yes |
+| Side effects | `@ngrx/effects` | RxJS in service | `effect()` |
+| Best for | Large app, complex state, team, audit trail | Small/medium app | Simple reactive state |
+| Reactive | ✅ Observable-based | ✅ Observable-based | ✅ Fine-grained reactive |
+
+```typescript
+// NgRx — full ceremony
+this.store.dispatch(loadOrders()); // action
+orders$ = this.store.select(selectOrders); // selector
+
+// Service + BehaviorSubject — simpler
+this.orderService.orders$; // BehaviorSubject exposed as Observable
+this.orderService.loadOrders(); // calls HTTP, updates subject
+
+// Angular Signals — simplest reactive state
+orders = signal<Order[]>([]);
+loadOrders() { this.orders.set(await this.http.get<Order[]>('/api/orders').toPromise()); }
+// Template: {{ orders() }}
+```
+
+---
+
+## NGRX-C2 — Actions vs Effects vs Reducers vs Selectors
+
+| | Actions | Reducers | Effects | Selectors |
+|-|---------|---------|---------|-----------|
+| Purpose | Describe what happened | Produce new state from action | Handle side effects (HTTP, router) | Derive computed state |
+| Pure function | ✅ | ✅ | ❌ (side effects) | ✅ |
+| Returns | Nothing | New state | Observable of actions | Memoised value |
+| Subscribes to store | ❌ | ❌ | ✅ `Actions` stream | ❌ |
+
+```typescript
+// Action — intent
+export const loadOrders     = createAction('[Orders] Load');
+export const loadOrdersOk   = createAction('[Orders] Load Success', props<{ orders: Order[] }>());
+export const loadOrdersFail = createAction('[Orders] Load Fail',    props<{ error: string }>());
+
+// Reducer — pure state transition
+export const ordersReducer = createReducer(
+  initialState,
+  on(loadOrders,     state => ({ ...state, loading: true })),
+  on(loadOrdersOk,   (state, { orders }) => ({ ...state, orders, loading: false })),
+  on(loadOrdersFail, (state, { error }) => ({ ...state, error, loading: false }))
+);
+
+// Effect — side effect (HTTP call)
+loadOrders$ = createEffect(() => this.actions$.pipe(
+  ofType(loadOrders),
+  switchMap(() => this.http.get<Order[]>('/api/orders').pipe(
+    map(orders => loadOrdersOk({ orders })),
+    catchError(error => of(loadOrdersFail({ error: error.message })))
+  ))
+));
+
+// Selector — memoised derived state
+export const selectOrders        = createSelector(selectOrdersState, s => s.orders);
+export const selectPendingOrders = createSelector(selectOrders, orders =>
+  orders.filter(o => o.status === 'pending')
+);
+```
+
+---
+
+## NGRX-C3 — `createSelector` vs `createFeatureSelector`
+
+```typescript
+// createFeatureSelector — access feature state slice by key
+export const selectOrdersState = createFeatureSelector<OrdersState>('orders');
+// 'orders' must match the key in StoreModule.forFeature('orders', reducer)
+
+// createSelector — compose selectors (memoised)
+export const selectAllOrders = createSelector(
+  selectOrdersState,
+  state => state.orders         // recalculates only when selectOrdersState changes
+);
+
+export const selectOrderById = (id: string) => createSelector(
+  selectAllOrders,
+  orders => orders.find(o => o.id === id)
+);
+
+// Memoisation: if selectAllOrders hasn't changed, selectOrderById returns cached result
+// This prevents unnecessary re-renders in components using OnPush
+```
+
+---
+
+## NGRX-C4 — `dispatch` vs `select` vs `store.pipe`
+
+```typescript
+// dispatch — send action to store
+this.store.dispatch(loadOrders());
+this.store.dispatch(createOrder({ order: newOrder }));
+
+// select — subscribe to state slice (Observable)
+this.orders$ = this.store.select(selectAllOrders);
+// or: this.store.pipe(select(selectAllOrders))
+
+// Component usage
+export class OrderListComponent {
+  orders$    = this.store.select(selectAllOrders);
+  isLoading$ = this.store.select(selectOrdersLoading);
+
+  constructor(private store: Store) {
+    this.store.dispatch(loadOrders()); // trigger effect on init
+  }
+
+  deleteOrder(id: string) {
+    this.store.dispatch(deleteOrder({ id })); // dispatch on user action
+  }
+}
+```
+
+---
+
+## NGRX-C5 — NgRx Component Store vs Global Store
+
+| | Global NgRx Store | NgRx Component Store |
+|-|------------------|---------------------|
+| Scope | App-wide singleton | Per component instance |
+| Shared across components | ✅ | ❌ Local to component tree |
+| Boilerplate | High | Low |
+| DevTools | ✅ | ✅ |
+| Use for | Global auth, cart, app config | Complex component-level state (modal, wizard, data table) |
+
+```typescript
+// ComponentStore — local state for a complex component
+@Injectable()
+export class OrderTableStore extends ComponentStore<OrderTableState> {
+  constructor(private http: HttpClient) {
+    super({ orders: [], loading: false, filter: '' });
+  }
+
+  // Selector
+  readonly orders$  = this.select(s => s.orders);
+  readonly loading$ = this.select(s => s.loading);
+
+  // Updater — sync state mutation
+  readonly setFilter = this.updater((state, filter: string) => ({ ...state, filter }));
+
+  // Effect — async operation
+  readonly loadOrders = this.effect((trigger$: Observable<void>) =>
+    trigger$.pipe(
+      tap(() => this.patchState({ loading: true })),
+      switchMap(() => this.http.get<Order[]>('/api/orders').pipe(
+        tapResponse(
+          orders => this.patchState({ orders, loading: false }),
+          err    => this.patchState({ loading: false })
+        )
+      ))
+    )
+  );
+}
+```
+
+
+---
+
+# ⚖️ NgRx Comparisons — Side-by-Side Differences
+
+---
+
+## NGRX-C1 — NgRx vs Services (BehaviorSubject) vs Signals
+
+| | Services + BehaviorSubject | NgRx Store | Angular Signals |
+|-|--------------------------|-----------|----------------|
+| Boilerplate | Low | ❌ High (actions/reducers/effects/selectors) | Low |
+| DevTools / time-travel | ❌ | ✅ Redux DevTools | ❌ |
+| Immutability enforced | ❌ Manual | ✅ | ✅ |
+| Async side effects | Manual | Effects | `rxResource` / `effect()` |
+| Shared across many components | Medium | ✅ Excellent | ✅ Good |
+| Learning curve | Low | ❌ High | Low |
+| Use for | Small/medium apps | Large app with complex shared state | Angular 17+ reactive apps |
+
+```ts
+// Services + BehaviorSubject — simple, low ceremony
+@Injectable({ providedIn: 'root' })
+export class CartService {
+  private items$ = new BehaviorSubject<CartItem[]>([]);
+  readonly cart$ = this.items$.asObservable();
+  add(item: CartItem) { this.items$.next([...this.items$.value, item]); }
+}
+
+// NgRx — verbose but powerful, full DevTools support
+// Action → Reducer → Selector pattern (see main NgRx sections above)
+
+// Signals — Angular 17+ reactive primitive
+export class CartComponent {
+  private cartService = inject(CartService);
+  items = this.cartService.items; // signal
+  total = computed(() => this.items().reduce((s, i) => s + i.price, 0));
+}
+```
+
+---
+
+## NGRX-C2 — Actions vs Reducers vs Selectors vs Effects
+
+| | Action | Reducer | Selector | Effect |
+|-|--------|---------|---------|--------|
+| Purpose | Describe WHAT happened | HOW state changes | READ derived state | Handle SIDE EFFECTS |
+| Pure function | N/A | ✅ Must be pure | ✅ Must be pure | ❌ Side effects allowed |
+| Returns | Event object | New state | Derived value | Observable of Action |
+| When used | Dispatch events | Called by store on action | Subscribe to state slice | Async ops (HTTP, router) |
+
+```ts
+// Action — describes event
+export const loadOrders  = createAction('[Orders] Load');
+export const ordersLoaded = createAction('[Orders] Loaded', props<{ orders: Order[] }>());
+export const loadFailed   = createAction('[Orders] Load Failed', props<{ error: string }>());
+
+// Reducer — pure state transformation
+export const ordersReducer = createReducer(
+  initialState,
+  on(loadOrders,   state => ({ ...state, loading: true })),
+  on(ordersLoaded, (state, { orders }) => ({ ...state, orders, loading: false })),
+  on(loadFailed,   (state, { error }) => ({ ...state, error, loading: false }))
+);
+
+// Selector — memoised derived state
+export const selectOrders  = createSelector(selectOrdersState, s => s.orders);
+export const selectPending = createSelector(selectOrders, orders =>
+  orders.filter(o => o.status === 'pending'));
+
+// Effect — async side effect
+@Injectable()
+export class OrderEffects {
+  load$ = createEffect(() => this.actions$.pipe(
+    ofType(loadOrders),
+    switchMap(() => this.http.get<Order[]>('/api/orders').pipe(
+      map(orders => ordersLoaded({ orders })),
+      catchError(err  => of(loadFailed({ error: err.message })))
+    ))
+  ));
+  constructor(private actions$: Actions, private http: HttpClient) {}
+}
+```
+
+---
+
+## NGRX-C3 — `createSelector` vs `createFeatureSelector` vs `createSelectorFactory`
+
+| | `createFeatureSelector` | `createSelector` | `createSelectorFactory` |
+|-|------------------------|-----------------|------------------------|
+| Purpose | Root slice accessor | Derive computed state | Custom memoisation |
+| Memoisation | ✅ | ✅ | Custom |
+| Inputs | Feature key string | Up to 8 projectors | Custom comparison fn |
+
+```ts
+// Step 1: feature selector — entry point to feature state
+const selectOrderFeature = createFeatureSelector<OrderState>('orders');
+
+// Step 2: derive from feature
+const selectAllOrders = createSelector(selectOrderFeature, s => s.orders);
+const selectLoading   = createSelector(selectOrderFeature, s => s.loading);
+
+// Step 3: combine multiple selectors
+const selectViewModel = createSelector(
+  selectAllOrders,
+  selectLoading,
+  selectCurrentUserId,  // from auth feature
+  (orders, loading, userId) => ({
+    orders: orders.filter(o => o.userId === userId),
+    loading
+  })
+);
+// ✅ Memoised — only recomputes when orders, loading, OR userId changes
+```
+
+---
+
+## NGRX-C4 — `dispatch` + `store.select` vs `ComponentStore` vs `SignalStore` (NgRx 17)
+
+| | Global Store | ComponentStore | SignalStore |
+|-|-------------|--------------|-------------|
+| State scope | Application-wide | Component-scoped | Flexible |
+| Boilerplate | High | Medium | Low |
+| DevTools | ✅ Full | ❌ | ✅ (NgRx 17+) |
+| Reactive primitive | Observable | Observable | ✅ Signals |
+| Best for | Cross-feature shared state | Component-local complex state | Angular 17+ modern apps |
+
+```ts
+// ComponentStore — local state, no global actions
+@Injectable()
+export class OrderListStore extends ComponentStore<OrderListState> {
+  constructor() { super({ orders: [], loading: false }); }
+
+  // Updaters — synchronous state changes
+  readonly setOrders = this.updater((state, orders: Order[]) => ({ ...state, orders }));
+
+  // Effects — async side effects
+  readonly loadOrders = this.effect((trigger$: Observable<void>) =>
+    trigger$.pipe(
+      switchMap(() => this.http.get<Order[]>('/api/orders').pipe(
+        tap(orders => this.setOrders(orders))
+      ))
+    )
+  );
+
+  // Selectors
+  readonly orders$  = this.select(s => s.orders);
+  readonly loading$ = this.select(s => s.loading);
+}
+```
+
+---
+
+## NGRX-C5 — `switchMap` vs `mergeMap` vs `concatMap` in Effects
+
+| Use case | Correct operator | Reason |
+|----------|----------------|--------|
+| Search autocomplete | `switchMap` | Cancel previous, only latest search matters |
+| Like/unlike button | `mergeMap` | Each action independent, order not critical |
+| Sequential checkout steps | `concatMap` | Order critical, must complete before next |
+| Login (ignore double-click) | `exhaustMap` | Ignore new actions while first in progress |
+
+```ts
+// ✅ switchMap for latest-wins (search, navigation)
+loadProduct$ = createEffect(() => this.actions$.pipe(
+  ofType(loadProduct),
+  switchMap(({ id }) => this.http.get<Product>(`/api/products/${id}`).pipe(
+    map(p => loadProductSuccess({ product: p })),
+    catchError(err => of(loadProductFailed({ error: err.message })))
+  ))
+));
+
+// ✅ exhaustMap for login (prevent double-submit)
+login$ = createEffect(() => this.actions$.pipe(
+  ofType(loginRequest),
+  exhaustMap(({ credentials }) => this.auth.login(credentials).pipe(
+    map(user => loginSuccess({ user })),
+    catchError(err => of(loginFailed({ error: err.message })))
+  ))
+));
+```
+

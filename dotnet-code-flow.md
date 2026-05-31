@@ -2006,3 +2006,266 @@ public class OrdersController : ControllerBase
 ---
 
 *Last updated: 2026 | .NET 8 / C# 12 / MediatR 12*
+
+---
+
+# 📊 Flow Diagrams — Visual Reference
+
+---
+
+## Diagram 1 — ASP.NET Core Request Pipeline
+
+```mermaid
+flowchart TD
+    Client([🌐 Browser / Client]) --> Kestrel[Kestrel TCP Listener]
+    Kestrel --> EH[ExceptionHandler Middleware]
+    EH --> HSTS[HSTS / HttpsRedirection]
+    HSTS --> SF[StaticFiles]
+    SF --> RT[UseRouting\nresolves endpoint]
+    RT --> CORS[CORS]
+    CORS --> AuthN[UseAuthentication\nsets HttpContext.User]
+    AuthN --> AuthZ[UseAuthorization\nchecks policy]
+    AuthZ --> RL[RateLimiter]
+    RL --> EP[Endpoint / Controller Action]
+    EP --> SVC[Service Layer]
+    SVC --> REPO[Repository / DbContext]
+    REPO --> DB[(SQL Database)]
+
+    DB --> REPO
+    REPO --> SVC
+    SVC --> EP
+    EP --> JSON[JSON Serialisation]
+    JSON --> Client
+
+    style Client fill:#4CAF50,color:#fff
+    style DB fill:#2196F3,color:#fff
+    style EP fill:#FF9800,color:#fff
+```
+
+---
+
+## Diagram 2 — DI Lifetime Scopes
+
+```mermaid
+flowchart LR
+    subgraph AppLifetime["🔵 App Lifetime"]
+        S1[Singleton\nICache\nIHttpClientFactory]
+    end
+
+    subgraph Request1["🟢 Request 1 Scope"]
+        SC1[Scoped\nAppDbContext\nIOrderService]
+        TR1[Transient\nIEmailBuilder]
+        TR2[Transient\nIValidator]
+    end
+
+    subgraph Request2["🟡 Request 2 Scope"]
+        SC2[Scoped\nAppDbContext NEW]
+        TR3[Transient\nIEmailBuilder NEW]
+    end
+
+    AppLifetime --> Request1
+    AppLifetime --> Request2
+
+    SC1 -->|disposed at end of request| DISP1([🗑️ Disposed])
+    SC2 -->|disposed at end of request| DISP2([🗑️ Disposed])
+    S1 -->|disposed on app shutdown| DISP3([🗑️ Disposed])
+```
+
+---
+
+## Diagram 3 — Middleware Chain Execution
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant MW1 as TimingMiddleware
+    participant MW2 as AuthMiddleware
+    participant MW3 as RateLimitMiddleware
+    participant EP as Endpoint/Controller
+
+    C->>MW1: HTTP Request
+    Note over MW1: ⏱ Start timer, log →
+    MW1->>MW2: await next()
+    MW2->>MW2: Validate JWT token
+    MW2->>MW3: await next()
+    MW3->>MW3: Check rate limit
+    alt Rate limit OK
+        MW3->>EP: await next()
+        EP->>EP: Execute action
+        EP-->>MW3: Response
+    else Rate limit exceeded
+        MW3-->>MW2: 429 Too Many Requests
+    end
+    MW2-->>MW1: Response
+    Note over MW1: ⏱ Log elapsed ms ←
+    MW1-->>C: HTTP Response
+```
+
+---
+
+## Diagram 4 — Async/Await Thread Flow
+
+```mermaid
+sequenceDiagram
+    participant T1 as Thread T1
+    participant IO as I/O Operation
+    participant Pool as Thread Pool
+    participant T2 as Thread T2
+
+    T1->>T1: controller.Get() starts
+    T1->>IO: await db.FindAsync(id) → I/O initiated
+    Note over T1: T1 RELEASED back to pool
+    IO-->>Pool: I/O completes (callback)
+    Pool->>T2: Schedule continuation on T2
+    T2->>T2: Continue after await
+    T2->>IO: await emailService.SendAsync()
+    Note over T2: T2 RELEASED back to pool
+    IO-->>Pool: SMTP completes
+    Pool->>T2: Schedule continuation
+    T2->>T2: return Ok(result)
+```
+
+---
+
+## Diagram 5 — Singleton Pattern Flow
+
+```mermaid
+flowchart TD
+    C1([First Call: GetInstance]) --> CHK{_instance == null?}
+    CHK -->|YES| LK[Acquire lock]
+    LK --> CHK2{Still null?\ndouble-check}
+    CHK2 -->|YES| NEW[new Singleton created\nstored in _instance]
+    CHK2 -->|NO| RET1[Return existing _instance]
+    NEW --> RET1
+    CHK -->|NO| RET2([Return cached _instance\nno lock needed])
+
+    C2([Second Call: GetInstance]) --> CHK
+    style NEW fill:#4CAF50,color:#fff
+    style RET1 fill:#2196F3,color:#fff
+    style RET2 fill:#2196F3,color:#fff
+```
+
+---
+
+## Diagram 6 — Decorator Pattern Layering
+
+```mermaid
+flowchart LR
+    Client([Client]) --> LOG[LoggingDecorator\nlogs before/after]
+    LOG --> CACHE[CachingDecorator\ncheck cache first]
+    CACHE --> REAL[OrderService\nreal DB query]
+    REAL --> DB[(Database)]
+
+    DB --> REAL
+    REAL --> CACHE
+    CACHE -->|MISS: store result| REDIS[(Redis Cache)]
+    CACHE --> LOG
+    LOG --> Client
+
+    style Client fill:#4CAF50,color:#fff
+    style REAL fill:#FF9800,color:#fff
+    style DB fill:#2196F3,color:#fff
+    style REDIS fill:#f44336,color:#fff
+```
+
+---
+
+## Diagram 7 — CQRS + MediatR Pipeline
+
+```mermaid
+flowchart TD
+    CON[Controller] -->|mediator.Send| MED[MediatR]
+
+    subgraph Pipeline["Pipeline Behaviours (run in order)"]
+        LB[LoggingBehavior\nlogs request + elapsed]
+        VB[ValidationBehavior\nFluentValidation]
+        LB --> VB
+    end
+
+    MED --> Pipeline
+
+    subgraph Handlers["Handler (Command or Query)"]
+        CH[CreateOrderCommandHandler\nwrite to DB + publish event]
+        QH[GetOrdersQueryHandler\nAsNoTracking projection]
+    end
+
+    VB -->|Command| CH
+    VB -->|Query| QH
+    CH --> DB[(SQL Server\nwrite side)]
+    QH --> RODB[(SQL Server\nread side\nAsNoTracking)]
+    CH -->|publish event| BUS[Message Bus]
+
+    style CON fill:#4CAF50,color:#fff
+    style DB fill:#2196F3,color:#fff
+    style RODB fill:#9C27B0,color:#fff
+    style BUS fill:#FF9800,color:#fff
+```
+
+---
+
+## Diagram 8 — State Pattern (ATM Machine)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+
+    Idle --> HasCard : insertCard()
+    HasCard --> Idle : ejectCard()
+    HasCard --> HasCard : enterPin() [wrong PIN]
+    HasCard --> Authenticated : enterPin() [correct PIN]
+    Authenticated --> Dispensing : selectAmount()
+    Dispensing --> Idle : dispense() ✅ card ejected
+
+    Idle : 💤 Waiting for card
+    HasCard : 💳 Card inserted\nawaiting PIN
+    Authenticated : ✅ PIN verified\nawait amount
+    Dispensing : 💵 Dispensing cash
+```
+
+---
+
+## Diagram 9 — Chain of Responsibility (Approval Flow)
+
+```mermaid
+flowchart LR
+    REQ([Request\n$75,000]) --> TL{TeamLead\n≤ $10,000?}
+    TL -->|NO| MGR{Manager\n≤ $50,000?}
+    TL -->|YES| TL_OK([✅ TeamLead\nApproved])
+    MGR -->|NO| DIR{Director\n≤ $100,000?}
+    MGR -->|YES| MGR_OK([✅ Manager\nApproved])
+    DIR -->|YES| DIR_OK([✅ Director\nApproved])
+    DIR -->|NO| ESC([⚠️ Escalate\nto Board])
+
+    style TL_OK fill:#4CAF50,color:#fff
+    style MGR_OK fill:#4CAF50,color:#fff
+    style DIR_OK fill:#4CAF50,color:#fff
+    style ESC fill:#f44336,color:#fff
+```
+
+---
+
+## Diagram 10 — Repository + Unit of Work
+
+```mermaid
+flowchart TD
+    SVC[OrderService] -->|AddAsync| UOW[UnitOfWork]
+    SVC -->|UpdateAsync| UOW
+    SVC -->|CommitAsync| UOW
+
+    subgraph UOW_INNER["Unit of Work (shared DbContext)"]
+        OR[OrderRepository]
+        IR[InventoryRepository]
+        CR[CustomerRepository]
+    end
+
+    UOW --> UOW_INNER
+    OR --> CTX[(AppDbContext)]
+    IR --> CTX
+    CR --> CTX
+    CTX -->|SaveChangesAsync\nSingle Transaction| DB[(SQL Server)]
+
+    style SVC fill:#4CAF50,color:#fff
+    style CTX fill:#FF9800,color:#fff
+    style DB fill:#2196F3,color:#fff
+```
+

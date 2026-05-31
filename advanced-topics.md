@@ -815,3 +815,390 @@ redis.conf:
 ---
 
 *Last updated: 2026 | Redis 7 / Kafka 3 / .NET 8*
+
+---
+
+# ⚖️ Advanced Topics Comparisons — Side-by-Side Differences
+
+---
+
+## ADV-C1 — Redis vs Memcached
+
+| | Redis | Memcached |
+|-|-------|-----------|
+| Data structures | String, Hash, List, Set, Sorted Set, Stream | String / binary blobs only |
+| Persistence | ✅ RDB / AOF | ❌ Memory only |
+| Pub/Sub | ✅ | ❌ |
+| Cluster / sharding | ✅ Redis Cluster | ✅ Client-side sharding |
+| Lua scripting | ✅ Atomic scripts | ❌ |
+| Transactions | ✅ MULTI/EXEC | ❌ |
+| Multi-threading | ✅ (Redis 6+ I/O threads) | ✅ Multi-threaded |
+| Use for | Cache + pub/sub + queues + sessions + rate limiting | Pure simple cache, max throughput |
+
+```
+Choose Redis when: you need any feature beyond plain string cache
+  — Leaderboard (Sorted Set), rate limiter (Lua + EXPIRE), pub/sub, sessions, queues
+
+Choose Memcached when: pure in-memory cache, simplicity, and you have existing Memcached infra
+```
+
+---
+
+## ADV-C2 — Event Sourcing vs CQRS vs Traditional CRUD
+
+| | Traditional CRUD | CQRS | Event Sourcing |
+|-|-----------------|------|----------------|
+| State storage | Current state only | Current state (separate read/write) | All events that led to state |
+| History / audit | ❌ Overwritten | ❌ Overwritten | ✅ Free |
+| Read model | Same as write | Separate, optimised | Projected from events |
+| Complexity | Low | Medium | High |
+| Schema migration | Easy | Medium | Hard (old events must remain valid) |
+| Debugging | Hard (what changed?) | Medium | ✅ Replay events to reproduce |
+| Use for | Most CRUD apps | Read-heavy with complex queries | Financial, audit-critical, domain-event-heavy |
+
+```
+CRUD: Table has one row per entity — UPDATE overwrites state
+CQRS: Write to SQL (normalised), read from Elasticsearch (denormalised) — separate models
+Event Sourcing: Table has all events — current state = replay of events
+```
+
+---
+
+## ADV-C3 — Kafka vs RabbitMQ vs Azure Service Bus vs Redis Pub/Sub
+
+| | Kafka | RabbitMQ | Azure Service Bus | Redis Pub/Sub |
+|-|-------|----------|------------------|--------------|
+| Message retention | Days / forever | Deleted after consume | Configurable (max 80 GB) | ❌ No persistence |
+| Replay | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| Throughput | ✅ Millions/sec | ~100k/sec | ~10k/sec | ✅ Very high |
+| Consumer groups | ✅ Independent | Exchange + queues | ✅ Sessions + subscriptions | ❌ All subscribers |
+| Ordering | Per-partition | Per-queue | ✅ Sessions | ❌ |
+| Dead letter | ✅ | ✅ | ✅ | ❌ |
+| Management overhead | High (ZooKeeper, tuning) | Medium | ✅ Managed SaaS | Low |
+| Use for | Event streaming, replay, audit log | Work queues, complex routing | Azure-native apps | Real-time broadcast, ephemeral pub/sub |
+
+---
+
+## ADV-C4 — WebSocket vs Server-Sent Events (SSE) vs Long Polling vs Short Polling
+
+| | Short Polling | Long Polling | SSE | WebSocket |
+|-|--------------|-------------|-----|-----------|
+| Direction | Client → Server | Client → Server | Server → Client | Bidirectional |
+| Connection | New per poll | Held open, reopened | Persistent | Persistent (ws://) |
+| Protocol | HTTP | HTTP | HTTP | WebSocket upgrade |
+| Latency | High (poll interval) | Low | Low | Lowest |
+| Server load | ❌ High (many requests) | Medium | ✅ Low | ✅ Low |
+| Reconnect | Manual | Manual | ✅ Automatic browser | Manual |
+| Proxy/firewall friendly | ✅ | ✅ | ✅ | ❌ Sometimes blocked |
+| Use for | Status checks, infrequent | Notifications, chat fallback | Live feeds, notifications | Chat, games, collaborative editing |
+
+```typescript
+// SSE — server pushes only (simpler)
+// Server:
+Response.Headers["Content-Type"] = "text/event-stream";
+await Response.WriteAsync($"data: {json}\n\n");
+
+// Client:
+const source = new EventSource('/api/stream');
+source.onmessage = e => updateUI(JSON.parse(e.data));
+
+// WebSocket — bidirectional
+// Server: SignalR Hub
+await Clients.All.SendAsync("OrderUpdated", order);
+// Client:
+const conn = new signalR.HubConnectionBuilder().withUrl("/hub").build();
+conn.on("OrderUpdated", order => updateUI(order));
+conn.invoke("SendMessage", "Hello");  // client → server ← only WebSocket can do this
+```
+
+---
+
+## ADV-C5 — Consistent Hashing vs Simple Modulo Hashing
+
+| | Modulo Hashing (`hash(key) % N`) | Consistent Hashing |
+|-|----------------------------------|-------------------|
+| Add/remove node | ❌ Remaps ~(N-1)/N keys | ✅ Remaps ~1/N keys |
+| Cache miss on scale | ❌ Massive (75% for N=3→4) | ✅ Minimal (~25%) |
+| Complexity | Low | Medium |
+| Use for | Single-server or fixed-size pools | Distributed caches, databases, CDN routing |
+
+```
+Modulo: 3 → 4 servers = hash("key") % 3 = server 1, hash("key") % 4 = server 2 → DIFFERENT
+→ 75% of all keys suddenly point to wrong server = cache stampede
+
+Consistent hashing: add server D between A and C
+→ Only keys between B and D remapped (~25%) → all others unaffected
+```
+
+---
+
+## ADV-C6 — CAP Theorem: CP vs AP Real Examples
+
+| System | Type | Why |
+|--------|------|-----|
+| PostgreSQL (single node) | CA | No distributed partition possible |
+| PostgreSQL with replication | CP | During partition, replica refuses writes |
+| Cassandra | AP | Accepts writes on any node, resolves conflict later |
+| MongoDB (default) | CP | Primary required for writes |
+| DynamoDB (eventual) | AP | Always available, may serve stale |
+| DynamoDB (strong consistent) | CP | Sacrifices availability for consistency |
+| ZooKeeper | CP | Leader required, minority partition unavailable |
+| Redis Cluster | AP (usually) | May serve stale reads during partition |
+| Kafka | CP | Partition requires quorum to elect leader |
+
+```
+Practical rule:
+Money/inventory → CP (better unavailable than wrong)
+User feed/notifications → AP (better stale than down)
+Session data → AP (slightly stale session OK, downtime is not)
+Order placement → CP (never double-charge, never oversell)
+```
+
+---
+
+## ADV-C7 — Bloom Filter vs Hash Set vs Binary Search vs Database Lookup
+
+| | Database Lookup | HashSet | Binary Search | Bloom Filter |
+|-|----------------|---------|---------------|--------------|
+| False negatives | ❌ Possible (DB inconsistency) | ❌ None | ❌ None | ❌ None (guaranteed) |
+| False positives | ❌ None | ❌ None | ❌ None | ✅ Possible (small %) |
+| Memory | ❌ Disk | Memory (full objects) | Memory (sorted) | ✅ Very small (bits) |
+| Speed | Slowest (I/O) | O(1) | O(log n) | ✅ O(k) — constant |
+| Use for | Source of truth | In-memory membership | Sorted data membership | Pre-filter before expensive lookup |
+
+```
+Pattern: Bloom Filter → HashSet/DB
+"Is this URL malicious?"
+1. Bloom says NO → definitely safe, skip DB (99% of cases)
+2. Bloom says MAYBE → check DB for confirmation
+→ DB load reduced by 99%+ with < 1% false positive rate
+```
+
+---
+
+## ADV-C8 — Long Polling vs Server-Sent Events: When Each Wins
+
+```
+Long Polling wins when:
+✅ Need bidirectional even if server-push focused
+✅ Legacy browser support required
+✅ SSE not supported by proxy/firewall
+✅ Single-use notification (poll once, act, stop)
+
+SSE wins when:
+✅ Pure server → client stream (live scores, order status)
+✅ Automatic browser reconnect built-in
+✅ HTTP/2 multiplexing (multiple SSE streams per connection)
+✅ Simpler server implementation than WebSocket
+
+WebSocket wins when:
+✅ Client must send data frequently too (chat, collaborative editing, gaming)
+✅ Lowest possible latency required
+✅ Binary data (audio, video signalling)
+✅ Custom protocol needed
+```
+
+
+---
+
+# 📊 Advanced Topics — Flow Diagrams
+
+---
+
+## ADV-D1 — Redis Data Structures Decision Tree
+
+```mermaid
+flowchart TD
+    Q1{What do you need?} --> KV[Single value\nper key]
+    Q1 --> OBJ[Object with\nmultiple fields]
+    Q1 --> ORD[Ordered\ncollection]
+    Q1 --> UNIQ[Unique\nmembership]
+    Q1 --> APPROX[Approximate\ncount]
+    Q1 --> STREAM[Event\nlog/queue]
+
+    KV --> STRING["String\nGET/SET/INCR\nCache, counters, sessions"]
+    OBJ --> HASH["Hash\nHGET/HSET\nUser profiles, shopping carts"]
+    ORD --> SORT{Need score?}
+    SORT -->|YES| ZSET["Sorted Set\nZADD/ZRANGE\nLeaderboards, rate limiting"]
+    SORT -->|NO| LIST["List\nLPUSH/RPOP\nQueues, activity feeds"]
+    UNIQ --> SET["Set\nSADD/SISMEMBER\nTags, online users, dedup"]
+    APPROX --> HLL["HyperLogLog\nPFADD/PFCOUNT\nUnique visitors (< 1% error)"]
+    STREAM --> STR["Stream\nXADD/XREAD\nLightweight Kafka alternative"]
+
+    style STRING fill:#f44336,color:#fff
+    style HASH fill:#E91E63,color:#fff
+    style ZSET fill:#9C27B0,color:#fff
+    style LIST fill:#2196F3,color:#fff
+    style SET fill:#4CAF50,color:#fff
+    style HLL fill:#FF9800,color:#fff
+    style STR fill:#795548,color:#fff
+```
+
+---
+
+## ADV-D2 — Kafka Partition Rebalancing
+
+```mermaid
+flowchart TD
+    subgraph Before["Initial State"]
+        C1B[Consumer 1\nP0 P1]
+        C2B[Consumer 2\nP2 P3]
+        C3B[Consumer 3\nP4 P5]
+    end
+
+    subgraph Crash["Consumer 3 Crashes"]
+        C1C[Consumer 1\nP0 P1 P4]
+        C2C[Consumer 2\nP2 P3 P5]
+        REBAL1[⚠️ Rebalance triggered\nBrief pause in consumption]
+    end
+
+    subgraph Scale["Add Consumer 4"]
+        C1S[Consumer 1\nP0 P1]
+        C2S[Consumer 2\nP2 P3]
+        C4S[Consumer 4\nP4 P5]
+        REBAL2[⚠️ Rebalance triggered]
+    end
+
+    Before --> Crash
+    Crash --> Scale
+
+    style REBAL1 fill:#FF9800,color:#fff
+    style REBAL2 fill:#FF9800,color:#fff
+```
+
+---
+
+## ADV-D3 — Bloom Filter Internals
+
+```mermaid
+flowchart LR
+    subgraph ADD["ADD 'apple'"]
+        A1[hash1 = 2] --> B2[bit 2 = 1]
+        A2[hash2 = 5] --> B5[bit 5 = 1]
+        A3[hash3 = 9] --> B9[bit 9 = 1]
+    end
+
+    subgraph CHECK_YES["CHECK 'apple' → Probably YES"]
+        C1[hash1 = 2\nbit 2 = 1 ✅]
+        C2[hash2 = 5\nbit 5 = 1 ✅]
+        C3[hash3 = 9\nbit 9 = 1 ✅]
+        C1 --> MAYBE[Maybe in set\nVerify with DB]
+    end
+
+    subgraph CHECK_NO["CHECK 'mango' → Definitely NO"]
+        D1[hash1 = 2\nbit 2 = 1 ✅]
+        D2[hash2 = 7\nbit 7 = 0 ❌]
+        D2 --> DEFNO[Definitely NOT in set\nSkip DB query entirely ✅]
+    end
+
+    style MAYBE fill:#FF9800,color:#fff
+    style DEFNO fill:#4CAF50,color:#fff
+```
+
+---
+
+## ADV-D4 — Event Sourcing vs Traditional State Storage
+
+```mermaid
+flowchart TD
+    subgraph Traditional["Traditional (Store Current State)"]
+        CMD1[createOrder] --> DB1[(DB: status=Created)]
+        CMD2[payOrder] --> DB2[(DB: status=Paid)]
+        CMD3[shipOrder] --> DB3[(DB: status=Shipped)]
+        DB3 --> LIMIT["❌ Can't answer:\n'What was status on Tuesday?'\n'Who changed this?'"]
+    end
+
+    subgraph ES["Event Sourcing (Store Events)"]
+        E1[OrderCreated\n{total: 99.99}]
+        E2[PaymentReceived\n{txnId: 'stripe_1'}]
+        E3[ItemShipped\n{tracking: 'UPS123'}]
+
+        STORE[(Event Store\nAppend-only)]
+        E1 --> STORE
+        E2 --> STORE
+        E3 --> STORE
+
+        STORE -->|replay| STATE[Current State =\nReduce over events]
+        STORE -->|replay to t=Tuesday| PAST[State at any past time ✅]
+        STORE --> AUDIT[Full audit trail ✅]
+    end
+
+    style LIMIT fill:#ffcdd2,color:#333
+    style AUDIT fill:#c8e6c9,color:#333
+    style PAST fill:#c8e6c9,color:#333
+```
+
+---
+
+## ADV-D5 — WebSocket vs SSE vs Long Polling
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    rect rgb(255, 200, 200)
+        note over C,S: ❌ Short Polling (wasteful)
+        loop Every 3 seconds
+            C->>S: GET /messages
+            S-->>C: [] (empty, no new messages)
+        end
+    end
+
+    rect rgb(255, 240, 200)
+        note over C,S: ⚠️ Long Polling
+        C->>S: GET /messages (hold open)
+        Note over S: Server waits for message...
+        S-->>C: [newMessage] (when available)
+        C->>S: GET /messages (immediately again)
+    end
+
+    rect rgb(200, 230, 200)
+        note over C,S: ✅ Server-Sent Events (one-way push)
+        C->>S: GET /stream\nAccept: text/event-stream
+        Note over S: Persistent HTTP connection open
+        S-->>C: data: {message1}
+        S-->>C: data: {message2}
+    end
+
+    rect rgb(200, 220, 255)
+        note over C,S: ✅ WebSocket (bidirectional)
+        C->>S: HTTP Upgrade: websocket
+        S-->>C: 101 Switching Protocols
+        C->>S: send message (any time)
+        S-->>C: push message (any time)
+        Note over C,S: Persistent, bidirectional, low latency
+    end
+```
+
+---
+
+## ADV-D6 — CQRS Read vs Write Separation
+
+```mermaid
+flowchart LR
+    subgraph Write["Write Side (Commands)"]
+        CMD[Command\nCreateOrderCommand] --> CH[Command Handler]
+        CH --> DOM[Domain Model\nfull validation]
+        DOM --> WDB[(Write DB\nSQL Server normalised)]
+        CH -->|publish event| BUS[[Event Bus]]
+    end
+
+    subgraph Read["Read Side (Queries)"]
+        QRY[Query\nGetOrdersQuery] --> QH[Query Handler]
+        QH --> RDB[(Read DB\nDenormalised\nElastic / MongoDB)]
+        QH --> CACHE[(Redis Cache)]
+    end
+
+    BUS -->|update read model| RDB
+
+    subgraph Consistency
+        NOTE["Eventually consistent\nRead DB lags write by\nmilliseconds → seconds"]
+    end
+
+    style WDB fill:#2196F3,color:#fff
+    style RDB fill:#4CAF50,color:#fff
+    style CACHE fill:#f44336,color:#fff
+    style BUS fill:#9C27B0,color:#fff
+```
+

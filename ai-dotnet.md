@@ -1022,3 +1022,406 @@ Production monitoring:
   → Continuous eval: 1% of production traffic scored by eval pipeline nightly
   → Drift detection: alert if groundedness score drops >10% from baseline
 ```
+
+---
+
+# ⚖️ AI in .NET Comparisons — Side-by-Side Differences
+
+---
+
+## AI-C1 — ML.NET vs Semantic Kernel vs Azure OpenAI SDK
+
+| | ML.NET | Semantic Kernel | Azure OpenAI SDK |
+|-|--------|----------------|-----------------|
+| Purpose | Train / run classical ML models | Orchestrate LLMs + plugins + memory | Direct Azure OpenAI API calls |
+| Models | Decision trees, regression, clustering, custom | GPT-4, Phi, local Ollama | GPT-4o, DALL-E, Whisper, Embeddings |
+| Offline / on-prem | ✅ Yes | ✅ (with Ollama) | ❌ Requires Azure |
+| Plugin system | ❌ | ✅ `[KernelFunction]` | ❌ |
+| Memory / RAG | ❌ | ✅ Built-in vector memory | Manual |
+| Streaming | ❌ | ✅ | ✅ |
+| Use for | Tabular data ML, sentiment, recommendations | Agentic apps, RAG, orchestration | Direct GPT integration, simple completions |
+
+```csharp
+// ML.NET — train and predict (no LLM)
+var mlContext = new MLContext();
+var model     = mlContext.Model.Load("model.zip", out _);
+var predictor = mlContext.Model.CreatePredictionEngine<Input, Output>(model);
+var result    = predictor.Predict(new Input { Text = "Great product!" });
+
+// Semantic Kernel — orchestrate LLM with plugins
+var kernel = Kernel.CreateBuilder().AddAzureOpenAIChatCompletion(...).Build();
+var result = await kernel.InvokePromptAsync("Summarise: {{$input}}", new() { ["input"] = text });
+
+// Azure OpenAI SDK — direct API call
+var client   = new AzureOpenAIClient(endpoint, credential);
+var response = await client.GetChatClient("gpt-4o")
+    .CompleteChatAsync([new UserChatMessage("Hello!")]);
+```
+
+---
+
+## AI-C2 — RAG vs Fine-Tuning vs Prompt Engineering
+
+| | Prompt Engineering | RAG | Fine-Tuning |
+|-|-------------------|-----|-------------|
+| Data freshness | ✅ Real-time (inject in prompt) | ✅ Real-time (retrieve then inject) | ❌ Frozen at training time |
+| Domain knowledge | Limited (prompt length) | ✅ Any size vector store | ✅ Baked into weights |
+| Cost | ✅ Zero (no training) | Low (embedding + vector DB) | ❌ High (GPU training) |
+| Latency | ✅ Low | Medium (retrieval step) | ✅ Low |
+| Hallucination risk | Medium | ✅ Lower (grounded in docs) | Medium |
+| Custom behaviour/style | Limited | Limited | ✅ Yes (tone, format, domain) |
+| Use for | Quick wins, instruction following | Knowledge base Q&A, doc search | Specific style, format, narrow domain |
+
+```
+Decision tree:
+Need domain knowledge → start with RAG (cheaper, updatable)
+RAG not good enough → consider fine-tuning
+Need specific output format → fine-tuning or structured output
+Just need to follow instructions better → prompt engineering (few-shot)
+```
+
+---
+
+## AI-C3 — Embeddings vs Full-Text Search vs Keyword Search
+
+| | Keyword Search | Full-Text Search (FTS) | Semantic Search (Embeddings) |
+|-|---------------|----------------------|------------------------------|
+| Matches | Exact words | Stemmed/inflected words | Meaning / intent |
+| "fast car" query finds "quick automobile" | ❌ | ❌ | ✅ |
+| Setup | Simple | Moderate (index) | Complex (embedding model + vector DB) |
+| Speed | ✅ Fastest | Fast | Medium (ANN search) |
+| False positives | Low | Low | Higher (semantic similarity) |
+| Use for | Filter by ID, exact match | Document search, search bar | Q&A, similarity, recommendation |
+
+```csharp
+// Embedding — convert text to vector (float[])
+var embeddingClient = openAiClient.GetEmbeddingClient("text-embedding-3-small");
+var embedding = await embeddingClient.GenerateEmbeddingAsync("How do I return an order?");
+// embedding.Value.Vector → float[1536] — similar texts have similar vectors
+
+// Store in vector DB (Azure AI Search, Qdrant, pgvector)
+await vectorDb.UpsertAsync(new VectorRecord
+{
+    Id      = docId,
+    Vector  = embedding.Value.Vector.ToArray(),
+    Content = "You can return an order within 30 days..."
+});
+
+// Query — find most similar (cosine similarity)
+var results = await vectorDb.SearchAsync(queryEmbedding, topK: 5);
+// Returns most semantically similar documents
+```
+
+---
+
+## AI-C4 — `ChatCompletion` vs `TextCompletion` vs `Embedding` vs `ImageGeneration`
+
+| | Chat Completion | Text Completion | Embedding | Image Generation |
+|-|---------------|----------------|-----------|-----------------|
+| Input | Conversation history (messages) | Plain text prompt | Text to encode | Text description |
+| Output | Assistant message | Continuation text | Float vector | Image URL / bytes |
+| Model | GPT-4o, GPT-4 | GPT-3.5 (legacy) | text-embedding-3-small | DALL-E 3 |
+| Use for | Conversational AI, Q&A, agents | Legacy apps | Semantic search, RAG, similarity | Image creation |
+
+```csharp
+// Chat Completion — conversational
+var messages = new List<ChatMessage>
+{
+    new SystemChatMessage("You are a helpful assistant."),
+    new UserChatMessage("What is the return policy?")
+};
+var response = await chatClient.CompleteChatAsync(messages);
+
+// Embedding — vectorise text for similarity search
+var embedding = await embeddingClient.GenerateEmbeddingAsync("return policy");
+float[] vector = embedding.Value.Vector.ToArray();
+
+// Image Generation — text → image
+var imageClient = openAiClient.GetImageClient("dall-e-3");
+var image = await imageClient.GenerateImageAsync("A blue sports car on a mountain road");
+```
+
+---
+
+## AI-C5 — System Prompt vs User Prompt vs Assistant Message
+
+| | System Prompt | User Prompt | Assistant Message |
+|-|--------------|------------|------------------|
+| Role | Set AI persona, constraints, format | User's actual question/task | Previous AI response (conversation history) |
+| When set | Once at conversation start | Every turn | Included for context |
+| Controls | Tone, domain, format, safety guardrails | Task content | Prior context |
+| Token cost | Counted each call | Counted each call | Counted each call |
+
+```csharp
+var messages = new List<ChatMessage>
+{
+    // System — defines AI behaviour
+    new SystemChatMessage("""
+        You are a customer support agent for Acme Shop.
+        Only answer questions about orders, returns, and products.
+        Always be concise. Never mention competitors.
+        Respond in the same language as the user.
+        """),
+
+    // User — the question
+    new UserChatMessage("My order #12345 hasn't arrived yet"),
+
+    // Assistant — prior response (for multi-turn context)
+    new AssistantChatMessage("I can see order #12345 was shipped 3 days ago..."),
+
+    // User — follow-up
+    new UserChatMessage("Can I get a refund?")
+};
+```
+
+---
+
+## AI-C6 — Zero-Shot vs Few-Shot vs Chain-of-Thought Prompting
+
+| | Zero-Shot | Few-Shot | Chain-of-Thought (CoT) |
+|-|----------|----------|------------------------|
+| Examples provided | ❌ None | ✅ 2–5 examples | Optional examples + "think step by step" |
+| Accuracy | Baseline | ✅ Better for complex tasks | ✅ Best for reasoning tasks |
+| Token cost | Low | Medium | Higher (longer reasoning) |
+| Use for | Simple tasks, classification | Pattern following, format conformance | Math, logic, multi-step reasoning |
+
+```csharp
+// Zero-shot
+"Classify this review as Positive, Negative, or Neutral: 'Great product!'"
+
+// Few-shot — examples guide the model
+"""
+Classify reviews:
+Review: "Terrible, broke after 1 day" → Negative
+Review: "It's okay, nothing special"  → Neutral
+Review: "Absolutely love it!"         → Positive
+Review: "Great product!"              → 
+"""
+
+// Chain-of-Thought — force step-by-step reasoning
+"""
+Order total: $85. Discount: 15%. Shipping: $5 if order < $100 else free.
+Think step by step, then give the final total.
+"""
+// → "Step 1: Discount = $85 × 0.15 = $12.75. Step 2: After discount = $72.25.
+//    Step 3: $72.25 < $100 → shipping $5. Total = $77.25."
+```
+
+---
+
+## AI-C7 — Agentic AI vs Traditional API Call vs RAG Pipeline
+
+| | Traditional API Call | RAG Pipeline | Agentic AI |
+|-|--------------------|-------------|------------|
+| Steps | 1 (prompt → response) | 2 (retrieve → generate) | Multiple (plan → tool calls → iterate) |
+| Uses tools | ❌ | ❌ (just vector search) | ✅ (search, code exec, APIs) |
+| Self-corrects | ❌ | ❌ | ✅ |
+| Deterministic | ✅ | Mostly | ❌ (LLM decides next step) |
+| Use for | Simple Q&A, classification | Knowledge base search | Complex multi-step workflows |
+
+```csharp
+// Traditional — one shot
+var answer = await kernel.InvokePromptAsync("What is 2+2?");
+
+// RAG — retrieve then generate
+var docs    = await vectorDb.SearchAsync(question, topK: 3);
+var context = string.Join("\n", docs.Select(d => d.Content));
+var answer  = await kernel.InvokePromptAsync(
+    $"Answer based on context:\n{context}\n\nQuestion: {question}");
+
+// Agentic — LLM decides which tools to call
+kernel.ImportPluginFromType<OrderPlugin>();     // tools: GetOrder, CancelOrder, TrackShipment
+kernel.ImportPluginFromType<EmailPlugin>();     // tools: SendEmail
+var result = await kernel.InvokePromptAsync(
+    "Check order 123, and if it's delayed, email the customer.");
+// LLM autonomously calls: GetOrder(123) → TrackShipment(123) → SendEmail(customer, message)
+```
+
+
+---
+
+# ⚖️ AI in .NET Comparisons — Side-by-Side Differences
+
+---
+
+## AI-C1 — RAG vs Fine-Tuning vs Prompt Engineering
+
+| | Prompt Engineering | RAG | Fine-Tuning |
+|-|-------------------|-----|-------------|
+| Changes model weights | ❌ | ❌ | ✅ |
+| Cost | Free (just tokens) | Low (embedding + retrieval) | ❌ High (GPU training) |
+| Up-to-date knowledge | Only what's in prompt | ✅ Live from vector store | ❌ Frozen at training time |
+| Customisation level | Low | Medium | ✅ High |
+| Latency | Low | Medium (retrieval step) | Low (no retrieval) |
+| Best for | Format control, tone, simple tasks | Domain knowledge, Q&A over docs | Style/persona, specialised tasks |
+
+```csharp
+// Prompt Engineering — just craft a better prompt
+var result = await kernel.InvokePromptAsync("""
+    You are a formal legal document assistant.
+    Summarize the following contract in exactly 3 bullet points.
+    Use formal language only.
+    Contract: {{$contract}}
+    """, new KernelArguments { ["contract"] = contractText });
+
+// RAG — retrieve relevant chunks, inject into prompt
+var embeddings = await embeddingService.GenerateEmbeddingAsync(userQuery);
+var relevantDocs = await vectorStore.SearchAsync(embeddings, topK: 5);
+var context = string.Join("\n---\n", relevantDocs.Select(d => d.Content));
+var answer = await kernel.InvokePromptAsync(
+    "Answer based ONLY on the context below:\n{{$ctx}}\n\nQuestion: {{$q}}",
+    new KernelArguments { ["ctx"] = context, ["q"] = userQuery });
+
+// Fine-Tuning — separate training process, model weights updated
+// Result: a new model endpoint specifically trained on your data
+// Use when: consistent output format required, or domain is highly specialised
+```
+
+---
+
+## AI-C2 — Semantic Kernel vs ML.NET vs Azure OpenAI SDK
+
+| | ML.NET | Azure OpenAI SDK | Semantic Kernel |
+|-|--------|-----------------|----------------|
+| Purpose | Train/use custom ML models | Call GPT-4 / DALL-E directly | Orchestrate LLMs + plugins + memory |
+| Requires GPU | ✅ For training | ❌ (API call) | ❌ (API call) |
+| Models | Classical ML (regression, classification) | GPT-4o, embeddings, Whisper | Any LLM (OpenAI, Azure, Ollama, HuggingFace) |
+| Plugins / agents | ❌ | ❌ | ✅ |
+| Memory / RAG | ❌ | ❌ | ✅ Built-in |
+| Use for | On-device ML, sentiment, classification | Simple LLM calls | Agentic workflows, RAG, multi-step AI |
+
+```csharp
+// ML.NET — train and use a custom model
+var context = new MLContext();
+var data    = context.Data.LoadFromTextFile<SentimentData>("data.csv");
+var pipeline = context.Transforms.Text.FeaturizeText("Features", "Text")
+    .Append(context.BinaryClassification.Trainers.SdcaLogisticRegression());
+var model = pipeline.Fit(data);
+var prediction = model.Transform(testData); // no internet needed
+
+// Azure OpenAI SDK — raw API call
+var client = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key));
+var response = await client.GetChatClient("gpt-4o")
+    .CompleteChatAsync([new UserChatMessage("Summarise this: " + text)]);
+
+// Semantic Kernel — orchestration layer (uses OpenAI or any LLM underneath)
+var kernel = Kernel.CreateBuilder().AddAzureOpenAIChatCompletion(...).Build();
+kernel.ImportPluginFromType<OrderPlugin>();  // add tool
+var result = await kernel.InvokePromptAsync("What are my pending orders?");
+// SK automatically calls OrderPlugin.GetPendingOrders() if needed
+```
+
+---
+
+## AI-C3 — GPT-4o vs Local Models (Ollama) vs Azure AI Foundry
+
+| | GPT-4o (Azure OpenAI) | Ollama (Local) | Azure AI Foundry |
+|-|----------------------|----------------|-----------------|
+| Data privacy | ❌ Sent to cloud | ✅ Stays on device | ✅ Your Azure tenant |
+| Cost | Pay per token | Free (hardware cost) | Pay per token |
+| Performance | ✅ Best | Limited by hardware | ✅ Same as Azure OpenAI |
+| Internet required | ✅ | ❌ | ✅ |
+| Model choice | GPT-4o, GPT-4o-mini | Llama 3, Mistral, Phi-3 | GPT-4o + 1800+ models |
+| Use for | Best quality, production | Dev/test, air-gapped, PII data | Enterprise, compliance |
+
+```csharp
+// Switch between providers via environment — same SK code
+var builder = Kernel.CreateBuilder();
+
+if (Environment.GetEnvironmentVariable("USE_LOCAL") == "true")
+    builder.AddOllamaChatCompletion("llama3.2", new Uri("http://localhost:11434"));
+else
+    builder.AddAzureOpenAIChatCompletion("gpt-4o", endpoint, apiKey);
+
+var kernel = builder.Build();
+// ✅ Same kernel.InvokePromptAsync() call works for both
+```
+
+---
+
+## AI-C4 — System Prompt vs User Prompt vs Assistant Message
+
+| | System Prompt | User Prompt | Assistant Message |
+|-|--------------|-------------|-----------------|
+| Role | Sets persona, constraints, format | User's actual question/task | Previous AI response (for multi-turn) |
+| Persists across turns | ✅ (usually sent each time) | ❌ Per turn | ❌ Per turn |
+| Trust level | Highest (developer-controlled) | Medium (user-controlled) | Model-generated |
+| Injected | `AddSystemMessage()` | `AddUserMessage()` | `AddAssistantMessage()` |
+
+```csharp
+var messages = new ChatHistory();
+
+// System — developer sets constraints
+messages.AddSystemMessage("""
+    You are a senior .NET code reviewer.
+    - Only review C# code
+    - Focus on performance and security issues
+    - Be concise: max 5 bullet points
+    - If not C# code, say "Please provide C# code"
+    """);
+
+// Multi-turn conversation
+messages.AddUserMessage("Review this: " + code);
+var response1 = await chatService.GetChatMessageContentsAsync(messages);
+messages.AddAssistantMessage(response1[0].Content!);
+
+messages.AddUserMessage("Now focus only on the async issues");
+var response2 = await chatService.GetChatMessageContentsAsync(messages);
+```
+
+---
+
+## AI-C5 — Temperature vs Top-P vs Max Tokens vs Frequency Penalty
+
+| Parameter | Range | Effect | High value = |
+|-----------|-------|--------|-------------|
+| `temperature` | 0.0 – 2.0 | Randomness of output | More creative / less predictable |
+| `top_p` | 0.0 – 1.0 | Nucleus sampling (vocabulary narrowing) | More diverse word choices |
+| `max_tokens` | 1 – model limit | Max output length | Longer response |
+| `frequency_penalty` | -2.0 – 2.0 | Penalise repeated tokens | Less repetition |
+| `presence_penalty` | -2.0 – 2.0 | Encourage new topics | More topic diversity |
+
+```csharp
+// Deterministic output — code generation, structured data
+var settings = new OpenAIPromptExecutionSettings
+{
+    Temperature   = 0.0,   // fully deterministic
+    MaxTokens     = 1000,
+    ResponseFormat = typeof(OrderSummary) // structured output (JSON mode)
+};
+
+// Creative output — marketing copy, brainstorming
+var creative = new OpenAIPromptExecutionSettings
+{
+    Temperature      = 0.9,  // creative
+    TopP             = 0.95,
+    FrequencyPenalty = 0.5,  // reduce repetition
+    MaxTokens        = 500
+};
+```
+
+---
+
+## AI-C6 — Embeddings vs Keywords vs Full-Text Search
+
+| | Keyword / Full-Text Search | Embeddings (Semantic Search) |
+|-|--------------------------|------------------------------|
+| Match type | Exact word match | Meaning / concept match |
+| "dog" vs "canine" | ❌ Different strings | ✅ Same semantic meaning |
+| Speed | ✅ Fast (inverted index) | Slower (vector similarity) |
+| Language | Needs same language | Cross-lingual possible |
+| Storage | Inverted index | Vector database |
+| Use for | Exact terms, code, IDs | Q&A, document similarity, recommendations |
+
+```csharp
+// Embeddings — semantic search
+var queryVector = await embeddingService.GenerateEmbeddingAsync("What is the refund policy?");
+var results = await vectorDb.SearchAsync(queryVector, topK: 5, minScore: 0.75f);
+// Returns: "Returns & Refunds", "30-day guarantee", "Exchange policy"
+// Even though query doesn't contain those exact words
+
+// Full-text — exact match
+var sql = "SELECT * FROM Docs WHERE CONTAINS(Content, '\"refund\" OR \"return\"')";
+// Misses: "money-back", "reimbursement", "exchange" — different words
+```
+

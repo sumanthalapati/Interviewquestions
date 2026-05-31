@@ -6194,3 +6194,495 @@ async function showNotification(title, options = {}) {
 *End of JavaScript Interview Questions — Complete Guide*
 
 > **Tip:** Bookmark this file and use `Ctrl+F` / `Cmd+F` to search for any topic. Good luck with your interviews!
+
+---
+
+# ⚖️ JavaScript Comparisons — Side-by-Side Differences
+
+---
+
+## JS-C1 — `var` vs `let` vs `const`
+
+| | `var` | `let` | `const` |
+|-|-------|-------|---------|
+| Scope | Function | Block | Block |
+| Hoisting | ✅ Hoisted (initialised `undefined`) | ✅ Hoisted (TDZ — not initialised) | ✅ Hoisted (TDZ) |
+| Re-declaration | ✅ Allowed | ❌ Error | ❌ Error |
+| Re-assignment | ✅ | ✅ | ❌ Variable binding only |
+| Global object property | ✅ `window.x` if top-level | ❌ | ❌ |
+
+```javascript
+// var — function scoped, accessible before declaration
+console.log(x); // undefined (hoisted)
+var x = 5;
+
+// let — block scoped, TDZ
+console.log(y); // ReferenceError (temporal dead zone)
+let y = 5;
+{ let y = 10; } // different y
+console.log(y); // 5
+
+// const — prevents rebinding, not mutation
+const arr = [1, 2];
+arr.push(3);    // ✅ mutation allowed
+arr = [4, 5];   // ❌ TypeError — cannot reassign const
+```
+
+---
+
+## JS-C2 — `==` vs `===` (Loose vs Strict Equality)
+
+| | `==` (loose) | `===` (strict) |
+|-|-------------|---------------|
+| Type coercion | ✅ Yes | ❌ No |
+| Performance | Slightly slower (coercion) | Faster |
+| Predictability | ❌ Surprising results | ✅ Consistent |
+| Use | Almost never | Always |
+
+```javascript
+0   == false  // true  (false coerced to 0)
+0   === false // false (number ≠ boolean)
+''  == false  // true
+null == undefined // true
+null === undefined // false
+[1] == 1     // true  (array coerced to number)
+[1] === 1    // false
+
+// Only safe == use: null check (catches both null and undefined)
+if (x == null) { }  // equivalent to: if (x === null || x === undefined)
+```
+
+---
+
+## JS-C3 — `null` vs `undefined` vs `NaN` vs `0` vs `''`
+
+| Value | `typeof` | Falsy? | Description |
+|-------|---------|--------|-------------|
+| `null` | `'object'` (bug) | ✅ | Intentional absence of value |
+| `undefined` | `'undefined'` | ✅ | Variable declared but not assigned |
+| `NaN` | `'number'` | ✅ | Invalid number operation |
+| `0` | `'number'` | ✅ | Zero |
+| `''` | `'string'` | ✅ | Empty string |
+| `false` | `'boolean'` | ✅ | Boolean false |
+
+```javascript
+typeof null        // 'object' — historical bug in JS
+typeof undefined   // 'undefined'
+null == undefined  // true
+null === undefined // false
+
+Number('abc')      // NaN
+isNaN(NaN)         // true
+NaN === NaN        // false! (NaN is never equal to itself)
+Number.isNaN(NaN)  // true (use this — isNaN() coerces first)
+```
+
+---
+
+## JS-C4 — Arrow Function vs Regular Function
+
+| | Arrow Function | Regular Function |
+|-|---------------|-----------------|
+| `this` binding | Lexical (inherits from enclosing scope) | Dynamic (depends on caller) |
+| `arguments` object | ❌ Not available | ✅ Available |
+| `new` (constructor) | ❌ Cannot use | ✅ Can use |
+| Prototype | ❌ No prototype | ✅ Has prototype |
+| Use for | Callbacks, array methods, class methods | Constructors, methods needing own `this` |
+
+```javascript
+// Regular function — this depends on HOW it's called
+const obj = {
+  name: 'Alice',
+  greet: function() { return this.name; } // this = obj when called as obj.greet()
+};
+
+// Arrow function — this inherited from where it's DEFINED
+const obj2 = {
+  name: 'Alice',
+  // ❌ Arrow as method — this is outer scope (window/undefined), not obj2
+  greet: () => this.name,     // undefined!
+  // ✅ Arrow inside method — captures obj2's this
+  greetLater: function() {
+    setTimeout(() => console.log(this.name), 100); // this = obj2 ✅
+  }
+};
+```
+
+---
+
+## JS-C5 — `call` vs `apply` vs `bind`
+
+| | `call` | `apply` | `bind` |
+|-|--------|---------|--------|
+| Invokes immediately | ✅ | ✅ | ❌ Returns new function |
+| Arguments | Individual | Array | Partial application |
+
+```javascript
+function greet(greeting, punctuation) {
+  return `${greeting}, ${this.name}${punctuation}`;
+}
+const user = { name: 'Alice' };
+
+greet.call(user, 'Hello', '!');        // "Hello, Alice!"
+greet.apply(user, ['Hello', '!']);     // "Hello, Alice!" (args as array)
+const boundGreet = greet.bind(user);   // new function with this=user
+boundGreet('Hi', '.');                 // "Hi, Alice."
+
+// bind partial application
+const sayHello = greet.bind(user, 'Hello');
+sayHello('?');  // "Hello, Alice?"
+```
+
+---
+
+## JS-C6 — Callback vs Promise vs Async/Await
+
+| | Callback | Promise | Async/Await |
+|-|----------|---------|-------------|
+| Readability | ❌ Callback hell | Better | ✅ Best (synchronous-looking) |
+| Error handling | Manual try/catch in each | `.catch()` | `try/catch` |
+| Parallel execution | Manual | `Promise.all()` | `await Promise.all()` |
+| Cancellation | Manual | AbortController | AbortController |
+
+```javascript
+// Callback hell
+getUser(id, (user) => {
+  getOrders(user.id, (orders) => {
+    getPayments(orders[0].id, (payment) => {
+      // deeply nested!
+    }, onError);
+  }, onError);
+}, onError);
+
+// Promise chain
+getUser(id)
+  .then(user => getOrders(user.id))
+  .then(orders => getPayments(orders[0].id))
+  .catch(err => console.error(err));
+
+// Async/await — clearest
+try {
+  const user    = await getUser(id);
+  const orders  = await getOrders(user.id);
+  const payment = await getPayments(orders[0].id);
+} catch (err) { console.error(err); }
+
+// Parallel — don't await sequentially when independent
+const [user, config] = await Promise.all([getUser(id), getConfig()]);
+```
+
+---
+
+## JS-C7 — `for...of` vs `for...in` vs `forEach` vs `map`
+
+| | `for...of` | `for...in` | `forEach` | `map` |
+|-|-----------|-----------|----------|-------|
+| Iterates | Values | Enumerable keys | Values | Values |
+| Works on | Iterables (array, string, Map, Set) | Objects | Arrays | Arrays |
+| Returns | Nothing | Nothing | Nothing (void) | New array |
+| `break`/`continue` | ✅ | ✅ | ❌ | ❌ |
+| Async-friendly | ✅ `for await...of` | ❌ | ❌ | ❌ |
+
+```javascript
+const arr = [1, 2, 3];
+
+for (const v of arr) { /* v = 1, 2, 3 */ }  // values ✅
+for (const k in arr) { /* k = '0', '1', '2' */ } // keys ❌ (use for objects)
+
+arr.forEach(v => console.log(v));  // side effects, no return value
+const doubled = arr.map(v => v * 2); // [2, 4, 6] — transformation
+
+// for...of with index via entries()
+for (const [i, v] of arr.entries()) { console.log(i, v); }
+```
+
+---
+
+## JS-C8 — Shallow Copy vs Deep Copy
+
+| | Assignment (`=`) | Spread (`{...}`) / `Object.assign` | `structuredClone()` | `JSON.parse(JSON.stringify())` |
+|-|----------------|-----------------------------------|--------------------|---------------------------------|
+| Copies reference | ✅ Same object | ❌ New top-level object | ❌ Full deep copy | ❌ Full deep copy |
+| Nested objects | Same reference | Same reference (shallow) | ✅ Copied | ✅ Copied |
+| Functions | Same reference | Same reference | ❌ Lost | ❌ Lost |
+| Dates / Maps / Sets | Same reference | Same reference | ✅ Preserved | ❌ Lost (→ string) |
+
+```javascript
+const a = { x: 1, nested: { y: 2 } };
+
+const ref   = a;                       // same object — changes affect a
+const shallow = { ...a };              // new object, nested.y still shared
+const deep  = structuredClone(a);      // full independent copy ✅ (modern)
+
+shallow.nested.y = 99;
+console.log(a.nested.y); // 99! — shallow copy shares nested reference
+
+deep.nested.y = 88;
+console.log(a.nested.y); // still 99 — deep copy is independent
+```
+
+
+---
+
+# ⚖️ JavaScript Comparisons — Side-by-Side Differences
+
+---
+
+## JS-C1 — `var` vs `let` vs `const`
+
+| | `var` | `let` | `const` |
+|-|-------|-------|---------|
+| Scope | Function-scoped | Block-scoped | Block-scoped |
+| Hoisted | ✅ Yes (initialised as `undefined`) | ✅ Yes (but TDZ — not accessible) | ✅ Yes (but TDZ) |
+| Re-declare same scope | ✅ Yes | ❌ Error | ❌ Error |
+| Re-assign | ✅ Yes | ✅ Yes | ❌ Error (binding, not value) |
+| Use today | ❌ Avoid | ✅ For mutable bindings | ✅ Default — prefer always |
+
+```js
+// var hoisting trap
+console.log(x); // undefined (not ReferenceError) — hoisted
+var x = 5;
+
+// let — TDZ (Temporal Dead Zone)
+console.log(y); // ❌ ReferenceError — can't access before declaration
+let y = 5;
+
+// const — binding is immutable, but object contents can change
+const user = { name: "Alice" };
+user.name = "Bob";   // ✅ allowed — object mutated, not re-bound
+user = {};           // ❌ TypeError — re-assignment of const binding
+```
+
+---
+
+## JS-C2 — `==` (Loose) vs `===` (Strict) vs `Object.is()`
+
+| | `==` (loose) | `===` (strict) | `Object.is()` |
+|-|-------------|---------------|---------------|
+| Type coercion | ✅ Yes (converts types) | ❌ No | ❌ No |
+| `NaN == NaN` | `false` | `false` | `true` ✅ |
+| `+0 === -0` | `true` | `true` | `false` ✅ |
+| Use | ❌ Avoid — unpredictable | ✅ Default choice | Special cases (NaN, ±0) |
+
+```js
+0   == "0"   // true  — string coerced to number
+0   === "0"  // false — different types
+null == undefined  // true  (loose)
+null === undefined // false (strict)
+
+// Object.is quirks:
+Object.is(NaN, NaN)  // true  — unlike ===
+Object.is(+0, -0)    // false — unlike ===
+```
+
+---
+
+## JS-C3 — `null` vs `undefined` vs `NaN` vs empty string
+
+| | `null` | `undefined` | `NaN` | `""` |
+|-|--------|------------|-------|------|
+| Type | `"object"` (JS bug) | `"undefined"` | `"number"` | `"string"` |
+| Meaning | Intentional absence | Not assigned / missing | Invalid number | Empty text |
+| Falsy | ✅ | ✅ | ✅ | ✅ |
+| `== null` | ✅ true | ✅ true | ❌ false | ❌ false |
+
+```js
+let a;
+console.log(a);          // undefined — declared but not assigned
+
+let b = null;
+console.log(b);          // null — intentionally empty
+
+console.log(0 / 0);      // NaN — invalid arithmetic
+console.log(NaN === NaN);// false — NaN is not equal to itself!
+console.log(isNaN(NaN)); // true  — use isNaN() or Number.isNaN()
+
+// Safe null/undefined check
+if (value == null) { }   // catches both null AND undefined
+if (value === null) { }  // only null
+if (value === undefined) { } // only undefined
+```
+
+---
+
+## JS-C4 — `forEach` vs `map` vs `filter` vs `reduce` vs `find`
+
+| | `forEach` | `map` | `filter` | `reduce` | `find` |
+|-|----------|-------|---------|---------|--------|
+| Returns | `undefined` | New array (same length) | New array (subset) | Single value | First match or `undefined` |
+| Chainable | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Use for | Side effects | Transform each element | Subset of elements | Aggregate | First matching element |
+| Break early | ❌ | ❌ | ❌ | ❌ | ✅ (stops at first match) |
+
+```js
+const nums = [1, 2, 3, 4, 5];
+
+nums.forEach(n => console.log(n));          // side effect only, no return value
+const doubled  = nums.map(n => n * 2);      // [2, 4, 6, 8, 10]
+const evens    = nums.filter(n => n % 2 === 0); // [2, 4]
+const sum      = nums.reduce((acc, n) => acc + n, 0); // 15
+const firstBig = nums.find(n => n > 3);    // 4 (stops searching after 4)
+
+// Chaining
+const result = nums
+  .filter(n => n % 2 === 0)   // [2, 4]
+  .map(n => n * 10)            // [20, 40]
+  .reduce((a, b) => a + b, 0); // 60
+```
+
+---
+
+## JS-C5 — Arrow Function vs Regular Function
+
+| | Regular Function | Arrow Function |
+|-|----------------|---------------|
+| `this` binding | Dynamic (caller determines `this`) | Lexical (`this` from surrounding scope) |
+| `arguments` object | ✅ Available | ❌ Not available (use rest params) |
+| Constructor (`new`) | ✅ Can be used | ❌ Cannot be called with `new` |
+| Method shorthand | ✅ Good | ❌ Loses correct `this` |
+| Callbacks | Careful with `this` | ✅ Preferred (captures `this`) |
+
+```js
+class Timer {
+  constructor() { this.seconds = 0; }
+
+  // ❌ Regular function — loses 'this' in setTimeout
+  startBroken() {
+    setInterval(function() {
+      this.seconds++; // 'this' = global/undefined, not Timer!
+    }, 1000);
+  }
+
+  // ✅ Arrow function — captures 'this' from class
+  start() {
+    setInterval(() => {
+      this.seconds++; // 'this' = Timer instance ✅
+    }, 1000);
+  }
+}
+
+// ❌ Arrow function as object method — wrong 'this'
+const obj = {
+  name: "Alice",
+  greet: () => console.log(this.name) // 'this' = global, not obj!
+};
+
+// ✅ Regular function as method — correct 'this'
+const obj2 = {
+  name: "Alice",
+  greet() { console.log(this.name); } // 'this' = obj2 ✅
+};
+```
+
+---
+
+## JS-C6 — Promise vs async/await vs Callbacks vs Observable
+
+| | Callback | Promise | async/await | Observable (RxJS) |
+|-|---------|---------|-------------|-------------------|
+| Multiple values | ❌ | ❌ (one resolve) | ❌ | ✅ |
+| Cancellable | ❌ | ❌ | ❌ (AbortController workaround) | ✅ `.unsubscribe()` |
+| Error handling | Try/catch hard | `.catch()` | try/catch ✅ | `.pipe(catchError())` |
+| Readability | ❌ Callback hell | Medium | ✅ Best | Medium |
+| Lazy | ❌ | ❌ (eager) | ❌ | ✅ Only runs when subscribed |
+
+```js
+// Callback — nested hell
+getUser(id, (err, user) => {
+  getOrders(user.id, (err, orders) => {
+    getItem(orders[0].id, (err, item) => { /* ... */ });
+  });
+});
+
+// Promise — chainable
+getUser(id)
+  .then(user => getOrders(user.id))
+  .then(orders => getItem(orders[0].id))
+  .catch(err => console.error(err));
+
+// async/await — reads like sync
+async function load(id) {
+  try {
+    const user   = await getUser(id);
+    const orders = await getOrders(user.id);
+    const item   = await getItem(orders[0].id);
+  } catch (err) { console.error(err); }
+}
+
+// Parallel (don't await sequentially when independent)
+const [user, settings] = await Promise.all([getUser(id), getSettings(id)]);
+```
+
+---
+
+## JS-C7 — `call` vs `apply` vs `bind`
+
+| | `call` | `apply` | `bind` |
+|-|--------|---------|--------|
+| Invokes immediately | ✅ | ✅ | ❌ (returns new function) |
+| Args format | Individual: `fn.call(ctx, a, b)` | Array: `fn.apply(ctx, [a, b])` | Individual: `fn.bind(ctx, a, b)` |
+| Use for | Borrow methods, set `this` immediately | Spread array as args | Partial application, event handlers |
+
+```js
+function greet(greeting, punctuation) {
+  return `${greeting}, ${this.name}${punctuation}`;
+}
+const user = { name: "Alice" };
+
+greet.call(user, "Hello", "!");     // "Hello, Alice!" — immediate call
+greet.apply(user, ["Hello", "!"]); // "Hello, Alice!" — array args
+const boundGreet = greet.bind(user, "Hello"); // new function with 'this' fixed
+boundGreet("!");                    // "Hello, Alice!" — called later
+```
+
+---
+
+## JS-C8 — `prototype` vs `class` vs Factory Function
+
+| | Prototype | `class` (ES6) | Factory Function |
+|-|----------|--------------|-----------------|
+| Syntax | Verbose (`Function.prototype.method`) | Clean, familiar | Plain function |
+| `this` risks | ✅ Bound via `new` | ✅ Bound via `new` | ❌ No `this` needed (closure) |
+| Private data | ❌ Convention only | ✅ `#privateField` (ES2022) | ✅ Closure — truly private |
+| Inheritance | `Object.create(proto)` | `extends` | Composition (mixin) |
+| `instanceof` | ✅ | ✅ | ❌ |
+
+```js
+// Class (most common today)
+class Counter {
+  #count = 0;             // truly private (ES2022)
+  increment() { this.#count++; }
+  get value() { return this.#count; }
+}
+
+// Factory function — no 'this', private via closure
+function createCounter() {
+  let count = 0;          // private via closure
+  return {
+    increment: () => count++,
+    get value() { return count; }
+  };
+}
+```
+
+---
+
+## JS-C9 — `setTimeout` vs `setInterval` vs `requestAnimationFrame` vs `queueMicrotask`
+
+| | `setTimeout` | `setInterval` | `requestAnimationFrame` | `queueMicrotask` |
+|-|-------------|--------------|------------------------|-----------------|
+| When runs | After N ms (macrotask) | Every N ms (macrotask) | Before next paint (~60fps) | End of current microtask queue |
+| Cancellable | `clearTimeout` | `clearInterval` | `cancelAnimationFrame` | ❌ |
+| Use for | Delayed action | Polling | Animation, smooth UI | Promise-like sequencing |
+| Priority | Low (macrotask) | Low (macrotask) | High (before paint) | Highest (before macrotasks) |
+
+```js
+// Event loop order: Sync → Microtasks (Promise.then, queueMicrotask) → Macrotasks (setTimeout)
+console.log("1");
+setTimeout(() => console.log("4"), 0);   // macrotask — runs last
+Promise.resolve().then(() => console.log("3")); // microtask — before setTimeout
+queueMicrotask(() => console.log("2.5"));       // microtask — before setTimeout
+console.log("2");
+// Output: 1, 2, 2.5, 3, 4
+```
+

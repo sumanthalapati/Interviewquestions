@@ -5208,3 +5208,137 @@ Key themes throughout:
 - **Traceability**: AB# linking from commits to work items to deployments to monitoring
 
 ---
+
+---
+
+# ⚖️ Azure & DevOps Comparisons — Side-by-Side Differences
+
+---
+
+## AZ-C1 — Azure Service Bus vs Azure Event Hub vs Azure Event Grid vs Storage Queue
+
+| | Storage Queue | Service Bus Queue | Event Hub | Event Grid |
+|-|--------------|-----------------|-----------|------------|
+| Throughput | Low (2k msg/sec) | Medium (80k/sec) | ✅ Millions/sec | Medium |
+| Message retention | 7 days | 14 days max | 90 days (replay) | 24h (retry) |
+| Replay | ❌ | ❌ | ✅ | ❌ |
+| Dead letter | ❌ | ✅ | ❌ | ✅ (delivery failure) |
+| Sessions / ordering | ❌ | ✅ | Per partition | ❌ |
+| Push to subscribers | ❌ | ❌ | ❌ | ✅ (webhook, function) |
+| Use for | Simple queuing, low vol | Enterprise messaging, workflows | Telemetry, streaming, Kafka-compatible | Azure resource events, webhook fan-out |
+
+---
+
+## AZ-C2 — Azure Functions vs Azure Container Apps vs App Service vs AKS
+
+| | App Service | Azure Functions | Container Apps | AKS |
+|-|------------|----------------|---------------|-----|
+| Billing | Per plan (always on) | Per execution | Per vCPU/memory second | Per node VM |
+| Scale to zero | ❌ (Standard+) | ✅ | ✅ | ❌ |
+| Cold start | ❌ None | ✅ Possible | ✅ Possible | ❌ None |
+| Max execution time | N/A | 5–10 min (Consumption) | N/A | N/A |
+| Kubernetes | ❌ | ❌ | Abstracted | ✅ Full control |
+| Use for | Web apps, APIs | Event-driven, serverless | Microservices, background jobs | Full K8s control, complex workloads |
+
+---
+
+## AZ-C3 — Azure Blob vs Table vs File vs Queue Storage
+
+| | Blob Storage | Table Storage | File Storage | Queue Storage |
+|-|-------------|--------------|-------------|--------------|
+| Data type | Unstructured (files, images, backups) | Semi-structured (key-value NoSQL) | Shared file system (SMB) | Messages |
+| Query | By blob name / prefix | By PartitionKey + RowKey | File path | FIFO dequeue |
+| Max item size | 4.75 TB per blob | 1 MB per entity | 1 TB per share | 64 KB per message |
+| Use for | Media, exports, logs, backups | Config, simple NoSQL, session | Legacy app shared drive migration | Simple async work queue |
+
+---
+
+## AZ-C4 — Azure SQL vs Cosmos DB vs Azure Cache for Redis vs Azure AI Search
+
+| | Azure SQL | Cosmos DB | Azure Cache for Redis | Azure AI Search |
+|-|----------|----------|----------------------|----------------|
+| Model | Relational | Multi-model (NoSQL) | Key-value / data structures | Search index |
+| Consistency | ✅ ACID | Configurable (5 levels) | In-memory eventual | ❌ Eventually indexed |
+| Latency | ms | ✅ < 10ms guaranteed | ✅ Sub-ms | ~100ms |
+| Global distribution | Read replicas | ✅ Multi-region active-active | Geo-replication | ✅ |
+| Use for | Transactional data, reporting | Global scale, flexible schema | Cache, sessions, rate limiting | Full-text search, faceted search |
+
+---
+
+## AZ-C5 — Azure DevOps Pipeline vs GitHub Actions vs Jenkins
+
+| | Azure DevOps Pipelines | GitHub Actions | Jenkins |
+|-|-----------------------|---------------|---------|
+| Hosting | Azure (SaaS) | GitHub (SaaS) | Self-hosted |
+| YAML-based | ✅ | ✅ | ❌ (Groovy DSL or UI) |
+| Integration | Azure services native | GitHub native, marketplace | Plugins (huge ecosystem) |
+| Cost | Free tier, then per parallel job | Free minutes, then per minute | Infrastructure cost |
+| Market share | Enterprise, .NET shops | ✅ Growing dominant | Legacy, on-prem |
+| Use for | Azure-centric orgs | GitHub repos, open source | Legacy self-hosted CI/CD |
+
+---
+
+## AZ-C6 — Managed Identity vs Service Principal vs Connection String
+
+| | Connection String / API Key | Service Principal | Managed Identity |
+|-|---------------------------|-----------------|-----------------|
+| Secret in code/config | ✅ Yes — rotation needed | Client secret (rotatable) | ❌ No secret needed |
+| Rotation | Manual | Manual or automated | ✅ Automatic |
+| Scope | Broad access | Fine-grained RBAC | Fine-grained RBAC |
+| Use for | Legacy, local dev | Cross-tenant, external apps | Azure-hosted apps (✅ best practice) |
+
+```csharp
+// ❌ Connection string — secret in config
+var client = new BlobServiceClient(connectionString);
+
+// ✅ Managed Identity — no secret, RBAC-controlled
+var credential = new DefaultAzureCredential(); // uses Managed Identity in Azure
+var client     = new BlobServiceClient(new Uri("https://account.blob.core.windows.net"), credential);
+// DefaultAzureCredential falls back: ManagedIdentity → VisualStudio → AzureCLI (local dev)
+```
+
+---
+
+## AZ-C7 — Application Insights vs Log Analytics vs Azure Monitor
+
+| | Application Insights | Log Analytics | Azure Monitor |
+|-|---------------------|--------------|---------------|
+| Focus | App performance, exceptions, dependencies | Log aggregation and query (KQL) | Umbrella — metrics + logs + alerts |
+| Data source | SDK in app code | Any Azure resource + custom | All Azure services |
+| Query language | KQL (via LA) | KQL | KQL |
+| Real-time | ✅ Live Metrics | Near-real-time | Near-real-time |
+| Alerting | ✅ Smart detection | ✅ Log-based alerts | ✅ Metric alerts |
+| Use for | App-level diagnostics | Cross-service log querying | End-to-end observability |
+
+```
+Architecture:
+App → Application Insights SDK → Log Analytics Workspace → Azure Monitor dashboards
+                                                       ↓
+                                              Azure Monitor Alerts → Action Groups → PagerDuty / Email / Slack
+```
+
+---
+
+## AZ-C8 — `git merge` vs `git rebase` vs `git squash` vs `git cherry-pick`
+
+| | `merge` | `rebase` | `squash` | `cherry-pick` |
+|-|---------|---------|---------|--------------|
+| History | ✅ Preserves full (merge commit) | Linear (rewrites commits) | Condenses to one commit | Applies specific commit |
+| Shared branches | ✅ Safe | ❌ Never rebase shared | ✅ Before merging | ✅ |
+| Clean history | ❌ Merge commits | ✅ | ✅ | N/A |
+| Use for | Integrating feature to main | Local cleanup before PR | Squash PR commits | Hotfix to release branch |
+
+```bash
+# merge — safe, preserves all commits
+git checkout main && git merge feature/orders   # merge commit created
+
+# rebase — linear history (only on private branch!)
+git checkout feature/orders && git rebase main  # replay commits on top of main
+
+# squash — combine all feature commits into one before merging
+git merge --squash feature/orders && git commit -m "feat: add order management"
+
+# cherry-pick — apply specific commit to another branch
+git cherry-pick abc1234  # apply commit abc1234 to current branch (hotfix scenario)
+```
+

@@ -1035,3 +1035,172 @@ services.AddDbContext<AppDbContext>(); // Scoped by default — disposed after e
 ---
 
 *Last updated: 2026 | .NET 8 / Hangfire 1.8 / Polly 8.x*
+
+---
+
+# 📊 Production Scenario Flow Diagrams — Visual Reference
+
+---
+
+## PS-D1 — Processing 1 Lakh Excel Records
+
+```mermaid
+flowchart TD
+    C([Client uploads\n100k row Excel file]) -->|POST /import| API[API Controller]
+    API -->|Save file to Blob| BLOB[(Azure Blob Storage)]
+    API -->|Create ImportJob record| DB[(Database)]
+    API -->|Publish ProcessImportCommand| BUS[[Message Bus]]
+    API -->|202 Accepted\n{jobId}| C
+
+    BUS --> WORKER[Background Worker]
+    WORKER -->|Download file| BLOB
+    WORKER --> STREAM[Stream rows lazily\nDO NOT load all into RAM]
+
+    STREAM --> CHUNK{500 rows\nchunk full?}
+    CHUNK -->|YES| BULK[BulkInsertAsync\nsingle SQL statement]
+    BULK --> PROG[Update progress\nProcessedRows = N]
+    PROG --> CHUNK
+    CHUNK -->|NO| NEXT[Continue streaming]
+
+    BULK --> FAIL{Row valid?}
+    FAIL -->|NO| FERR[Append to failures list]
+    FAIL -->|YES| BULK
+
+    PROG --> DONE([Import complete\nSave failure report to Blob])
+
+    C2([Client polls]) -->|GET /imports/{jobId}| STATUS[Status endpoint]
+    STATUS --> DB
+    DB -->|ProcessedRows, Status, FailureReportUrl| C2
+
+    style C fill:#4CAF50,color:#fff
+    style WORKER fill:#2196F3,color:#fff
+    style BULK fill:#FF9800,color:#fff
+    style DONE fill:#4CAF50,color:#fff
+```
+
+---
+
+## PS-D2 — Safe Retry Architecture
+
+```mermaid
+flowchart TD
+    REQ([Request to downstream]) --> POLLY[Polly Pipeline]
+
+    subgraph Pipeline["Polly Layers"]
+        TO[Timeout\n10s per attempt]
+        RTY[Retry\n4 attempts\nexponential backoff + jitter]
+        CB[Circuit Breaker\n50% fail → OPEN 30s]
+        TO --> RTY --> CB
+    end
+
+    POLLY --> Pipeline
+    CB --> SVC[Downstream Service]
+
+    SVC -->|Success| DONE([✅ Return result])
+    SVC -->|TimeoutException| RTY
+    SVC -->|503 / 429| RTY
+    SVC -->|400 / 404| FAIL([❌ Fail immediately\nNO retry for 4xx])
+
+    RTY -->|After 4 attempts| OPEN{Circuit\nopen?}
+    OPEN -->|YES| FASTFAIL([⚡ Fail fast\nno request sent])
+    OPEN -->|NO| SVC
+
+    style DONE fill:#4CAF50,color:#fff
+    style FAIL fill:#f44336,color:#fff
+    style FASTFAIL fill:#FF9800,color:#fff
+```
+
+---
+
+## PS-D3 — Outbox Pattern (Guaranteed Event Publishing)
+
+```mermaid
+sequenceDiagram
+    participant SVC as Service
+    participant DB as Database (SQL)
+    participant OUTBOX as Outbox Table
+    participant PUB as Outbox Publisher
+    participant BUS as Message Bus
+
+    SVC->>DB: BEGIN TRANSACTION
+    SVC->>DB: INSERT INTO Orders (new order)
+    SVC->>OUTBOX: INSERT INTO OutboxMessages\n{ EventType, Payload, ProcessedAt = NULL }
+    SVC->>DB: COMMIT
+    Note over SVC,OUTBOX: ✅ ATOMIC: either both saved or neither
+
+    loop Every 5 seconds
+        PUB->>OUTBOX: SELECT WHERE ProcessedAt IS NULL
+        OUTBOX-->>PUB: Unprocessed messages
+        PUB->>BUS: Publish each event
+        BUS-->>PUB: Ack
+        PUB->>OUTBOX: UPDATE ProcessedAt = NOW()
+    end
+
+    Note over PUB,BUS: If broker is down → messages stay in\nOutbox until broker recovers
+```
+
+---
+
+## PS-D4 — Concurrent Job Pickup Prevention
+
+```mermaid
+flowchart TD
+    subgraph Workers["Multiple Worker Instances"]
+        W1[Worker 1] --> TRY1
+        W2[Worker 2] --> TRY2
+        W3[Worker 3] --> TRY3
+    end
+
+    subgraph Option1["Option A: Message Queue Visibility Lock"]
+        TRY1 --> Q[[Azure Service Bus Queue]]
+        Q -->|Message LOCKED\n5 min visibility timeout| W1_PROC[Worker 1 processes]
+        Q -->|Message hidden from\nother workers| W2_SKIP[Worker 2 sees different msg]
+        W1_PROC -->|Complete| DEL[Message deleted ✅]
+        W1_PROC -->|Crash| RETURN[Message returns\nafter timeout]
+    end
+
+    subgraph Option2["Option B: Optimistic Concurrency"]
+        TRY2 --> READ[Read job with RowVersion]
+        READ --> UPD[UPDATE SET Status=Processing\nWHERE RowVersion = original]
+        UPD -->|0 rows updated| SKIP[Another worker got it → skip]
+        UPD -->|1 row updated| PROC[Process job ✅]
+    end
+
+    style DEL fill:#4CAF50,color:#fff
+    style SKIP fill:#FF9800,color:#fff
+    style PROC fill:#4CAF50,color:#fff
+```
+
+---
+
+## PS-D5 — Zero-Downtime Database Migration (Expand and Contract)
+
+```mermaid
+flowchart LR
+    subgraph Phase1["Phase 1 — EXPAND\n(backward compatible)"]
+        P1_DB[Add 'FullName' column\nnullable]
+        P1_CODE[Code writes to\nBOTH Name AND FullName]
+        P1_DB --> P1_CODE
+    end
+
+    subgraph Phase2["Phase 2 — BACKFILL\n(background script)"]
+        P2[UPDATE Customers\nSET FullName = Name\nWHERE FullName IS NULL]
+    end
+
+    subgraph Phase3["Phase 3 — SWITCH\n(deploy new code)"]
+        P3_CODE[Code reads ONLY FullName\nStops writing to Name]
+        P3_DB[Make FullName NOT NULL\nnow safe — all rows filled]
+    end
+
+    subgraph Phase4["Phase 4 — CONTRACT\n(cleanup)"]
+        P4[DROP COLUMN Name\nNothing reads it anymore]
+    end
+
+    Phase1 --> Phase2 --> Phase3 --> Phase4
+    Phase1 -.->|old code still works| OK1[✅ No downtime]
+    Phase3 -.->|new code works| OK2[✅ No downtime]
+
+    style OK1 fill:#4CAF50,color:#fff
+    style OK2 fill:#4CAF50,color:#fff
+```
+

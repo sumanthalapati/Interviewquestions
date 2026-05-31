@@ -2389,3 +2389,431 @@ if (result.ok) {
 ```
 
 ---
+
+---
+
+# ⚖️ TypeScript Comparisons — Side-by-Side Differences
+
+---
+
+## TS-C1 — `interface` vs `type`
+
+| | `interface` | `type` |
+|-|------------|--------|
+| Extension | `extends` (open, mergeable) | `&` intersection (closed) |
+| Declaration merging | ✅ Yes (add props across files) | ❌ No |
+| Union types | ❌ | ✅ `type Status = 'a' \| 'b'` |
+| Tuple types | ❌ | ✅ `type Pair = [string, number]` |
+| Mapped / conditional types | ❌ | ✅ |
+| Implements (class) | ✅ | ✅ |
+| Use for | Object shapes, class contracts | Unions, intersections, aliases, utilities |
+
+```typescript
+// interface — prefer for object shapes and class contracts
+interface User { name: string; email: string; }
+interface Admin extends User { role: 'admin'; } // extend
+interface User { age: number; } // declaration merge — adds age to User everywhere
+
+// type — for unions, intersections, and complex types
+type Status = 'pending' | 'paid' | 'shipped';       // union
+type AdminUser = User & { role: 'admin' };           // intersection
+type Pair<T> = [T, T];                               // tuple
+type Nullable<T> = T | null;                         // utility
+type Keys = keyof User;                              // 'name' | 'email'
+```
+
+---
+
+## TS-C2 — `unknown` vs `any` vs `never`
+
+| | `any` | `unknown` | `never` |
+|-|-------|----------|---------|
+| Type-safe | ❌ No (opt out of type system) | ✅ Must narrow before use | ✅ Unreachable code |
+| Assignable to | Anything | Only `unknown` or `any` | Nothing |
+| Can call methods | ✅ (unsafely) | ❌ Must narrow first | N/A |
+| Use for | Legacy JS migration (avoid) | Safe typed catch/external data | Exhaustive checks, throw functions |
+
+```typescript
+// any — disables type checking (avoid)
+let x: any = getData();
+x.foo(); // no error, but crashes at runtime if x is null
+
+// unknown — must narrow before use
+let y: unknown = getData();
+if (typeof y === 'string') y.toUpperCase(); // ✅ safe
+// y.toUpperCase(); // ❌ compile error — must check type first
+
+// never — exhaustive switch
+type Shape = 'circle' | 'square';
+function area(s: Shape): number {
+  switch (s) {
+    case 'circle': return Math.PI;
+    case 'square': return 1;
+    default:
+      const _exhaustive: never = s; // compile error if new Shape added without handling
+      throw new Error(`Unhandled: ${_exhaustive}`);
+  }
+}
+```
+
+---
+
+## TS-C3 — `readonly` vs `const` vs `as const`
+
+| | `const` | `readonly` | `as const` |
+|-|---------|-----------|-----------|
+| Scope | Variable binding (block) | Object property | Value is fully readonly + literal type |
+| Prevents reassignment | ✅ Variable | ✅ Property | ✅ Entire object tree |
+| Runtime effect | ✅ | ❌ (TS only) | ❌ (TS only) |
+| Inferred type | Mutable type | Mutable type | Narrow literal type |
+
+```typescript
+const arr = [1, 2, 3];
+arr.push(4);          // ✅ allowed — const prevents reassignment, not mutation
+arr = [5];            // ❌ compile error
+
+const arrConst = [1, 2, 3] as const;
+arrConst.push(4);     // ❌ readonly array
+// Type: readonly [1, 2, 3] — exact tuple, not number[]
+
+const config = { env: 'prod', port: 3000 } as const;
+// Type: { readonly env: 'prod'; readonly port: 3000 }
+// Useful for string literal unions from object keys
+type Env = typeof config.env; // 'prod' (literal) not string
+```
+
+---
+
+## TS-C4 — `Partial<T>` vs `Required<T>` vs `Pick<T>` vs `Omit<T>`
+
+| Utility | What it does | Example |
+|---------|-------------|---------|
+| `Partial<T>` | All props optional | Update DTOs |
+| `Required<T>` | All props required | Validate complete object |
+| `Pick<T, K>` | Keep only specified keys | Read-only projection |
+| `Omit<T, K>` | Remove specified keys | Create DTO without ID |
+| `Readonly<T>` | All props readonly | Immutable config |
+| `Record<K, V>` | Map of key→value | Lookup table |
+
+```typescript
+interface User { id: number; name: string; email: string; age?: number; }
+
+type UpdateUser  = Partial<User>;              // all optional
+type FullUser    = Required<User>;             // all required (age too)
+type UserPreview = Pick<User, 'id' | 'name'>; // { id; name }
+type CreateUser  = Omit<User, 'id'>;          // no id (DB generates it)
+type UserMap     = Record<string, User>;       // { [key: string]: User }
+```
+
+---
+
+## TS-C5 — `enum` vs `const enum` vs Union String Literals
+
+| | `enum` | `const enum` | String Literal Union |
+|-|--------|-------------|---------------------|
+| Runtime object | ✅ Exists in JS output | ❌ Inlined at compile time | ❌ No runtime object |
+| Reverse mapping | ✅ `Status[0]` = `'Active'` | ❌ | ❌ |
+| Bundle size | Larger | ✅ Smaller (inlined) | ✅ Smallest |
+| Type safety | ✅ | ✅ | ✅ |
+| Use for | When you need runtime iteration | Constant values, no runtime needed | Most cases — simplest |
+
+```typescript
+// enum — generates JS object
+enum Status { Pending = 'pending', Paid = 'paid' }
+console.log(Status.Paid); // 'paid'
+
+// const enum — inlined, no runtime object
+const enum Direction { Up, Down }
+let d = Direction.Up; // compiled to: let d = 0
+
+// String literal union — simplest, no overhead
+type Status = 'pending' | 'paid' | 'shipped';
+let s: Status = 'paid'; // ✅
+let bad: Status = 'unknown'; // ❌ compile error
+```
+
+---
+
+## TS-C6 — `?.` Optional Chaining vs `??` Nullish Coalescing vs `||` OR
+
+| | `?.` | `??` | `\|\|` |
+|-|----|-----|------|
+| Purpose | Safe property access | Default for null/undefined | Default for falsy |
+| Returns default for | `null` / `undefined` access | `null` / `undefined` | `0`, `''`, `false`, `null`, `undefined` |
+| Short-circuits on | null/undefined | null/undefined | Any falsy |
+
+```typescript
+const user = getUser(); // might be null
+
+// ?. — safe navigation
+const name = user?.profile?.name; // undefined if user or profile is null
+
+// ?? — default only for null/undefined
+const count = user?.orderCount ?? 0; // 0 if null/undefined, keeps 0 if actually 0
+
+// || — replaces ALL falsy values (dangerous for numbers/booleans)
+const count2 = user?.orderCount || 0;
+// ❌ If orderCount = 0 (valid), returns 0 via ||, looks correct by accident
+// ❌ If orderCount = 0, user?.orderCount || 10 → 10, WRONG! (0 is falsy)
+// ✅ Use ?? for numbers and booleans
+```
+
+---
+
+## TS-C7 — Generic Constraints vs Conditional Types vs Mapped Types
+
+```typescript
+// Generic constraint — T must have specific shape
+function getLength<T extends { length: number }>(item: T): number {
+  return item.length; // safe — T guaranteed to have length
+}
+
+// Conditional type — type depends on input type
+type IsString<T> = T extends string ? 'yes' : 'no';
+type A = IsString<string>;  // 'yes'
+type B = IsString<number>;  // 'no'
+
+// Practical: NonNullable — strips null/undefined
+type NonNullable<T> = T extends null | undefined ? never : T;
+type C = NonNullable<string | null>; // string
+
+// Mapped type — transform every property
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K]
+};
+type UserGetters = Getters<{ name: string; age: number }>;
+// { getName: () => string; getAge: () => number }
+```
+
+
+---
+
+# ⚖️ TypeScript Comparisons — Side-by-Side Differences
+
+---
+
+## TS-C1 — `interface` vs `type`
+
+| | `interface` | `type` |
+|-|------------|--------|
+| Extension | ✅ `extends` + declaration merging | ✅ `&` intersection (no merging) |
+| Union types | ❌ | ✅ `type Status = "A" \| "B"` |
+| Tuple types | ❌ | ✅ `type Pair = [string, number]` |
+| Primitive alias | ❌ | ✅ `type ID = string` |
+| Declaration merging | ✅ Multiple declarations merge | ❌ Error if redeclared |
+| Mapped/conditional types | ❌ | ✅ |
+| Prefer for | Object shapes, classes, APIs | Unions, tuples, complex types |
+
+```ts
+// interface — for object shapes, class contracts
+interface User { id: number; name: string; }
+interface Admin extends User { role: "admin"; } // extends
+interface User { email: string; }               // ✅ merges with first declaration
+
+// type — for unions, tuples, computed types
+type Status  = "pending" | "shipped" | "cancelled"; // union — only type can do this
+type Point   = [number, number];                     // tuple
+type Partial<T> = { [K in keyof T]?: T[K] };       // mapped type
+
+// Both equivalent for object shapes — prefer interface for objects
+interface OrderI { id: string; total: number; }
+type OrderT = { id: string; total: number; };
+```
+
+---
+
+## TS-C2 — `any` vs `unknown` vs `never` vs `void`
+
+| | `any` | `unknown` | `never` | `void` |
+|-|-------|-----------|---------|--------|
+| Assignable from | Anything | Anything | Nothing | Only `undefined` |
+| Assignable to | Anything | Only `unknown` or `any` | Anything | Only `void`/`undefined` |
+| Type-safe | ❌ Disables checking | ✅ Must narrow before use | ✅ | ✅ |
+| Use for | Legacy JS migration | Safe unknown input | Unreachable code / exhaustive check | Functions returning nothing |
+
+```ts
+// any — escape hatch, disables TypeScript
+let x: any = "hello";
+x.toFixed();   // ❌ no error at compile time → runtime crash
+
+// unknown — type-safe any: must narrow before use
+let y: unknown = "hello";
+y.toUpperCase(); // ❌ compile error
+if (typeof y === "string") y.toUpperCase(); // ✅ narrowed
+
+// never — exhaustive checks, unreachable paths
+function assertNever(x: never): never {
+  throw new Error(`Unexpected: ${JSON.stringify(x)}`);
+}
+type Shape = "circle" | "square";
+function area(s: Shape) {
+  switch (s) {
+    case "circle": return Math.PI;
+    case "square": return 1;
+    default: return assertNever(s); // compile error if Shape gets new case
+  }
+}
+
+// void — function with no return value
+function log(msg: string): void { console.log(msg); }
+```
+
+---
+
+## TS-C3 — `enum` vs `const enum` vs Union String Literal
+
+| | `enum` | `const enum` | Union Literal (`"A" \| "B"`) |
+|-|--------|-------------|------------------------------|
+| Runtime object | ✅ Exists in JS output | ❌ Inlined (no JS object) | ❌ Erased at compile time |
+| Reverse mapping | ✅ `Status[0] === "Active"` | ❌ | ❌ |
+| Tree-shaking | ❌ Bundle includes enum object | ✅ Fully inlined | ✅ No runtime cost |
+| Type safety | ✅ | ✅ | ✅ |
+| Use for | When you need reverse lookup or runtime object | Perf-critical constant lookup | ✅ Default — prefer for most cases |
+
+```ts
+// enum — generates runtime object
+enum Status { Pending = "pending", Shipped = "shipped" }
+console.log(Status.Pending); // "pending" — exists at runtime
+
+// const enum — inlined, no runtime object
+const enum Direction { Up = "UP", Down = "DOWN" }
+// compiles to: if (dir === "UP") (no enum object in output)
+
+// Union literal — zero runtime cost, most readable
+type Status = "pending" | "shipped" | "cancelled";
+// ✅ Recommended: no runtime object, full type safety, easily extended
+```
+
+---
+
+## TS-C4 — `as` (Type Assertion) vs Type Guard vs `satisfies`
+
+| | `as T` | Type Guard (`is T`) | `satisfies` (TS 4.9) |
+|-|--------|--------------------|-----------------------|
+| Compile-time check | Overrides — may be wrong | Actual runtime check | Validates + preserves literal type |
+| Runtime safety | ❌ No | ✅ Yes | ❌ No (compile only) |
+| Narrows type | One-time cast | ✅ In scope after check | Validates without widening |
+| Use for | When you know better than TS | Runtime discrimination | Config objects with inference |
+
+```ts
+// as — override, no safety guarantee
+const el = document.getElementById("myBtn") as HTMLButtonElement; // TS trusts you
+
+// Type guard — safe narrowing
+function isString(x: unknown): x is string {
+  return typeof x === "string"; // runtime check
+}
+if (isString(value)) value.toUpperCase(); // ✅ safe
+
+// satisfies — validate shape without widening type
+const palette = {
+  red:   [255, 0, 0],
+  green: "#00ff00",
+} satisfies Record<string, string | number[]>;
+palette.red;   // type: number[] (literal preserved, not widened to string | number[])
+palette.green; // type: string
+```
+
+---
+
+## TS-C5 — `Partial<T>` vs `Required<T>` vs `Readonly<T>` vs `Pick<T>` vs `Omit<T>`
+
+| Utility | Effect | Use for |
+|---------|--------|---------|
+| `Partial<T>` | All properties optional | Update DTOs, patch operations |
+| `Required<T>` | All properties required | Enforce after partial fill |
+| `Readonly<T>` | All properties readonly | Immutable config, frozen objects |
+| `Pick<T, K>` | Only selected keys | Projection, subset DTO |
+| `Omit<T, K>` | All except selected keys | Remove sensitive fields (password) |
+| `Record<K, V>` | Object with specific key/value types | Dictionaries, lookup maps |
+
+```ts
+interface User { id: number; name: string; email: string; password: string; }
+
+type UpdateDto   = Partial<User>;          // all optional → PATCH body
+type CreateDto   = Omit<User, "id">;       // no id (DB generates it)
+type PublicUser  = Omit<User, "password">; // strip sensitive field
+type UserSummary = Pick<User, "id" | "name">; // only what UI needs
+type UserMap     = Record<number, User>;   // { [id]: User }
+
+// Combining utilities
+type PatchDto = Partial<Omit<User, "id">>; // all optional except id
+```
+
+---
+
+## TS-C6 — `T extends U` vs `T & U` vs `T | U`
+
+| | `T \| U` (Union) | `T & U` (Intersection) | `T extends U` (Constraint) |
+|-|----------------|----------------------|--------------------------|
+| Meaning | Either T or U | Both T and U simultaneously | T must be assignable to U |
+| Type narrowing | Required (could be either) | All properties available | Generic constraint |
+| Use for | Function can accept multiple types | Mixins, combined shapes | Generic type bounds |
+
+```ts
+// Union — can be one or the other
+type StringOrNumber = string | number;
+function print(x: string | number) {
+  if (typeof x === "string") x.toUpperCase(); // must narrow
+  else x.toFixed(2);
+}
+
+// Intersection — must satisfy both
+type Timestamped = { createdAt: Date };
+type Named       = { name: string };
+type Entity      = Timestamped & Named; // must have both createdAt AND name
+
+// Extends — generic constraint
+function getLength<T extends { length: number }>(x: T): number {
+  return x.length; // guaranteed to have .length (string, array, etc.)
+}
+```
+
+---
+
+## TS-C7 — `readonly` vs `const` vs `as const`
+
+| | `const` | `readonly` (property) | `as const` |
+|-|---------|----------------------|-----------|
+| Scope | Variable binding | Class/interface property | Literal type inference |
+| Mutates object | ✅ (binding fixed, content mutable) | ❌ | ❌ Deep readonly |
+| Affects | Variable re-assignment | Object property assignment | Entire expression literal type |
+
+```ts
+const arr = [1, 2, 3];
+arr.push(4); // ✅ const doesn't prevent mutation
+
+// as const — deepest readonly, narrows to literal types
+const config = { env: "prod", port: 3000 } as const;
+// type: { readonly env: "prod"; readonly port: 3000 }
+config.env = "dev"; // ❌ compile error — readonly
+
+// Useful for exhaustive checks
+const STATUSES = ["pending", "shipped", "cancelled"] as const;
+type Status = typeof STATUSES[number]; // "pending" | "shipped" | "cancelled"
+```
+
+---
+
+## TS-C8 — Generics: `T` vs `T extends object` vs `T extends keyof U`
+
+```ts
+// Unconstrained generic — accepts anything
+function identity<T>(x: T): T { return x; }
+
+// Constrained — must have specific shape
+function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key]; // type-safe property access
+}
+const name = getProperty({ name: "Alice", age: 30 }, "name"); // type: string
+
+// Conditional type
+type IsArray<T> = T extends any[] ? "yes" : "no";
+type A = IsArray<string[]>; // "yes"
+type B = IsArray<string>;   // "no"
+
+// Infer — extract type from generic
+type UnpackPromise<T> = T extends Promise<infer U> ? U : T;
+type Result = UnpackPromise<Promise<string>>; // string
+```
+
