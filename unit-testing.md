@@ -76,6 +76,19 @@ public async Task GetOrder_WhenExists_ReturnsOrder()
 
 The testing pyramid defines the **ratio and speed** of test types: many unit tests at the base, fewer integration tests in the middle, fewest E2E tests at the top.
 
+```mermaid
+flowchart TB
+    E2E["🖥️ E2E Tests\n5-10% — Slowest\nRun pre-release"]
+    INT["🔗 Integration Tests\n20-30% — Medium speed\nRun on CI"]
+    UNIT["⚡ Unit Tests\n60-70% — Fastest\nRun on every save"]
+
+    UNIT --> INT --> E2E
+
+    style E2E fill:#ff6b6b,color:#fff,font-size:13px
+    style INT fill:#ffa94d,color:#fff,font-size:13px
+    style UNIT fill:#51cf66,color:#fff,font-size:13px
+```
+
 ❌ **Wrong** — inverted pyramid (too many slow E2E tests):
 ```
         /──────────────\
@@ -103,6 +116,30 @@ The testing pyramid defines the **ratio and speed** of test types: many unit tes
 ### Q3 — What is test isolation and why does it matter?
 
 Each test must **not share state** with other tests. Shared static state, leftover DB rows, or file-system changes cause flaky tests that pass individually but fail in suites.
+
+```mermaid
+flowchart LR
+    subgraph SUT ["System Under Test"]
+        direction TB
+        CLASS["OrderService\n(class under test)"]
+    end
+    subgraph DEPS ["Dependencies (injected via constructor)"]
+        direction TB
+        REPO["IOrderRepository\n→ Mock/Stub/Fake"]
+        EMAIL["IEmailService\n→ Mock/Stub/Fake"]
+        LOG["ILogger\n→ Dummy"]
+    end
+    REPO --> CLASS
+    EMAIL --> CLASS
+    LOG --> CLASS
+    CLASS --> RESULT["Test Result\n(isolated, no real I/O)"]
+
+    style CLASS fill:#4dabf7,color:#fff
+    style REPO fill:#51cf66,color:#fff
+    style EMAIL fill:#51cf66,color:#fff
+    style LOG fill:#868e96,color:#fff
+    style RESULT fill:#ffa94d,color:#fff
+```
 
 ❌ **Wrong** — static state shared between tests:
 ```csharp
@@ -301,6 +338,16 @@ public async Task GetOrder_EmptyId_ThrowsArgumentException()
 **Assert** — verify one logical outcome.
 
 One test should test **one behaviour**. If you need two `Act` + `Assert` blocks, write two tests.
+
+```mermaid
+flowchart LR
+    A["🔧 ARRANGE\nSet up test data\nCreate mocks\nInstantiate SUT"] --> B["▶️ ACT\nCall the single\nmethod under test"]
+    B --> C["✅ ASSERT\nVerify the outcome\nOne logical check"]
+
+    style A fill:#4dabf7,color:#fff
+    style B fill:#ffa94d,color:#fff
+    style C fill:#51cf66,color:#fff
+```
 
 ❌ **Wrong** — no clear separation, tests multiple things:
 ```csharp
@@ -1101,6 +1148,19 @@ public async Task CachingDecorator_OnCacheMiss_CallsInnerAndCachesResult()
 **Green** — write the minimal code to make the test pass (no over-engineering).  
 **Refactor** — clean up code while keeping tests green.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Red : Write failing test
+    Red --> Green : Write minimum code\nto make test pass
+    Green --> Refactor : Clean up code\n(no new behavior)
+    Refactor --> Red : Write next\nfailing test
+    Refactor --> [*] : Feature complete
+
+    note right of Red : Test fails\n(compile error or assertion)
+    note right of Green : Simplest possible\nimplementation
+    note right of Refactor : Remove duplication\nImprove design
+```
+
 ❌ **Wrong** — writing implementation first, tests as an afterthought:
 ```csharp
 // 1. Write full implementation
@@ -1482,6 +1542,27 @@ public async Task GetOrders_CompletesWithin500ms()
 ---
 
 ## TEST-C2 — Mock vs Stub vs Fake vs Spy vs Dummy
+
+```mermaid
+flowchart TD
+    Q1{"Do you need\nbehaviour\nverification?"}
+    Q2{"Do you need\nreal working\nlogic?"}
+    Q3{"Is it passed\nbut never\ncalled?"}
+
+    Q1 -->|Yes| MOCK["🔍 Mock\nVerify interactions\nmock.Verify(...)"]
+    Q1 -->|No| Q2
+    Q2 -->|Yes — simplified| FAKE["🏗️ Fake\nIn-memory working impl\nFakeOrderRepository"]
+    Q2 -->|Yes — wraps real| SPY["🕵️ Spy\nCallBase=true\nreal + recorded"]
+    Q2 -->|No| Q3
+    Q3 -->|Yes| DUMMY["🪆 Dummy\nPlaceholder only\nnew Mock().Object"]
+    Q3 -->|No| STUB["📋 Stub\nCanned return value\nSetup(...).Returns(...)"]
+
+    style MOCK fill:#ff6b6b,color:#fff
+    style FAKE fill:#51cf66,color:#fff
+    style SPY fill:#cc5de8,color:#fff
+    style DUMMY fill:#868e96,color:#fff
+    style STUB fill:#4dabf7,color:#fff
+```
 
 | | Dummy | Stub | Fake | Mock | Spy |
 |-|-------|------|------|------|-----|

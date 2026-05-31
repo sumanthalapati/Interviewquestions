@@ -152,6 +152,34 @@ branches:
 # Branch policy: require PR + build validation before merge to main
 ```
 
+```mermaid
+gitGraph
+   commit id: "Initial"
+   branch develop
+   checkout develop
+   commit id: "Setup"
+   branch feature/login
+   checkout feature/login
+   commit id: "Add login"
+   commit id: "Add tests"
+   checkout develop
+   merge feature/login id: "Merge login"
+   branch release/1.0
+   checkout release/1.0
+   commit id: "Bump version"
+   checkout main
+   merge release/1.0 id: "Release 1.0" tag: "v1.0"
+   checkout develop
+   merge release/1.0
+   branch hotfix/critical-bug
+   checkout hotfix/critical-bug
+   commit id: "Fix bug"
+   checkout main
+   merge hotfix/critical-bug tag: "v1.0.1"
+   checkout develop
+   merge hotfix/critical-bug
+```
+
 ---
 
 ### Q5. What are Azure DevOps Service Connections, and what is the difference between project-scope and organization-scope?
@@ -180,6 +208,28 @@ steps:
       scriptLocation: inlineScript
       inlineScript: |
         az webapp deploy --name myapp --resource-group myRG
+```
+
+```mermaid
+flowchart TB
+    subgraph Azure DevOps
+        SC[Service Connection
+Project-Scoped or Org-Scoped]
+        P[Pipeline YAML
+references by name]
+    end
+    subgraph External Services
+        AZ[Azure Subscription]
+        GCP[GCP Project]
+        DR[Docker Registry]
+        GH[GitHub]
+    end
+    SC -- stores credentials for --> AZ
+    SC -- stores credentials for --> GCP
+    SC -- stores credentials for --> DR
+    SC -- stores credentials for --> GH
+    P -- uses --> SC
+    SC -- never exposes secret in YAML --> P
 ```
 
 ---
@@ -222,6 +272,25 @@ stages:
 # - Approvals: require 2 approvals from 'Release-Managers' group
 # - Exclusive lock: enabled (no concurrent deployments)
 # - Timeout: 1 hour to approve or auto-reject
+```
+
+```mermaid
+flowchart TD
+    A[Pipeline Stage References Environment] --> B{Environment has
+Approval Gate?}
+    B -- No --> C[Stage runs immediately]
+    B -- Yes --> D[Pipeline paused
+Approvers notified]
+    D --> E{Approver response
+within timeout?}
+    E -- Approve --> F[Stage resumes]
+    E -- Reject --> G([Stage skipped / failed])
+    E -- Timeout --> G
+    F --> H{Exclusive Lock?}
+    H -- Yes, another run active --> I[Wait in queue]
+    H -- No --> J[Deploy to environment]
+    I --> J
+    J --> K([Deployment recorded in environment history])
 ```
 
 ---
@@ -312,6 +381,21 @@ git checkout -b feature/1234-user-authentication
 # In Project Settings > Repositories > Work item transition:
 # On PR complete: transition linked items to "Resolved"
 # On PR merge to main: transition to "Closed"
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> New : Work Item Created
+    New --> Active : Developer starts work
+    Active --> Resolved : Code merged via PR
+    Resolved --> Closed : Verified in production
+    Active --> New : Unassigned / Backlogged
+    Resolved --> Active : Reopened (bug found)
+    Closed --> [*]
+    note right of Resolved
+        Auto-transition
+        on PR complete
+    end note
 ```
 
 ---
@@ -422,6 +506,19 @@ steps:
       targetPath: '$(Build.ArtifactStagingDirectory)'
 ```
 
+```mermaid
+flowchart LR
+    A([Push / PR]) --> B[Trigger CI Pipeline]
+    B --> C[Restore Packages]
+    C --> D[Build]
+    D --> E[Run Tests]
+    E --> F{Tests Pass?}
+    F -- No --> G([Fail Pipeline])
+    F -- Yes --> H[Publish Artifact]
+    H --> I[Upload to Artifact Store]
+    I --> J([CD Triggered])
+```
+
 ---
 
 ### Q12. What are the different trigger types in Azure Pipelines?
@@ -437,6 +534,26 @@ pr: none
 ```
 
 ✅ **Satisfies:**
+
+```mermaid
+flowchart TD
+    A([Code Push / PR]) --> B{Trigger Type?}
+    B -- CI push --> C[Branch filter match?]
+    B -- PR --> D[Target branch match?]
+    B -- Schedule --> E[Cron time reached?]
+    B -- Pipeline resource --> F[Upstream pipeline completed?]
+    C -- Yes --> G[Queue Build Agent]
+    D -- Yes --> G
+    E -- Yes --> G
+    F -- Yes --> G
+    C -- No --> Z([Skip])
+    D -- No --> Z
+    G --> H[Agent picks up job]
+    H --> I[Checkout source]
+    I --> J[Execute Steps]
+    J --> K([Publish results & artifacts])
+```
+
 ```yaml
 # CI trigger — runs on push to main and feature branches
 trigger:
@@ -792,6 +909,19 @@ stages:
 # Release builds: keep 1 year
 ```
 
+```mermaid
+flowchart LR
+    A[CI Build Job] --> B[dotnet publish]
+    B --> C[ArtifactStagingDirectory]
+    C --> D[PublishPipelineArtifact]
+    D --> E[(Pipeline Artifact Store)]
+    E --> F[DownloadPipelineArtifact in CD]
+    F --> G[Deploy to App Service]
+    E --> H[Azure Artifacts Feed
+NuGet / Universal Package]
+    H --> I[Other Pipelines / Developers]
+```
+
 ---
 
 ### Q19. How do you configure build numbering with date-based patterns and GitVersion for SemVer?
@@ -1043,6 +1173,19 @@ stages:
                   inputs: { appName: 'myapp-prod', azureSubscription: 'Prod-SC' }
 ```
 
+```mermaid
+flowchart LR
+    B[Build & Package] --> T[Integration Tests]
+    T --> D[Deploy Dev]
+    D --> S{Source = main?}
+    S -- No --> END1([Stop])
+    S -- Yes --> ST[Deploy Staging]
+    ST --> A{Manual Approval}
+    A -- Rejected --> END2([Rejected])
+    A -- Approved --> P[Deploy Production]
+    P --> END3([Done])
+```
+
 ---
 
 ### Q23. What are deployment jobs in Azure Pipelines and how do runOnce, rolling, and canary strategies differ?
@@ -1149,6 +1292,23 @@ stages:
 # or use Release Gates (Azure Monitor, REST API) for automated checks
 ```
 
+```mermaid
+flowchart TD
+    A([Build Stage Completes]) --> B[DeployDev]
+    B --> C{Dev Tests Pass?}
+    C -- No --> Z1([Fail])
+    C -- Yes --> D[DeployStaging]
+    D --> E{Pre-Approval: Staging}
+    E -- Rejected --> Z2([Rejected])
+    E -- Approved --> F[Deploy to Staging Slot]
+    F --> G{Post-Deploy Check}
+    G -- Failed --> Z3([Rollback])
+    G -- Passed --> H{Pre-Approval: Production}
+    H -- Rejected --> Z4([Rejected])
+    H -- Approved --> I[Deploy to Production]
+    I --> J([Done])
+```
+
 ---
 
 ### Q25. What are Release Gates in Azure Pipelines and how do you configure them?
@@ -1251,6 +1411,29 @@ steps:
       SourceSlot: 'staging'
       SwapWithProduction: true
       # Previous production is now in staging slot — instant rollback available
+```
+
+```mermaid
+flowchart LR
+    subgraph Before Swap
+        P1[Production Slot
+v1.0 - LIVE]
+        S1[Staging Slot
+v2.0 - Warm Up]
+    end
+    subgraph Slot Swap
+        direction TB
+        SW([AzureAppServiceManage
+Swap Slots])
+    end
+    subgraph After Swap
+        P2[Production Slot
+v2.0 - LIVE]
+        S2[Staging Slot
+v1.0 - Rollback Ready]
+    end
+    S1 --> SW --> P2
+    P1 --> SW --> S2
 ```
 
 ---
@@ -1434,6 +1617,24 @@ jobs:
                   WebAppName: 'myapp-prod'
                   SourceSlot: 'staging'    # swap staging (broken) back to production (good)
                   SwapWithProduction: true
+```
+
+```mermaid
+flowchart TD
+    A([Deployment Failure / Alert]) --> B{Failure Type?}
+    B -- Smoke test failed --> C[Slot Swap Rollback]
+    B -- Post-deploy monitor alert --> D{App Service?}
+    B -- DB migration failed --> E[Abort Deployment
+DB stays on previous schema]
+    D -- Yes --> C
+    D -- No --> F[Re-run previous pipeline build
+with last-known-good artifact]
+    C --> G[Swap staging back to production]
+    G --> H([Production restored to v_prev])
+    F --> H
+    E --> I([Deployment aborted safely])
+    H --> J[Notify team & open incident]
+    I --> J
 ```
 
 ---
@@ -3541,6 +3742,29 @@ steps:
   #     Action: 'Swap Slots'
   #     SourceSlot: 'staging'
   #     SwapWithProduction: true
+```
+
+```mermaid
+flowchart LR
+    subgraph Before Swap
+        direction TB
+        BLUE1[Blue - Production
+v1.0 - receives 100% traffic]
+        GREEN1[Green - Staging Slot
+v2.0 - being deployed & tested]
+    end
+    SWAP([Slot Swap - Zero Downtime])
+    subgraph After Swap
+        direction TB
+        BLUE2[Blue - Staging Slot
+v1.0 - Rollback Ready]
+        GREEN2[Green - Production
+v2.0 - receives 100% traffic]
+    end
+    GREEN1 --> SWAP
+    BLUE1 --> SWAP
+    SWAP --> GREEN2
+    SWAP --> BLUE2
 ```
 
 ---

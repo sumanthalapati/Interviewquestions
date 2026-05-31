@@ -29,6 +29,28 @@ A comprehensive reference covering 100 T-SQL interview questions across 10 topic
 
 **Answer:** WHERE filters rows before any grouping or aggregation takes place, so it cannot reference aggregate functions. HAVING filters the result of a GROUP BY after aggregates have been computed, meaning it can reference expressions like SUM() or COUNT(). Using HAVING without GROUP BY is valid but unusual — it treats the entire result set as one group. For best performance, push as many conditions as possible into WHERE so fewer rows enter the aggregation step.
 
+**SQL Query Logical Execution Order:**
+
+```mermaid
+flowchart TD
+    A["① FROM / JOIN\nIdentify source tables & build row set"] --> B["② WHERE\nFilter individual rows (no aggregates)"]
+    B --> C["③ GROUP BY\nCollapse rows into groups"]
+    C --> D["④ HAVING\nFilter groups (aggregates allowed)"]
+    D --> E["⑤ SELECT\nEvaluate expressions & column aliases"]
+    E --> F["⑥ DISTINCT\nRemove duplicate rows"]
+    F --> G["⑦ ORDER BY\nSort the result set"]
+    G --> H["⑧ OFFSET / FETCH (TOP)\nLimit rows returned"]
+
+    style A fill:#2d6a4f,color:#fff
+    style B fill:#40916c,color:#fff
+    style C fill:#52b788,color:#fff
+    style D fill:#74c69d,color:#000
+    style E fill:#95d5b2,color:#000
+    style F fill:#b7e4c7,color:#000
+    style G fill:#d8f3dc,color:#000
+    style H fill:#f0fff4,color:#000
+```
+
 ❌ **Violates:**
 ```sql
 -- Wrong: WHERE cannot reference an aggregate function
@@ -335,6 +357,34 @@ HAVING COUNT(*) >= 3;
 ### Q11. What is the difference between INNER JOIN, LEFT JOIN, RIGHT JOIN, and FULL OUTER JOIN?
 
 **Answer:** INNER JOIN returns only rows that have a matching row in both tables. LEFT JOIN returns all rows from the left table and matching rows from the right table; unmatched right-side columns come back as NULL. RIGHT JOIN is the mirror image. FULL OUTER JOIN returns all rows from both tables, with NULLs on whichever side has no match. In practice, RIGHT JOIN is rarely used because the same result can be achieved by swapping the table order and using LEFT JOIN.
+
+**JOIN Types — What Rows Each Returns:**
+
+```mermaid
+flowchart TD
+    subgraph INNER["INNER JOIN"]
+        I_L["Left rows\nwith match"] --- I_M(("Matched\nRows Only"))
+        I_M --- I_R["Right rows\nwith match"]
+    end
+
+    subgraph LEFT["LEFT JOIN"]
+        L_ALL["ALL Left rows\n(unmatched → NULLs on right)"] --> L_M(("+ Matched\nRight Rows"))
+    end
+
+    subgraph FULL["FULL OUTER JOIN"]
+        F_L["All Left\n(NULLs for unmatched right)"] --- F_M(("All Matched\nRows"))
+        F_M --- F_R["All Right\n(NULLs for unmatched left)"]
+    end
+
+    subgraph CROSS["CROSS JOIN"]
+        C["Every Left Row\n× Every Right Row\n= M × N rows"]
+    end
+
+    style INNER fill:#1b5e20,color:#fff
+    style LEFT fill:#0d47a1,color:#fff
+    style FULL fill:#4a148c,color:#fff
+    style CROSS fill:#b71c1c,color:#fff
+```
 
 ❌ **Violates:**
 ```sql
@@ -652,6 +702,27 @@ WHERE od.ProductID IS NULL;
 
 **Answer:** A clustered index determines the physical storage order of the table's rows — the leaf level of the index IS the data pages. Because of this, a table can have only one clustered index. The primary key is clustered by default. A non-clustered index is a separate structure that stores the indexed key columns plus a row locator (the clustered key or RID for heaps). A heap is a table with no clustered index; non-clustered indexes on a heap use a physical Row ID (RID) which becomes invalid after row movement.
 
+**Clustered vs Non-Clustered Index B-Tree Structure:**
+
+```mermaid
+flowchart TD
+    subgraph CI["CLUSTERED INDEX — Data IS the leaf"]
+        CR["Root Page\n(index key ranges)"] --> CB1["Branch Page"] & CB2["Branch Page"]
+        CB1 --> CL1["Leaf Page\n= Actual Data Rows\n(OrderID 1-100)"]
+        CB1 --> CL2["Leaf Page\n= Actual Data Rows\n(OrderID 101-200)"]
+        CB2 --> CL3["Leaf Page\n= Actual Data Rows\n(OrderID 201-300)"]
+    end
+
+    subgraph NCI["NON-CLUSTERED INDEX — Separate structure"]
+        NR["Root Page\n(index key ranges)"] --> NB1["Branch Page"]
+        NB1 --> NL1["Leaf Page\n= Key + Row Locator\n(CustomerID → CK/RID)"]
+        NL1 -->|"Key Lookup"| CL1
+    end
+
+    style CI fill:#1a1a2e,color:#eee
+    style NCI fill:#16213e,color:#eee
+```
+
 ❌ **Violates:**
 ```sql
 -- Wrong: creating a second clustered index on the same table
@@ -955,6 +1026,31 @@ ORDER BY COALESCE(u.user_updates, 0) DESC;        -- highest write cost first
 ### Q31. How do you create a stored procedure with input parameters, output parameters, and a RETURN value?
 
 **Answer:** Input parameters pass values into the procedure. Output parameters (marked with OUTPUT) pass values back to the caller; the caller must also declare the variable as OUTPUT in the EXEC call. RETURN sends an integer status code (0 = success by convention); it is not for returning result sets or multiple values. For complex return data use OUTPUT parameters, a result set, or a temp table. Always provide default values for optional parameters so callers do not need to pass every argument.
+
+**Stored Procedure vs Inline Query — Execution Flow:**
+
+```mermaid
+flowchart TD
+    subgraph SP["Stored Procedure Execution"]
+        SP1["First Call:\nParse → Bind → Optimize → Compile\n→ Cache Plan"] --> SP2["Execute cached plan"]
+        SP2 --> SP3["Subsequent Calls:\nPlan reused from cache\n(parse/compile skipped)"]
+    end
+
+    subgraph IQ["Inline / Ad-hoc Query"]
+        IQ1["Every Call:\nParse → Bind → Optimize → Compile"] --> IQ2["Execute"]
+        IQ2 --> IQ3["May reuse parameterized plan\nbut risks parameter sniffing\nor plan cache bloat"]
+    end
+
+    CALLER["Application / Client"] -->|"EXEC usp_..."| SP1
+    CALLER -->|"SELECT ... WHERE ..."| IQ1
+
+    SP3 -->|"Returns result"| CALLER
+    IQ2 -->|"Returns result"| CALLER
+
+    style SP fill:#1a237e,color:#fff
+    style IQ fill:#311b92,color:#fff
+    style CALLER fill:#37474f,color:#fff
+```
 
 ❌ **Violates:**
 ```sql
@@ -1675,6 +1771,33 @@ END;
 
 **Answer:** Atomicity ensures all statements in a transaction succeed or all are rolled back — enforced by BEGIN/COMMIT/ROLLBACK. Consistency means the database moves from one valid state to another — enforced by constraints, triggers, and rules. Isolation controls how concurrent transactions see each other's changes — managed by the isolation level setting. Durability guarantees committed data survives crashes — ensured by the transaction log and checkpoint mechanism writing to durable storage before COMMIT returns.
 
+**Transaction Lifecycle & ACID Flow:**
+
+```mermaid
+flowchart TD
+    START(["BEGIN TRANSACTION"]) --> OPS["Execute SQL Statements\n(INSERT / UPDATE / DELETE)"]
+    OPS --> CHECK{"Error?"}
+    CHECK -->|"No"| COMMIT["COMMIT TRANSACTION\n✅ Durability: written to log & disk"]
+    CHECK -->|"Yes"| ROLLBACK["ROLLBACK TRANSACTION\n↩ Atomicity: all changes undone"]
+    COMMIT --> DONE(["Transaction Complete"])
+    ROLLBACK --> DONE
+
+    subgraph ACID["ACID Guarantees"]
+        A["Atomicity\nAll-or-nothing"]
+        C["Consistency\nConstraints enforced"]
+        I["Isolation\nConcurrent tx invisible"]
+        D["Durability\nLog flush before return"]
+    end
+
+    COMMIT -.->|"enforces"| ACID
+    ROLLBACK -.->|"enforces"| A
+
+    style START fill:#2196f3,color:#fff
+    style COMMIT fill:#4caf50,color:#fff
+    style ROLLBACK fill:#f44336,color:#fff
+    style DONE fill:#9c27b0,color:#fff
+```
+
 ❌ **Violates:**
 ```sql
 -- Missing transaction: if the second UPDATE fails, account balances are inconsistent (money lost)
@@ -1739,6 +1862,28 @@ COMMIT TRANSACTION;   -- commits the first update (second was rolled back to sav
 
 **Answer:** READ UNCOMMITTED allows dirty reads — no shared locks are taken. READ COMMITTED (the default) prevents dirty reads but allows non-repeatable reads and phantom reads. REPEATABLE READ prevents dirty and non-repeatable reads but allows phantom rows. SERIALIZABLE prevents all three — dirty reads, non-repeatable reads, and phantoms — by holding range locks. SNAPSHOT (requires enabling) provides optimistic isolation using row versioning, preventing dirty/non-repeatable/phantom reads without blocking readers, at the cost of tempdb versioning overhead.
 
+**Isolation Levels — Trade-offs at a Glance:**
+
+```mermaid
+flowchart LR
+    RU["READ UNCOMMITTED\n❌ Dirty Read\n❌ Non-Repeatable\n❌ Phantom\n✅ Highest Concurrency"]
+    RC["READ COMMITTED\n(SQL Server default)\n✅ Dirty Read prevented\n❌ Non-Repeatable\n❌ Phantom"]
+    RR["REPEATABLE READ\n✅ Dirty Read prevented\n✅ Non-Repeatable prevented\n❌ Phantom"]
+    SER["SERIALIZABLE\n✅ Dirty Read prevented\n✅ Non-Repeatable prevented\n✅ Phantom prevented\n❌ Lowest Concurrency"]
+    SNAP["SNAPSHOT\n✅ All 3 prevented\n✅ No blocking readers\n⚠️ tempdb overhead\n(Optimistic)"]
+
+    RU -->|"+ Prevents\nDirty Reads"| RC
+    RC -->|"+ Prevents\nNon-Repeatable"| RR
+    RR -->|"+ Prevents\nPhantom Reads"| SER
+    RC -->|"Optimistic\nalternative"| SNAP
+
+    style RU fill:#b71c1c,color:#fff
+    style RC fill:#e65100,color:#fff
+    style RR fill:#f57f17,color:#000
+    style SER fill:#1b5e20,color:#fff
+    style SNAP fill:#0d47a1,color:#fff
+```
+
 ❌ **Violates:**
 ```sql
 -- READ UNCOMMITTED in financial reporting: reads uncommitted data (dirty reads)
@@ -1794,6 +1939,25 @@ EXEC usp_SendExternalAPINotification @OrderID;
 ### Q55. Describe a classic deadlock scenario and four strategies to prevent deadlocks.
 
 **Answer:** A classic deadlock: Session A holds a lock on Table1 and waits for Table2; Session B holds a lock on Table2 and waits for Table1 — a circular wait. SQL Server's lock monitor detects this, chooses the session with the lower "deadlock priority" (or least expensive rollback) as the victim, and kills it with error 1205. Prevention strategies: (1) access objects in the same order across all sessions, (2) keep transactions short, (3) use SNAPSHOT isolation to eliminate reader-writer conflicts, (4) add appropriate indexes to reduce lock scope and duration.
+
+**Deadlock Cycle — Two Transactions Waiting on Each Other:**
+
+```mermaid
+flowchart LR
+    SA["Session A\n(Transaction 1)"] -->|"HOLDS lock on"| T1[("Accounts\nRow ID=1")]
+    SA -->|"WAITING for"| T2[("Accounts\nRow ID=2")]
+
+    SB["Session B\n(Transaction 2)"] -->|"HOLDS lock on"| T2
+    SB -->|"WAITING for"| T1
+
+    MONITOR["SQL Server\nLock Monitor\n(detects cycle)"] -->|"chooses victim\n(error 1205)"| SA
+
+    style SA fill:#e53935,color:#fff
+    style SB fill:#1565c0,color:#fff
+    style T1 fill:#4e342e,color:#fff
+    style T2 fill:#4e342e,color:#fff
+    style MONITOR fill:#6a1b9a,color:#fff
+```
 
 ❌ **Violates:**
 ```sql
@@ -2798,6 +2962,28 @@ CREATE NONCLUSTERED INDEX IX_Orders_CustomerID ON Orders(CustomerID);
 ### Q84. When do you normalize vs denormalize, and how does it differ for OLTP vs OLAP?
 
 **Answer:** Normalization (3NF+) minimizes data redundancy and update anomalies — ideal for OLTP systems with many small reads and writes. Denormalization deliberately introduces redundancy (pre-joined columns, pre-aggregated values) to reduce JOIN complexity and improve read performance — ideal for OLAP/reporting systems that perform large analytical scans. A star schema is a common denormalized OLAP structure with a central fact table surrounded by dimension tables. In modern systems, a normalized OLTP database feeds data into a denormalized data warehouse or columnstore via ETL.
+
+**Database Normalization Steps (1NF → BCNF):**
+
+```mermaid
+flowchart TD
+    RAW["Unnormalized Table\n(repeating groups, multi-valued cells)"]
+    RAW --> NF1["1NF — First Normal Form\n• Atomic values only\n• No repeating column groups\n• Each row uniquely identifiable"]
+    NF1 --> NF2["2NF — Second Normal Form\n• Must be in 1NF\n• No partial dependencies\n  (non-key col depends on FULL PK)"]
+    NF2 --> NF3["3NF — Third Normal Form\n• Must be in 2NF\n• No transitive dependencies\n  (non-key col depends only on PK)"]
+    NF3 --> BCNF["BCNF — Boyce-Codd Normal Form\n• Must be in 3NF\n• Every determinant is a candidate key\n  (stricter than 3NF)"]
+
+    NF1 -->|"Fixes"| FIX1["✅ Eliminates multi-valued cells"]
+    NF2 -->|"Fixes"| FIX2["✅ Removes partial key deps"]
+    NF3 -->|"Fixes"| FIX3["✅ Removes transitive deps"]
+    BCNF -->|"Fixes"| FIX4["✅ Handles overlapping candidates"]
+
+    style RAW fill:#b71c1c,color:#fff
+    style NF1 fill:#e65100,color:#fff
+    style NF2 fill:#f57f17,color:#000
+    style NF3 fill:#558b2f,color:#fff
+    style BCNF fill:#1565c0,color:#fff
+```
 
 ❌ **Violates:**
 ```sql

@@ -28,6 +28,22 @@
 
 ## 1.1 Routing — Conventional vs Attribute
 
+```mermaid
+flowchart LR
+    BROWSER["🌐 Browser\nHTTP Request"] --> ROUTING["Routing Middleware\nMatch URL pattern"]
+    ROUTING --> CONTROLLER["Controller\nInstantiated by DI"]
+    CONTROLLER --> MODEL["Model\nData + Business Logic"]
+    MODEL --> VIEW["View / JSON Response\nRazor or ObjectResult"]
+    VIEW --> RESPONSE["HTTP Response\n200/201/400/404..."]
+
+    style BROWSER fill:#4dabf7,color:#fff
+    style ROUTING fill:#ffa94d,color:#fff
+    style CONTROLLER fill:#cc5de8,color:#fff
+    style MODEL fill:#51cf66,color:#fff
+    style VIEW fill:#ff6b6b,color:#fff
+    style RESPONSE fill:#868e96,color:#fff
+```
+
 ### Q1. What are the two routing styles in ASP.NET Core and when do you use each?
 
 **Answer:**
@@ -167,6 +183,28 @@ public async Task<ActionResult<ProductDto>> GetById(int id) {
 > 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/models/model-binding
 > 📚 Validation: https://learn.microsoft.com/en-us/aspnet/core/mvc/models/validation
 
+```mermaid
+flowchart TD
+    subgraph Sources ["Binding Sources (in priority order)"]
+        ROUTE["[FromRoute]\n/orders/{id}"]
+        QUERY["[FromQuery]\n?status=active"]
+        FORM["[FromForm]\nmultipart/form-data"]
+        BODY["[FromBody]\nJSON body"]
+        HEADER["[FromHeader]\nAuthorization: ..."]
+    end
+    ROUTE --> BINDER["Model Binder\nType conversion + validation"]
+    QUERY --> BINDER
+    FORM --> BINDER
+    BODY --> BINDER
+    HEADER --> BINDER
+    BINDER -->|Valid| ACTION["Action Parameter\n(strongly typed)"]
+    BINDER -->|Invalid| ERR["400 Bad Request\n(auto with [ApiController])"]
+
+    style BINDER fill:#ffa94d,color:#fff
+    style ACTION fill:#51cf66,color:#fff
+    style ERR fill:#ff6b6b,color:#fff
+```
+
 ---
 
 ## 3.1 Model Validation with Data Annotations
@@ -213,6 +251,27 @@ public async Task<ActionResult<ProductDto>> Create([FromBody] CreateProductDto d
 # 4. Filters
 
 > 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/mvc/controllers/filters
+
+```mermaid
+flowchart TD
+    REQ["HTTP Request"] --> AUTH_F["Authorization Filters\n[Authorize] — first, can short-circuit"]
+    AUTH_F --> RES_F["Resource Filters\nRun before/after entire pipeline"]
+    RES_F --> BIND["Model Binding"]
+    BIND --> ACT_F["Action Filters\nOnActionExecuting / OnActionExecuted"]
+    ACT_F --> ACTION["Controller Action Method"]
+    ACTION --> ACT_F2["Action Filters\n(after action)"]
+    ACT_F2 --> RES_F2["Result Filters\nOnResultExecuting / OnResultExecuted"]
+    RES_F2 --> VIEW_EXEC["View/Result Execution"]
+    VIEW_EXEC --> RESP["HTTP Response"]
+    ACTION -->|Exception| EX_F["Exception Filters\nOnException"]
+    EX_F --> RESP
+
+    style REQ fill:#4dabf7,color:#fff
+    style AUTH_F fill:#ff6b6b,color:#fff
+    style ACT_F fill:#ffa94d,color:#fff
+    style EX_F fill:#cc5de8,color:#fff
+    style RESP fill:#51cf66,color:#fff
+```
 
 ---
 

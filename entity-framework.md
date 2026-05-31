@@ -649,6 +649,19 @@ var recentOrders = await _context.Orders
 
 # ⚖️ Entity Framework Comparisons
 
+```mermaid
+stateDiagram-v2
+    [*] --> Detached : entity created (new)
+    Detached --> Added : dbContext.Add(entity)
+    Added --> Unchanged : SaveChanges() succeeds
+    Unchanged --> Modified : property value changed
+    Unchanged --> Deleted : dbContext.Remove(entity)
+    Modified --> Unchanged : SaveChanges() succeeds
+    Deleted --> Detached : SaveChanges() succeeds
+    Unchanged --> Detached : dbContext.Entry(e).State = Detached
+    Modified --> Detached : dbContext.Entry(e).State = Detached
+```
+
 ---
 
 ## EF-C1 — EF Core vs Dapper vs ADO.NET
@@ -681,6 +694,15 @@ using var reader = await cmd.ExecuteReaderAsync();
 
 ## EF-C2 — Code First vs Database First vs Model First
 
+```mermaid
+flowchart LR
+    MC[Model change in C# class] --> AM["dotnet ef migrations add MigrationName"]
+    AM --> MF[Migration file created\nUp + Down methods]
+    MF --> UD["dotnet ef database update"]
+    UD --> DB[(Database schema updated)]
+    DB -->|rollback| RB["dotnet ef database update PreviousMigration"]
+```
+
 | | Code First | Database First | Model First |
 |-|------------|---------------|-------------|
 | Source of truth | C# classes + migrations | Existing DB | Visual designer |
@@ -691,6 +713,23 @@ using var reader = await cmd.ExecuteReaderAsync();
 ---
 
 ## EF-C3 — Lazy vs Eager vs Explicit Loading
+
+```mermaid
+flowchart TD
+    subgraph Lazy["Lazy Loading (N+1 risk)"]
+        L1[Load Orders - no JOIN] --> L2[Access order.Customer]
+        L2 -->|new SQL per order| L3[SELECT Customer WHERE Id=X]
+    end
+    subgraph Eager["Eager Loading (recommended)"]
+        E1["db.Orders.Include(o => o.Customer)"] --> E2[Single SQL with JOIN]
+        E2 --> E3[All data loaded in one round-trip]
+    end
+    subgraph Explicit["Explicit Loading (controlled)"]
+        X1[Load Order without related data] --> X2{Need items?}
+        X2 -- Yes --> X3["Entry(order).Collection(o => o.Items).LoadAsync()"]
+        X2 -- No --> X4[Skip extra query]
+    end
+```
 
 | | Lazy Loading | Eager Loading | Explicit Loading |
 |-|-------------|---------------|-----------------|

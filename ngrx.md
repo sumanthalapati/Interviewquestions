@@ -21,6 +21,19 @@
 
 ## 1. Core Concepts & Store
 
+```mermaid
+flowchart LR
+    C([Component]) -->|dispatch Action| A[Action]
+    A --> R[Reducer]
+    R -->|returns new state| S[(NgRx Store)]
+    S -->|Selector| SL[Selector]
+    SL -->|Observable stream| C
+    A --> E[Effect]
+    E -->|API call| API[External Service]
+    API -->|Success Action| A2[Success / Failure Action]
+    A2 --> R
+```
+
 > 📚 Reference: https://ngrx.io/guide/store
 > 📚 Medium: https://medium.com/angular-in-depth/ngrx-store-understanding-state-selectors-actions-effects-f0b58ded56ac
 
@@ -551,6 +564,26 @@ loadOrders() { this.orders.set(await this.http.get<Order[]>('/api/orders').toPro
 
 ## NGRX-C2 — Actions vs Effects vs Reducers vs Selectors
 
+```mermaid
+sequenceDiagram
+    participant Comp as Component
+    participant Store as NgRx Store
+    participant Effect as Effect
+    participant API as HTTP API
+    participant Reducer as Reducer
+    participant Selector as Selector
+
+    Comp->>Store: dispatch(loadOrders)
+    Store->>Effect: ofType(loadOrders)
+    Effect->>API: http.get('/api/orders')
+    API-->>Effect: orders[]
+    Effect->>Store: dispatch(loadOrdersOk)
+    Store->>Reducer: handle loadOrdersOk
+    Reducer-->>Store: new state with orders
+    Store->>Selector: selectAllOrders emits
+    Selector-->>Comp: orders$ stream updated
+```
+
 | | Actions | Reducers | Effects | Selectors |
 |-|---------|---------|---------|-----------|
 | Purpose | Describe what happened | Produce new state from action | Handle side effects (HTTP, router) | Derive computed state |
@@ -797,6 +830,28 @@ const selectViewModel = createSelector(
 ```
 
 ---
+
+## Entity Adapter State Shape
+
+```mermaid
+flowchart TD
+    subgraph EntityState["EntityState Shape (NgRx Entity)"]
+        IDS["ids: string[] | number[]<br/>(ordered list of entity IDs)"]
+        ENTITIES["entities: Dictionary&lt;id, Entity&gt;<br/>(id → entity map for O(1) lookup)"]
+        EXTRA["additional fields<br/>(isLoading, error, selectedId...)"]
+    end
+    subgraph Adapter["EntityAdapter methods"]
+        SETALL["adapter.setAll(entities, state)"]
+        ADDONE["adapter.addOne(entity, state)"]
+        UPDATEONE["adapter.updateOne(update, state)"]
+        REMOVEONE["adapter.removeOne(id, state)"]
+    end
+    Adapter -->|produces| EntityState
+    subgraph Selectors["Built-in Selectors"]
+        SA["adapter.getSelectors() →<br/>selectIds, selectEntities,<br/>selectAll, selectTotal"]
+    end
+    EntityState --> Selectors
+```
 
 ## NGRX-C4 — `dispatch` + `store.select` vs `ComponentStore` vs `SignalStore` (NgRx 17)
 

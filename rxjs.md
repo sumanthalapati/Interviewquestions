@@ -50,6 +50,23 @@ this.http.get<User[]>('/api/users').subscribe({
 
 ---
 
+```mermaid
+flowchart TD
+    A([Create Observable]) --> B[Define producer fn]
+    B --> C{subscribe called?}
+    C -- No --> D([Nothing happens - lazy])
+    C -- Yes --> E[Producer runs]
+    E --> F[next value emitted]
+    F --> G{More values?}
+    G -- Yes --> F
+    G -- No --> H{complete or error?}
+    H -- complete --> I[complete callback]
+    H -- error --> J[error callback]
+    I --> K[Teardown / unsubscribe]
+    J --> K
+    K --> L([Subscription closed])
+```
+
 ### Q2. How do you create an Observable from scratch using `new Observable()`?
 
 **Answer:** You use the `Observable` constructor and pass a subscriber function. The subscriber receives an observer with `next`, `error`, and `complete` methods. Any cleanup logic (timers, event listeners) should be returned as a teardown function.
@@ -116,6 +133,21 @@ users$.subscribe(u => console.log('component B', u));
 ```
 
 ---
+
+```mermaid
+flowchart LR
+    subgraph Cold["Cold Observable (e.g. HttpClient.get)"]
+        direction TB
+        P1[Producer] -->|new execution| S1[Subscriber A]
+        P1 -->|new execution| S2[Subscriber B]
+    end
+    subgraph Hot["Hot Observable (e.g. Subject, fromEvent)"]
+        direction TB
+        P2[Single Producer] --> M[Shared stream]
+        M --> S3[Subscriber A]
+        M --> S4[Subscriber B]
+    end
+```
 
 ### Q5. What is lazy execution in RxJS and why does it matter?
 
@@ -275,6 +307,26 @@ timer(3000).subscribe(() => console.log('fired once'));
 - [RxJS — ReplaySubject](https://rxjs.dev/api/index/class/ReplaySubject)
 
 ---
+
+```mermaid
+flowchart TD
+    subgraph Subject
+        SJ[Subject] -->|"next(v)"| SJA[Sub A - only future values]
+        SJ -->|"next(v)"| SJB[Sub B - only future values]
+    end
+    subgraph BehaviorSubject
+        BS["BehaviorSubject(init)"] -->|current + future| BSA[Sub A]
+        BS -->|current + future| BSB[Sub B]
+    end
+    subgraph ReplaySubject
+        RS["ReplaySubject(n)"] -->|last n values + future| RSA[Sub A]
+        RS -->|last n values + future| RSB[Sub B]
+    end
+    subgraph AsyncSubject
+        AS[AsyncSubject] -->|only last value on complete| ASA[Sub A]
+        AS -->|only last value on complete| ASB[Sub B]
+    end
+```
 
 ### Q11. What is a Subject and how does it differ from a plain Observable?
 
@@ -777,6 +829,24 @@ fromEvent(submitBtn, 'click').pipe(
 ```
 
 ---
+
+```mermaid
+flowchart TD
+    Source([Source emits value]) --> SM[switchMap]
+    Source --> MM[mergeMap]
+    Source --> CM[concatMap]
+    Source --> EM[exhaustMap]
+
+    SM -->|Cancel previous inner| SMA[Only latest inner active]
+    MM -->|Subscribe concurrently| MMA[All inners active simultaneously]
+    CM -->|Queue — wait for current| CMA[Inners run sequentially in order]
+    EM -->|Ignore new while active| EMA[First inner wins - extras dropped]
+
+    SMA --> UC1[Use: autocomplete, route data]
+    MMA --> UC2[Use: parallel uploads]
+    CMA --> UC3[Use: ordered queues, sequential API chains]
+    EMA --> UC4[Use: submit button, login, one-at-a-time]
+```
 
 ### Q35. What is the key difference matrix between switchMap, mergeMap, concatMap, and exhaustMap?
 
@@ -1311,6 +1381,18 @@ source1$.pipe(
 
 ---
 
+```mermaid
+flowchart TD
+    SRC[Source Observable] --> OP[operator pipeline]
+    OP -->|error thrown| CE[catchError handler]
+    CE -->|return Observable| CONT[Stream continues with fallback]
+    CE -->|return EMPTY| DONE[Stream completes silently]
+    CE -->|throwError / rethrow| ERR[Error propagates to subscriber]
+    OP --> RT[retry / retry config]
+    RT -->|resubscribe n times| SRC
+    RT -->|still errors after n retries| CE
+```
+
 ### Q61. How does `catchError` work? What must it return?
 
 **Answer:** `catchError(handler)` intercepts an error in the pipeline and calls `handler(err, caught$)`. The handler MUST return an Observable. If you return `EMPTY`, the stream completes silently. If you return another Observable, it replaces the errored one. If you rethrow, the error propagates further.
@@ -1536,6 +1618,17 @@ hot$.subscribe(b => console.log('B', b)); // ✅ same response
 ```
 
 ---
+
+```mermaid
+flowchart TD
+    COLD[Cold Observable e.g. http.get] -->|pipe shareReplay 1| SR[shareReplay multicast]
+    SR -->|first subscriber| EXEC[Source executes once]
+    EXEC --> BUF[Buffer: last 1 value stored]
+    BUF --> S1[Subscriber A - gets value]
+    BUF --> S2[Subscriber B - gets value]
+    BUF --> S3[Late Subscriber C - replayed from buffer]
+    SR -->|all unsubscribe + refCount true| DISC[Disconnect from source]
+```
 
 ### Q72. What does `share` do? How is it different from `shareReplay`?
 

@@ -140,6 +140,27 @@ Request 4 (2ms task)  → Server B (0 active) ← not Server A which has a long-
 → Load is distributed by actual work, not just request count
 ```
 
+```mermaid
+flowchart TD
+    CLIENT([Client Requests]) --> LB[Load Balancer\nLeast Connections]
+    LB --> SVC1[Service Instance 1]
+    LB --> SVC2[Service Instance 2]
+    LB --> SVC3[Service Instance 3]
+    SVC1 --> DB[(Primary Database)]
+    SVC2 --> DB
+    SVC3 --> DB
+    DB --> RR1[(Read Replica 1)]
+    DB --> RR2[(Read Replica 2)]
+
+    style LB fill:#FF9800,color:#fff
+    style SVC1 fill:#4CAF50,color:#fff
+    style SVC2 fill:#4CAF50,color:#fff
+    style SVC3 fill:#4CAF50,color:#fff
+    style DB fill:#2196F3,color:#fff
+    style RR1 fill:#9C27B0,color:#fff
+    style RR2 fill:#9C27B0,color:#fff
+```
+
 ---
 
 ## 2.2 API Gateway Pattern
@@ -168,6 +189,24 @@ Mobile App → [API Gateway (Azure API Management / NGINX / Ocelot)]
                  └── Route: /api/products → ProductService (internal)
 
 Services: no public ports, no auth logic, focus on business logic only
+```
+
+```mermaid
+flowchart TD
+    CLIENT([Mobile / Web Client]) --> GW[API Gateway\nAuth · Rate Limit · SSL · Routing]
+    GW --> AUTH[Auth Check\nJWT Validation]
+    AUTH -->|valid| ROUTE{Route by Path}
+    AUTH -->|invalid| ERR([401 Unauthorized])
+    ROUTE -->|/api/orders| OS[OrderService\ninternal only]
+    ROUTE -->|/api/users| US[UserService\ninternal only]
+    ROUTE -->|/api/products| PS[ProductService\ninternal only]
+
+    style GW fill:#FF9800,color:#fff
+    style AUTH fill:#2196F3,color:#fff
+    style OS fill:#4CAF50,color:#fff
+    style US fill:#4CAF50,color:#fff
+    style PS fill:#4CAF50,color:#fff
+    style ERR fill:#f44336,color:#fff
 ```
 
 ---
@@ -251,6 +290,25 @@ await _cache.SetStringAsync(
     });
 ```
 
+```mermaid
+flowchart LR
+    USER([User Request]) --> BROWSER[Browser Cache\nCache-Control headers]
+    BROWSER -->|miss| CDN[CDN Edge\nCloudFront / Azure CDN]
+    CDN -->|miss| RP[Reverse Proxy Cache\nNGINX / Varnish]
+    RP -->|miss| APPCACHE[App Cache\nRedis / IMemoryCache]
+    APPCACHE -->|miss| DB[(Database)]
+    DB -->|populate| APPCACHE
+    APPCACHE -->|populate| RP
+    RP -->|populate| CDN
+    CDN -->|serve| USER
+
+    style BROWSER fill:#4CAF50,color:#fff
+    style CDN fill:#2196F3,color:#fff
+    style RP fill:#FF9800,color:#fff
+    style APPCACHE fill:#9C27B0,color:#fff
+    style DB fill:#f44336,color:#fff
+```
+
 ---
 
 # 4. Databases — SQL vs NoSQL & Sharding
@@ -288,6 +346,26 @@ System:
 └── Elasticsearch — Full-text search across products and orders (search-optimized)
 
 Each store is chosen for what it's good at.
+```
+
+```mermaid
+flowchart TD
+    APP[Application] -->|writes| PRI[(Primary DB\nRead + Write)]
+    APP -->|reads| RR1[(Read Replica 1)]
+    APP -->|reads| RR2[(Read Replica 2)]
+    PRI -->|replication| RR1
+    PRI -->|replication| RR2
+
+    subgraph SPLIT["Read/Write Split Strategy"]
+        W[Write queries\nINSERT UPDATE DELETE] --> PRI
+        R[Read queries\nSELECT] --> RR1
+    end
+
+    style PRI fill:#f44336,color:#fff
+    style RR1 fill:#4CAF50,color:#fff
+    style RR2 fill:#4CAF50,color:#fff
+    style W fill:#FF9800,color:#fff
+    style R fill:#2196F3,color:#fff
 ```
 
 ---
@@ -356,6 +434,26 @@ Azure Service Bus Topic: "order-placed"
 
 Each subscription gets a copy of the message.
 Or use Azure Event Hubs / Kafka for high-throughput + replay capability.
+```
+
+```mermaid
+flowchart LR
+    PROD([Producer\nOrderService]) -->|publish| Q[Message Queue\nAzure Service Bus]
+    Q -->|deliver| C1[Consumer 1\nEmailService]
+    Q -->|deliver| C2[Consumer 2\nInventoryService]
+    Q -->|deliver| C3[Consumer 3\nAnalyticsService]
+    C1 -->|fail 3x| DLQ[Dead Letter Queue\nDLQ]
+    C2 -->|fail 3x| DLQ
+    C3 -->|fail 3x| DLQ
+    DLQ -->|alert| OPS([Ops / Alert])
+
+    style PROD fill:#4CAF50,color:#fff
+    style Q fill:#FF9800,color:#fff
+    style C1 fill:#2196F3,color:#fff
+    style C2 fill:#2196F3,color:#fff
+    style C3 fill:#2196F3,color:#fff
+    style DLQ fill:#f44336,color:#fff
+    style OPS fill:#9C27B0,color:#fff
 ```
 
 ---
@@ -436,6 +534,35 @@ Each service: owns its data, can be deployed independently,
 can scale independently, can be owned by a different team.
 ```
 
+```mermaid
+flowchart LR
+    subgraph MONO["Monolith"]
+        direction TB
+        MA[Web Layer] --> MB[Business Logic]
+        MB --> MC[Data Access]
+        MC --> MDB[(Single DB)]
+    end
+
+    subgraph MICRO["Microservices"]
+        direction TB
+        GW[API Gateway] --> OS[OrderService]
+        GW --> PS[ProductService]
+        GW --> US[UserService]
+        GW --> NS[NotificationService]
+        OS --> ODB[(Orders DB)]
+        PS --> PDB[(Products DB)]
+        US --> UDB[(Users DB)]
+    end
+
+    MONO -->|"Decompose by\nbounded context"| MICRO
+
+    style GW fill:#FF9800,color:#fff
+    style OS fill:#4CAF50,color:#fff
+    style PS fill:#2196F3,color:#fff
+    style US fill:#9C27B0,color:#fff
+    style NS fill:#00BCD4,color:#fff
+```
+
 ---
 
 ## 6.2 Saga Pattern for Distributed Transactions
@@ -512,6 +639,28 @@ Social media feed → AP (choose availability over strong consistency)
   - A user might see slightly stale like counts during a partition
   - Better to show the feed (possibly slightly stale) than an error page
   - "Eventual consistency is fine — a like count being off by 2 for 200ms is acceptable"
+```
+
+```mermaid
+flowchart TD
+    CAP([Distributed System\nCAP Theorem]) --> C[Consistency\nAll nodes see\nsame data]
+    CAP --> A[Availability\nEvery request\ngets a response]
+    CAP --> P[Partition Tolerance\nSystem works despite\nnetwork splits]
+
+    P -->|always required\nin practice| CHOOSE{Choose 2 of 3}
+    C --> CHOOSE
+    A --> CHOOSE
+
+    CHOOSE -->|CP| CP_EX[HBase, Zookeeper\nMongoDB default\nBanking systems]
+    CHOOSE -->|AP| AP_EX[Cassandra, DynamoDB\nCouchDB\nSocial feeds]
+    CHOOSE -->|CA| CA_EX[Single-node RDBMS\nNot distributed\nPostgreSQL standalone]
+
+    style C fill:#2196F3,color:#fff
+    style A fill:#4CAF50,color:#fff
+    style P fill:#FF9800,color:#fff
+    style CP_EX fill:#9C27B0,color:#fff
+    style AP_EX fill:#00BCD4,color:#fff
+    style CA_EX fill:#607D8B,color:#fff
 ```
 
 ---
@@ -1636,6 +1785,24 @@ builder.Services.AddHttpClient<IProductClient, ProductClient>()
         // 3. Timeout (don't wait more than 3s per attempt)
         pipeline.AddTimeout(TimeSpan.FromSeconds(3));
     });
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Closed : Request succeeds\n(failure count reset)
+    Closed --> Open : Failure threshold exceeded\n(e.g. 50% fail in 30s)
+
+    Open --> HalfOpen : Break duration elapsed\n(e.g. 30 seconds)
+    Open --> Open : Request arrives\n(fail-fast — no call made)
+
+    HalfOpen --> Closed : Probe request succeeds\n(circuit reset)
+    HalfOpen --> Open : Probe request fails\n(circuit reopened)
+
+    Closed : CLOSED\nNormal operation\nfailures counted
+    Open : OPEN\nFast-fail all requests\nno calls to downstream
+    HalfOpen : HALF-OPEN\nOne probe allowed\nthrough
 ```
 
 ---

@@ -136,6 +136,33 @@ public class OrdersController : ControllerBase
 // STEP 13: Kestrel writes bytes to TCP socket
 ```
 
+```mermaid
+flowchart TD
+    CLIENT([Browser / Client]) --> KESTREL[Kestrel / IIS\nTCP + TLS]
+    KESTREL --> MW1[ExceptionHandler\nHSTS]
+    MW1 --> MW2[HttpsRedirection\nStaticFiles]
+    MW2 --> MW3[Routing\nmatches endpoint]
+    MW3 --> MW4[CORS\nAuthentication\nAuthorization]
+    MW4 --> MW5[RateLimiter]
+    MW5 --> CTRL[Controller / Minimal API\nModel Binding → Validation → Action]
+    CTRL --> SVC[Service Layer\nbusiness logic]
+    SVC --> REPO[Repository / DbContext]
+    REPO --> DB[(Database)]
+
+    DB -->|response| REPO
+    REPO -->|response| SVC
+    SVC -->|response| CTRL
+    CTRL -->|serialized JSON| MW5
+    MW5 -->|response bubbles back| MW1
+    MW1 --> KESTREL2[Kestrel\nwrite to TCP]
+    KESTREL2 --> CLIENT2([Browser / Client])
+
+    style MW4 fill:#FF9800,color:#fff
+    style CTRL fill:#4CAF50,color:#fff
+    style SVC fill:#2196F3,color:#fff
+    style DB fill:#9C27B0,color:#fff
+```
+
 ---
 
 ## 2. Dependency Injection Lifecycle Flow
@@ -160,6 +187,37 @@ app.Run() → Request 1 arrives
          └─ Transient services: Dispose() called (if IDisposable)
 
 Singleton services: only disposed when host shuts down
+```
+
+```mermaid
+flowchart TD
+    subgraph REQ1["HTTP Request 1"]
+        SCOPE1[DI Scope Created]
+        SCOPE1 --> SING1[Singleton\nSame instance\nacross all requests]
+        SCOPE1 --> SCOP1[Scoped\nNew instance\nper request]
+        SCOPE1 --> TRAN1[Transient\nNew instance\nevery injection]
+    end
+
+    subgraph REQ2["HTTP Request 2"]
+        SCOPE2[DI Scope Created]
+        SCOPE2 --> SING2[Singleton\nSAME instance\nas Request 1]
+        SCOPE2 --> SCOP2[Scoped\nDIFFERENT instance\nfrom Request 1]
+        SCOPE2 --> TRAN2[Transient\nNew instance\nevery injection]
+    end
+
+    APP[App Lifetime] --> SING1
+    APP --> SING2
+
+    SCOPE1 -->|Request ends| DISP1[Dispose Scoped + Transient]
+    SCOPE2 -->|Request ends| DISP2[Dispose Scoped + Transient]
+    APP -->|Host shutdown| DISP3[Dispose Singletons]
+
+    style SING1 fill:#f44336,color:#fff
+    style SING2 fill:#f44336,color:#fff
+    style SCOP1 fill:#FF9800,color:#fff
+    style SCOP2 fill:#FF9800,color:#fff
+    style TRAN1 fill:#4CAF50,color:#fff
+    style TRAN2 fill:#4CAF50,color:#fff
 ```
 
 ### Annotated Code Walk-through
@@ -303,6 +361,39 @@ C# LINQ Query
       │
       ▼
 C# entity objects returned
+
+```mermaid
+flowchart LR
+    subgraph STACK["Stack (per thread)"]
+        S1[int id = 42\nvalue type]
+        S2[ref → Order obj\nreference pointer]
+        S3[return address]
+    end
+
+    subgraph HEAP["Managed Heap (GC)"]
+        subgraph GEN0["Gen 0 (short-lived)"]
+            O1[new OrderDto\njust created]
+        end
+        subgraph GEN1["Gen 1 (survived 1 GC)"]
+            O2[OrderService\nlong-running]
+        end
+        subgraph GEN2["Gen 2 (long-lived)"]
+            O3[AppDbContext\nSingleton cache]
+        end
+        subgraph LOH["LOH (Large Object Heap)"]
+            O4[Arrays > 85KB\nbyte buffers]
+        end
+    end
+
+    S2 -->|points to| O1
+    GEN0 -->|promoted| GEN1
+    GEN1 -->|promoted| GEN2
+
+    style GEN0 fill:#4CAF50,color:#fff
+    style GEN1 fill:#FF9800,color:#fff
+    style GEN2 fill:#f44336,color:#fff
+    style LOH fill:#9C27B0,color:#fff
+```
 
 SaveChanges() path:
 [ Change Tracker detects Added/Modified/Deleted ]
@@ -501,6 +592,24 @@ public ValueTask<Order?> GetCachedAsync(Guid id)
 
     return new ValueTask<Order?>(LoadFromDbAsync(id)); // async path — wraps Task
 }
+```
+
+```mermaid
+sequenceDiagram
+    participant T1 as Thread T1
+    participant SM as State Machine
+    participant DB as Database
+    participant T2 as Thread T2 (pool)
+
+    T1->>SM: GetOrderWithNotificationAsync() starts
+    T1->>DB: await FindAsync(id) — I/O initiated
+    Note over T1: T1 RELEASED back to thread pool (non-blocking)
+    DB-->>SM: I/O complete — continuation scheduled
+    T2->>SM: MoveNext() — resume after first await
+    T2->>SM: await SendAsync() — next I/O
+    Note over T2: T2 RELEASED back to thread pool
+    SM-->>T2: SMTP complete — another thread continues
+    T2->>SM: return order — Task completes
 ```
 
 ---

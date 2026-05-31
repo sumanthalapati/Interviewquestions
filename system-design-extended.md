@@ -140,6 +140,25 @@ public class UrlCodeGenerator
 | Storage | SQL | NoSQL (Cassandra) | **SQL** for this scale; NoSQL if > 1TB/day |
 | Cache TTL | Short (1 min) | Long (1 day) | **Long** — URLs rarely change |
 
+```mermaid
+flowchart TD
+    CLIENT["🌐 Client\nGET /aB3xZ9"] --> CDN["CDN / Edge Cache\nCheck for cached redirect"]
+    CDN -->|Cache HIT| REDIRECT["301/302 Redirect\n→ longUrl"]
+    CDN -->|Cache MISS| LB["Load Balancer"]
+    LB --> SVC["URL Service"]
+    SVC --> REDIS["Redis Cache\nCheck code → longUrl"]
+    REDIS -->|Cache HIT| REDIRECT
+    REDIS -->|Cache MISS| DB["PostgreSQL Replica\nSELECT long_url WHERE code=?"]
+    DB --> WARMCACHE["Warm Redis Cache\nSET code longUrl EX 86400"]
+    WARMCACHE --> REDIRECT
+
+    style CLIENT fill:#4dabf7,color:#fff
+    style CDN fill:#ffa94d,color:#fff
+    style REDIS fill:#ff6b6b,color:#fff
+    style DB fill:#51cf66,color:#fff
+    style REDIRECT fill:#cc5de8,color:#fff
+```
+
 ---
 
 ## 2. Notification System
@@ -172,6 +191,27 @@ API / Trigger Services  (Order Service, Auth Service, etc.)
 [SendGrid][Twilio] [Firebase]
 
 Failures → DLQ → Alert → Retry or Manual Review
+```
+
+```mermaid
+flowchart TD
+    TRIGGER["📡 Trigger Service\n(Order/Auth/etc.)"] --> NS["Notification Service\n• Validate preferences\n• Render template\n• Deduplicate"]
+    NS -->|Fan-out| EQ["📧 Email Queue"]
+    NS -->|Fan-out| SQ["📱 SMS Queue"]
+    NS -->|Fan-out| PQ["🔔 Push Queue"]
+    EQ --> EW["Email Worker"] --> SG["SendGrid"]
+    SQ --> SW["SMS Worker"] --> TW["Twilio"]
+    PQ --> PW["Push Worker"] --> FCM["FCM / APNs"]
+    EW -->|Failure| DLQ["💀 Dead Letter Queue\n→ Alert + Retry"]
+    SW -->|Failure| DLQ
+    PW -->|Failure| DLQ
+
+    style TRIGGER fill:#4dabf7,color:#fff
+    style NS fill:#ffa94d,color:#fff
+    style DLQ fill:#ff6b6b,color:#fff
+    style SG fill:#51cf66,color:#fff
+    style TW fill:#51cf66,color:#fff
+    style FCM fill:#51cf66,color:#fff
 ```
 
 ### Data Model
@@ -243,6 +283,22 @@ public async Task SendEmailAsync(Notification n)
 **Non-functional:** < 5ms overhead. Distributed (multiple app servers share state).
 
 ### Algorithms Compared
+
+```mermaid
+flowchart LR
+    subgraph TokenBucket ["Token Bucket Algorithm"]
+        direction TB
+        TOKENS["Token Pool\n(max capacity)"] -->|Consume 1 token\nper request| CHECK{"Tokens\navailable?"}
+        CHECK -->|Yes| ALLOW["✅ Allow Request"]
+        CHECK -->|No| DENY["❌ 429 Too Many Requests"]
+        REFILL["⏱️ Refill tokens\nat fixed rate"] --> TOKENS
+    end
+
+    style ALLOW fill:#51cf66,color:#fff
+    style DENY fill:#ff6b6b,color:#fff
+    style TOKENS fill:#4dabf7,color:#fff
+    style REFILL fill:#ffa94d,color:#fff
+```
 
 | Algorithm | Memory | Burst Allowed | Smoothness | Best For |
 |-----------|--------|---------------|------------|---------|
@@ -452,6 +508,26 @@ Client
         └─ return structured error to client
 ```
 
+```mermaid
+flowchart TD
+    CLIENT["🌐 Client"] -->|"1. POST /payments/initiate"| PS["Payment Service"]
+    PS -->|"2. Idempotency check"| IDEM{"Already\nprocessed?"}
+    IDEM -->|Yes| CACHED["Return cached result\n(no duplicate charge)"]
+    IDEM -->|No| LOCK["Acquire distributed lock\non idempotencyKey"]
+    LOCK -->|"3. Tokenize via Stripe.js"| STRIPE["💳 Stripe / Braintree API"]
+    STRIPE -->|SUCCESS| SUCCEED["Record payment=succeeded\nPublish PaymentSucceeded event"]
+    STRIPE -->|FAILURE| FAIL["Record failure + error code\nReturn structured error"]
+    SUCCEED --> ORDER["📦 Order Service"]
+    SUCCEED --> EMAIL["📧 Email Service"]
+
+    style CLIENT fill:#4dabf7,color:#fff
+    style PS fill:#ffa94d,color:#fff
+    style STRIPE fill:#cc5de8,color:#fff
+    style SUCCEED fill:#51cf66,color:#fff
+    style FAIL fill:#ff6b6b,color:#fff
+    style CACHED fill:#868e96,color:#fff
+```
+
 ### Idempotency — Critical for Payments
 ```csharp
 public class PaymentService
@@ -535,6 +611,28 @@ Client A                              Server                           Client B
    │                                    │     NO:  push via FCM/APNs ───►│
    │◄── ack { msgId, ts } ─────────────│                                │
    │                                    │                                │
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant S as Chat Server
+    participant DB as Cassandra DB
+    participant B as Client B
+    participant FCM as FCM/APNs
+
+    A->>S: WebSocket connect
+    B->>S: WebSocket connect
+    A->>S: send {to: B, msg: "Hi"}
+    S->>DB: 1. Save message (durable)
+    S->>S: 2. Is B online?
+    alt B is online
+        S->>B: Push via WebSocket
+    else B is offline
+        S->>FCM: Push notification
+        FCM->>B: Mobile push
+    end
+    S-->>A: ack {msgId, timestamp}
 ```
 
 ### Why WebSockets over HTTP polling?

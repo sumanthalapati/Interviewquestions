@@ -256,6 +256,17 @@ public class OrderService {
 
 ## 2.1 Singleton Pattern
 
+```mermaid
+classDiagram
+    class ConfigManager {
+        -static Lazy~ConfigManager~ _lazy
+        -ConfigManager()
+        +static Instance ConfigManager
+        +GetSetting(key) string
+    }
+    ConfigManager --> ConfigManager : returns single instance
+```
+
 ### Q6. How do you implement a thread-safe Singleton in C#?
 
 **Answer:**
@@ -389,6 +400,31 @@ var request = new HttpRequestBuilder()
 
 ## 3.1 Decorator Pattern
 
+```mermaid
+classDiagram
+    class IEmailService {
+        <<interface>>
+        +SendAsync(to, subject, body) Task
+    }
+    class SmtpEmailService {
+        +SendAsync(to, subject, body) Task
+    }
+    class LoggingEmailDecorator {
+        -IEmailService _inner
+        -ILogger _logger
+        +SendAsync(to, subject, body) Task
+    }
+    class RetryEmailDecorator {
+        -IEmailService _inner
+        +SendAsync(to, subject, body) Task
+    }
+    IEmailService <|.. SmtpEmailService
+    IEmailService <|.. LoggingEmailDecorator
+    IEmailService <|.. RetryEmailDecorator
+    LoggingEmailDecorator --> IEmailService : wraps
+    RetryEmailDecorator --> IEmailService : wraps
+```
+
 ### Q9. How does the Decorator pattern enable behavior extension without inheritance?
 
 **Answer:**
@@ -437,6 +473,39 @@ IEmailService service = new RetryEmailDecorator(
 ---
 
 ## 3.2 Repository Pattern
+
+```mermaid
+classDiagram
+    class IRepository~T~ {
+        <<interface>>
+        +GetByIdAsync(id) T
+        +GetAllAsync() IEnumerable~T~
+        +AddAsync(entity) void
+        +UpdateAsync(entity) void
+        +DeleteAsync(id) void
+    }
+    class EfOrderRepository {
+        -AppDbContext _db
+        +GetByIdAsync(id) Order
+        +GetAllAsync() IEnumerable~Order~
+        +AddAsync(order) void
+        +UpdateAsync(order) void
+        +DeleteAsync(id) void
+    }
+    class AppDbContext {
+        +DbSet~Order~ Orders
+        +DbSet~Product~ Products
+        +SaveChangesAsync() int
+    }
+    class OrderService {
+        -IOrderRepository _repo
+        +GetActiveOrderAsync(userId) Order
+        +PlaceOrderAsync(order) void
+    }
+    IRepository~T~ <|.. EfOrderRepository : implements
+    EfOrderRepository --> AppDbContext : uses
+    OrderService --> IRepository~T~ : depends on interface
+```
 
 ### Q10. How does the Repository pattern separate data access from business logic?
 
@@ -495,6 +564,40 @@ public class OrderService {
 
 ## 4.1 Observer Pattern
 
+```mermaid
+classDiagram
+    class INotification {
+        <<interface>>
+    }
+    class OrderPlacedEvent {
+        +Order Order
+    }
+    class INotificationHandler~T~ {
+        <<interface>>
+        +Handle(notification, ct) Task
+    }
+    class SendConfirmationEmailHandler {
+        +Handle(OrderPlacedEvent, ct) Task
+    }
+    class ReduceInventoryHandler {
+        +Handle(OrderPlacedEvent, ct) Task
+    }
+    class IMediator {
+        <<interface>>
+        +Publish(notification) Task
+        +Send(request) Task
+    }
+    class OrderService {
+        -IMediator _mediator
+        +PlaceOrderAsync(order) Task
+    }
+    INotification <|-- OrderPlacedEvent
+    INotificationHandler~T~ <|.. SendConfirmationEmailHandler
+    INotificationHandler~T~ <|.. ReduceInventoryHandler
+    OrderService --> IMediator : publishes event
+    IMediator ..> INotificationHandler~T~ : dispatches to all handlers
+```
+
 ### Q11. How does the Observer pattern decouple event producers from consumers?
 
 **Answer:**
@@ -542,6 +645,31 @@ public class SendConfirmationEmailHandler : INotificationHandler<OrderPlacedEven
 ---
 
 ## 4.2 Strategy Pattern
+
+```mermaid
+classDiagram
+    class IDiscountStrategy {
+        <<interface>>
+        +Apply(price) decimal
+    }
+    class VipDiscount {
+        +Apply(price) decimal
+    }
+    class StudentDiscount {
+        +Apply(price) decimal
+    }
+    class SeasonalDiscount {
+        +Apply(price) decimal
+    }
+    class DiscountCalculator {
+        -IDiscountStrategy _strategy
+        +Calculate(price) decimal
+    }
+    IDiscountStrategy <|.. VipDiscount
+    IDiscountStrategy <|.. StudentDiscount
+    IDiscountStrategy <|.. SeasonalDiscount
+    DiscountCalculator --> IDiscountStrategy : uses
+```
 
 ### Q12. When do you use the Strategy pattern?
 

@@ -1856,6 +1856,21 @@ public record ReportData(int UserId, string Name, IReadOnlyList<string> Lines);
 
 The **Singleton** pattern ensures only one instance of a class exists and provides a global point of access to it. It is useful for shared resources like configuration, logging, and connection pools where multiple instances would cause inconsistency or waste. Thread safety is critical — naive implementations create race conditions where two threads simultaneously find no instance and both create one. The modern C# idiom uses `Lazy<T>` for guaranteed thread safety without explicit locking. In most modern applications, **dependency injection** is a better alternative — the DI container manages lifetime (Singleton lifetime) without the global state problem.
 
+```mermaid
+classDiagram
+    class Singleton {
+        -static _instance : Singleton
+        -Singleton()
+        +static Instance : Singleton
+        +GetData() string
+    }
+    class Client {
+        +UseConfig()
+    }
+    Client --> Singleton : "Singleton.Instance"
+    note for Singleton "Only one instance exists.\nLazy~T~ ensures thread-safe init."
+```
+
 ❌ **Bad — not thread-safe, and hard to test:**
 ```csharp
 public class AppConfig

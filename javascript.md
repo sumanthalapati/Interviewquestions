@@ -64,6 +64,21 @@ for (let i = 0; i < 3; i++) {
 let y = 10;
 ```
 
+```mermaid
+flowchart TD
+    A[JS Engine parses code] --> B{Declaration type?}
+    B -->|var| C[Hoisted to function scope\nInitialized as undefined]
+    B -->|let / const| D[Hoisted to block scope\nNOT initialized — TDZ]
+    B -->|function declaration| E[Hoisted with full body\nCallable before declaration]
+    C --> F[Access before declaration\nreturns undefined — silent bug]
+    D --> G[Access before declaration\nReferenceError — fails fast]
+    E --> H[Callable anywhere in scope]
+    F --> I[var leaks out of blocks\nbut not out of functions]
+    G --> J[let/const strictly block-scoped\nNo leaking]
+    I --> K[Prefer let/const — never var]
+    J --> K
+```
+
 ---
 
 ## 1.2 Data Types
@@ -663,6 +678,26 @@ console.log(double(5)); // 10
 console.log(triple(5)); // 15
 ```
 
+```mermaid
+flowchart TD
+    A[Variable lookup: x] --> B{Found in current
+local scope?}
+    B -->|Yes| C[Use that variable ✅]
+    B -->|No| D{Outer scope
+exists?}
+    D -->|Yes| E[Move up to outer scope
+closure retains this link]
+    E --> B
+    D -->|No — global scope| F{Found in
+global scope?}
+    F -->|Yes| G[Use global variable]
+    F -->|No| H[ReferenceError:
+x is not defined]
+    style C fill:#9f9,stroke:#333
+    style H fill:#f99,stroke:#333
+    style E fill:#ff9,stroke:#333
+```
+
 ---
 
 ## 2.3 IIFE
@@ -785,6 +820,21 @@ function withLogging(fn) {
 }
 const loggedAdd = withLogging((a, b) => a + b);
 loggedAdd(2, 3); // logs and returns 5 ✅
+```
+
+```mermaid
+flowchart LR
+    Input["[1, 2, 3, 4, 5]"]
+    Input -->|".map(x => x * 2)"| MapOut["[2, 4, 6, 8, 10]
+Same length — values transformed"]
+    Input -->|".filter(x => x % 2 === 0)"| FilterOut["[2, 4]
+Subset — items that pass predicate"]
+    Input -->|".reduce((acc,x) => acc+x, 0)"| ReduceOut["15
+Single accumulated value"]
+    MapOut -->|"chain .filter"| ChainOut["Further transformation"]
+    style MapOut fill:#9f9,stroke:#333
+    style FilterOut fill:#bbf,stroke:#333
+    style ReduceOut fill:#ff9,stroke:#333
 ```
 
 ---
@@ -1163,6 +1213,34 @@ function test() { console.log(this.name); }
 const bound = test.bind({ name: 'Bound' });
 bound.call({ name: 'Call' }); // 'Bound' — bind wins over call ✅
 new bound(); // new wins over bind ✅
+```
+
+```mermaid
+flowchart TD
+    A["How is 'this' determined?"] --> B{Arrow function?}
+    B -->|Yes| C["Lexical this —
+inherited from enclosing scope"]
+    B -->|No| D{Called with new?}
+    D -->|Yes| E["this = new object created
+new binding — highest priority"]
+    D -->|No| F{"Called with
+call / apply / bind?"}
+    F -->|Yes| G["this = explicitly passed object
+explicit binding"]
+    F -->|No| H{"Called as
+obj.method()?"}
+    H -->|Yes| I["this = obj
+implicit binding"]
+    H -->|No| J{Strict mode?}
+    J -->|Yes| K["this = undefined
+default strict"]
+    J -->|No| L["this = globalThis / window
+default sloppy"]
+    style C fill:#f9f,stroke:#333
+    style E fill:#9f9,stroke:#333
+    style G fill:#bbf,stroke:#333
+    style I fill:#ff9,stroke:#333
+    style K fill:#f99,stroke:#333
 ```
 
 ---
@@ -1781,6 +1859,27 @@ console.log(Object.getPrototypeOf(Object.prototype)); // null — end of chain �
 dog.speak;     // not on dog → found on Animal.prototype ✅
 dog.toString;  // not on dog or Animal.prototype → found on Object.prototype ✅
 dog.missing;   // not anywhere → undefined ✅
+```
+
+```mermaid
+flowchart TD
+    A["obj.prop lookup"] --> B{Own property
+on obj?}
+    B -->|Yes| C[Return value ✅]
+    B -->|No| D{"obj.__proto__
+≠ null?"}
+    D -->|Yes| E[Search prototype object]
+    E --> B
+    D -->|No — null| F[Return undefined]
+    subgraph Typical chain
+        G["dog { name }"] -->|"__proto__"| H["Animal.prototype
+{ speak }"]
+        H -->|"__proto__"| I["Object.prototype
+{ toString, hasOwnProperty }"]
+        I -->|"__proto__"| J["null"]
+    end
+    style C fill:#9f9,stroke:#333
+    style F fill:#f99,stroke:#333
 ```
 
 ---
@@ -2442,6 +2541,20 @@ fetch('/api/user')
     hideSpinner(); // always runs ✅
   });
 
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : new Promise(executor)
+    Pending --> Fulfilled : resolve(value) called
+    Pending --> Rejected : reject(reason) called
+    Fulfilled --> [*] : .then(onFulfilled) → new Promise
+    Rejected --> [*] : .catch(onRejected) → new Promise
+    Rejected --> Fulfilled : .catch() returns value → recovered
+    Fulfilled --> Rejected : .then() throws → new rejected Promise
+    note right of Pending : Initial state — outcome unknown
+    note right of Fulfilled : Settled — immutable, value available
+    note right of Rejected : Settled — immutable, reason available
+```
+
 // Manual resolve/reject
 function divide(a, b) {
   return new Promise((resolve, reject) => {
@@ -2569,6 +2682,25 @@ async function processAll(ids) {
   // or parallel:
   await Promise.all(ids.map(processItem)); // ✅
 }
+```
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant AsyncFn as async fetchUser()
+    participant WebAPI as Web API / Network
+
+    Caller->>AsyncFn: fetchUser(id)
+    AsyncFn->>WebAPI: await fetch(url) — suspends
+    AsyncFn-->>Caller: returns pending Promise
+    Note over Caller: other sync code runs here
+    WebAPI-->>AsyncFn: response arrives — resumes
+    AsyncFn->>AsyncFn: check res.ok, parse JSON
+    alt success
+        AsyncFn-->>Caller: Promise resolves with data
+    else error
+        AsyncFn-->>Caller: Promise rejects with Error
+    end
 ```
 
 ---
@@ -3042,6 +3174,28 @@ async function doWork() {
   await delay(3000); // non-blocking ✅
   console.log('done after 3s');
 }
+```
+
+```mermaid
+flowchart TD
+    A[Synchronous Code] --> B[Call Stack]
+    B --> C{Stack empty?}
+    C -->|No| B
+    C -->|Yes| D{Microtask Queue
+empty?}
+    D -->|No| E[Run ALL microtasks
+Promise.then / queueMicrotask]
+    E --> D
+    D -->|Yes| F{Macrotask Queue
+empty?}
+    F -->|No| G[Take ONE macrotask
+setTimeout / setInterval / I/O]
+    G --> B
+    F -->|Yes| H[Browser: Render frame
+if needed]
+    H --> C
+    style E fill:#f9f,stroke:#333
+    style G fill:#bbf,stroke:#333
 ```
 
 ---
@@ -4952,6 +5106,36 @@ function withLock(lock, fn) {
     lock.release(); // always release ✅
   }
 }
+```
+
+```mermaid
+flowchart TD
+    A[Enter try block] --> B[Execute try code]
+    B --> C{Exception
+thrown?}
+    C -->|No| D[Skip catch block entirely]
+    C -->|Yes| E[Jump to catch block
+skip rest of try]
+    E --> F[Execute catch code]
+    F --> G{Re-throw
+or new exception?}
+    G -->|Yes| H[Save new exception]
+    G -->|No| I[Recovery complete]
+    D --> J["finally block
+ALWAYS executes"]
+    I --> J
+    H --> J
+    J --> K{finally has
+return or throw?}
+    K -->|Yes| L[Overrides any prior
+return or exception]
+    K -->|No| M{Prior saved
+exception?}
+    M -->|Yes| N[Re-throw saved exception]
+    M -->|No| O[Normal continuation / return]
+    style J fill:#ff9,stroke:#333
+    style L fill:#f99,stroke:#333
+    style D fill:#9f9,stroke:#333
 ```
 
 ---

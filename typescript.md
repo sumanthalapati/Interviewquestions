@@ -64,6 +64,32 @@ function label(s: Status): string {
 }
 ```
 
+```mermaid
+graph TD
+    A["unknown\n(top type — every type is assignable to unknown)"]
+    A --> B["any\n(opt out of type checking — bidirectional)"]
+    A --> C["object"]
+    A --> D["string"]
+    A --> E["number"]
+    A --> F["boolean"]
+    A --> G["null"]
+    A --> H["undefined"]
+    A --> I["symbol / bigint"]
+    C --> J["Array, Function, Class instances\n{}  (non-nullable object)"]
+    D --> K["string literal types\n'hello' | 'world'"]
+    E --> L["number literal types\n0 | 1 | 42"]
+    F --> M["boolean literal types\ntrue | false"]
+    K --> N["never\n(bottom type — assignable to every type, no value has this type)"]
+    L --> N
+    M --> N
+    G --> N
+    H --> N
+
+    style A fill:#1565c0,color:#fff
+    style B fill:#b71c1c,color:#fff
+    style N fill:#4a148c,color:#fff
+```
+
 ---
 
 ### Q2. What are union (`|`) and intersection (`&`) types? How do they combine types and what are real-world use cases?
@@ -345,6 +371,28 @@ function print(val: string | null | undefined) {
 }
 ```
 
+```mermaid
+flowchart TD
+    A["Union type\nstring | number | null | Error"] --> B{Narrowing check}
+
+    B -- "typeof x === 'string'" --> C["Narrowed: string\n.toUpperCase() ✅"]
+    B -- "typeof x === 'number'" --> D["Narrowed: number\n.toFixed() ✅"]
+    B -- "x instanceof Error" --> E["Narrowed: Error\n.message ✅"]
+    B -- "x === null" --> F["Narrowed: null\nguard / early return"]
+    B -- "'kind' in x" --> G["Narrowed by property\ndiscriminated union"]
+    B -- "if (x)" --> H["Truthiness narrowing\nremoves null | undefined | 0 | ''"]
+
+    C --> I["Control flow analysis\nTypeScript tracks narrowing\nthrough branches & assignments"]
+    D --> I
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+
+    style A fill:#1565c0,color:#fff
+    style I fill:#2e7d32,color:#fff
+```
+
 ---
 
 ### Q10. What is structural typing (duck typing)? How does TypeScript check type compatibility, and when are two distinct named types assignable to each other?
@@ -429,6 +477,25 @@ class UserRepo implements Repository<User> {
   save(user: User) { return fetch('/users', { method: 'POST' }).then(() => {}); }
   delete(id: string) { return fetch(`/users/${id}`, { method: 'DELETE' }).then(() => {}); }
 }
+```
+
+```mermaid
+flowchart TD
+    Q["Need to describe a type?"] --> A{What kind?}
+
+    A -- "Object shape / contract\nfor classes to implement" --> B["Use interface"]
+    A -- "Union, tuple, primitive alias\nor complex type expression" --> C["Use type alias"]
+    A -- "May be extended by\nthird-party code (library)" --> B
+    A -- "Mapped/conditional types\ntemplate literals" --> C
+
+    B --> D["✅ Declaration merging\n✅ extends keyword\n✅ implements by classes\n✅ Better error messages\n❌ Cannot represent unions"]
+
+    C --> E["✅ Union & intersection\n✅ Tuple types\n✅ Conditional types\n✅ Mapped types\n❌ No declaration merging"]
+
+    style B fill:#1565c0,color:#fff
+    style C fill:#2e7d32,color:#fff
+    style D fill:#1e3a5f,color:#fff
+    style E fill:#1b5e20,color:#fff
 ```
 
 ---
@@ -854,6 +921,23 @@ getProperty(user, 'name'); // string ✅
 // getProperty(user, 'email'); // ❌ compile error ✅
 ```
 
+```mermaid
+flowchart TD
+    A["Generic function called\nlongest(a, b)"] --> B["TypeScript infers T\nfrom argument types"]
+    B --> C{Does T satisfy\nthe constraint?}
+    C -- "T extends { length: number }" --> D{"Is T string | array\nor other with .length?"}
+    D -- Yes --> E["✅ Constraint satisfied\nallow .length access\nreturn type is T"]
+    D -- No --> F["❌ Compile error\n'number' does not satisfy\nconstraint { length: number }"]
+    C -- "T extends keyof U" --> G{Is T a valid\nkey of U?}
+    G -- Yes --> H["✅ Return type U[T]\nprecise indexed access"]
+    G -- No --> I["❌ Compile error\nargument not a key of the object"]
+
+    style E fill:#2e7d32,color:#fff
+    style F fill:#b71c1c,color:#fff
+    style H fill:#2e7d32,color:#fff
+    style I fill:#b71c1c,color:#fff
+```
+
 ---
 
 ### Q3. How do generic interfaces and generic classes work? Give a reusable container example.
@@ -1007,6 +1091,28 @@ type StringKeys<T> = {
 }[keyof T];
 type D = StringKeys<{ name: string; age: number; email: string }>;
 // 'name' | 'email' ✅
+```
+
+```mermaid
+flowchart TD
+    A["Conditional type\nT extends U ? X : Y"] --> B{Is T a naked\ntype parameter?}
+
+    B -- Yes --> C["Distributive mode\nDistribute over each union member"]
+    C --> D["T = string | number\nbecomes:\nstring extends U ? X : Y\n| number extends U ? X : Y"]
+    D --> E["Result: union of each branch"]
+
+    B -- No --> F["Non-distributive\n[T] extends [U] ? X : Y\nOR T wrapped in object/tuple"]
+    F --> G["Whole union tested at once\nagainst U"]
+
+    A --> H{Does T extend U?}
+    H -- Yes --> I["Resolve to X type"]
+    H -- No --> J["Resolve to Y type"]
+    H -- "T is generic\n(not yet known)" --> K["Deferred — resolved later\nwhen T is instantiated"]
+
+    style I fill:#2e7d32,color:#fff
+    style J fill:#b71c1c,color:#fff
+    style K fill:#ff9800,color:#fff
+    style E fill:#1565c0,color:#fff
 ```
 
 ---

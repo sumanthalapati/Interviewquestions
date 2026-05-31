@@ -110,6 +110,31 @@ export class UserComponent implements OnInit, OnDestroy, OnChanges {
 }
 ```
 
+```mermaid
+sequenceDiagram
+    participant A as Angular
+    participant C as Component
+
+    A->>C: constructor()
+    Note over C: Dependency injection only
+    A->>C: ngOnChanges(changes)
+    Note over C: @Input values set (runs before ngOnInit and on every input change)
+    A->>C: ngOnInit()
+    Note over C: Initialization logic, HTTP calls
+    A->>C: ngDoCheck()
+    Note over C: Custom change detection
+    A->>C: ngAfterContentInit()
+    Note over C: ng-content projected (once)
+    A->>C: ngAfterContentChecked()
+    Note over C: After every content check
+    A->>C: ngAfterViewInit()
+    Note over C: ViewChild/ViewChildren available (once)
+    A->>C: ngAfterViewChecked()
+    Note over C: After every view check
+    A->>C: ngOnDestroy()
+    Note over C: Cleanup subscriptions, timers
+```
+
 ---
 
 ### Q3. How do @Input and @Output work? What are the rules for passing data between parent and child components?
@@ -347,6 +372,27 @@ this.sharedService.setUser('John');
 
 // Component B (receiver)
 this.sharedService.user$.pipe(takeUntil(this.destroy$)).subscribe(name => this.userName = name);
+```
+
+```mermaid
+flowchart LR
+    A["🖱️ User Interaction\n(button click, form submit)"] --> B["📢 Action dispatched\nstore.dispatch(loadUsers())"]
+    B --> C["⚙️ Reducer\npure function: (state, action) => newState"]
+    C --> D["🗄️ Store\nimmutable state tree"]
+    D --> E["📡 Selector\nselect(selectUsers)"]
+    E --> F["🧩 Component\nasync pipe / subscribe"]
+    F --> A
+
+    B --> G["🔄 Effect (side effects)\nAPI calls, routing"]
+    G --> B
+
+    style A fill:#4caf50,color:#fff
+    style B fill:#ff9800,color:#fff
+    style C fill:#9c27b0,color:#fff
+    style D fill:#1565c0,color:#fff
+    style E fill:#00838f,color:#fff
+    style F fill:#2196f3,color:#fff
+    style G fill:#e53935,color:#fff
 ```
 
 ---
@@ -880,6 +926,20 @@ export class OrderComponent {
 }
 ```
 
+```mermaid
+graph TD
+    A["🌍 Root Injector (providedIn: 'root')\nSingleton — one instance for entire app"] --> B["📦 Module Injector\nScoped to NgModule providers array"]
+    B --> C["🧩 Component Injector\nNew instance per component (providers: [...])"]
+    C --> D["👶 Child Component Injector\nInherits from parent, can override"]
+
+    style A fill:#1565c0,color:#fff
+    style B fill:#1976d2,color:#fff
+    style C fill:#1e88e5,color:#fff
+    style D fill:#42a5f5,color:#fff
+```
+
+> Token lookup walks **up** the tree — child first, then parent, then module, then root.
+
 ---
 
 ### Q22. What is the difference between providedIn: 'root', providedIn: 'platform', providing in a module, and providing in a component?
@@ -1220,6 +1280,22 @@ export const routes: Routes = [
 ];
 ```
 
+```mermaid
+flowchart TD
+    A["User navigates to /admin"] --> B["Router matches path 'admin'"]
+    B --> C{Module already loaded?}
+    C -- Yes --> G["Activate route → render component"]
+    C -- No --> D["Execute loadChildren / loadComponent\ndynamic import()"]
+    D --> E["Browser downloads chunk file\nadmin.chunk.js"]
+    E --> F["Angular registers lazy module\n+ creates child injector"]
+    F --> G
+    G --> H["Component rendered in router-outlet"]
+
+    style A fill:#4caf50,color:#fff
+    style E fill:#ff9800,color:#fff
+    style H fill:#2196f3,color:#fff
+```
+
 ---
 
 # 5. Routing & Navigation
@@ -1309,6 +1385,27 @@ export const unsavedChangesGuard: CanDeactivateFn<EditFormComponent> = (componen
 // Route config
 { path: 'admin', component: AdminComponent, canActivate: [authGuard] },
 { path: 'edit',  component: EditFormComponent, canDeactivate: [unsavedChangesGuard] }
+```
+
+```mermaid
+flowchart TD
+    A["Navigation triggered\nrouter.navigate() / RouterLink"] --> B["canMatch guard\n(filter route candidates)"]
+    B -- false --> Z["Try next matching route"]
+    B -- true --> C["canActivate guard\n(authorize access to route)"]
+    C -- false --> Y["Redirect / cancel navigation"]
+    C -- true --> D["canActivateChild guard\n(authorize child routes)"]
+    D -- false --> Y
+    D -- true --> E["Resolve guard\n(pre-fetch data)"]
+    E --> F["Activate route\ninstantiate/reuse Component"]
+    F --> G["Component rendered\nin router-outlet"]
+    G --> H{User navigates away?}
+    H -- triggers --> I["canDeactivate guard\n(unsaved changes check)"]
+    I -- false --> G
+    I -- true --> A
+
+    style A fill:#4caf50,color:#fff
+    style Y fill:#f44336,color:#fff
+    style G fill:#2196f3,color:#fff
 ```
 
 ---
@@ -1671,6 +1768,30 @@ export class PriceListComponent {
 
   trackById(_: number, item: Product) { return item.id; }
 }
+```
+
+```mermaid
+flowchart TD
+    A["Zone.js patches async APIs\n(setTimeout, XHR, Promises, DOM events)"] --> B["Async event completes\n(HTTP response, click, timer)"]
+    B --> C["Zone.js notifies Angular\nonMicrotaskEmpty / onStable"]
+    C --> D["Change Detection cycle starts\nat root component"]
+
+    D --> E{Component strategy?}
+
+    E -- Default --> F["Check ALL components\nin the subtree"]
+    F --> G["Update bindings in template\nif values changed"]
+
+    E -- OnPush --> H{Trigger condition?}
+    H -- "@Input reference changed\nOR event from component\nOR async pipe emits\nOR markForCheck() called" --> I["Check this component\nand mark ancestors dirty"]
+    H -- None --> J["Skip component subtree\n✅ performance win"]
+
+    G --> K["DOM updated"]
+    I --> K
+
+    style A fill:#ff9800,color:#fff
+    style F fill:#f44336,color:#fff
+    style J fill:#4caf50,color:#fff
+    style K fill:#2196f3,color:#fff
 ```
 
 ---
@@ -2131,6 +2252,31 @@ bootstrapApplication(AppComponent, {
     )
   ]
 });
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Component
+    participant A as authInterceptor
+    participant E as errorInterceptor
+    participant L as loadingInterceptor
+    participant S as HTTP Server
+
+    C->>A: HttpRequest (original)
+    Note over A: Clone request, add Auth token
+    A->>E: HttpRequest (with token)
+    Note over E: Pass through (outgoing)
+    E->>L: HttpRequest (with token)
+    Note over L: loading.show()
+    L->>S: HttpRequest sent to server
+
+    S-->>L: HttpResponse
+    Note over L: loading.hide() via finalize()
+    L-->>E: HttpResponse
+    Note over E: Check for 401/403, redirect if needed
+    E-->>A: HttpResponse
+    Note over A: Pass through (incoming)
+    A-->>C: HttpResponse delivered
 ```
 
 ---
