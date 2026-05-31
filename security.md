@@ -981,3 +981,44 @@ flowchart LR
     style MI fill:#2196F3,color:#fff
 ```
 
+---
+
+## SEC-D7 — Defense in Depth
+
+```mermaid
+flowchart TD
+    ATTACKER["😈 Attacker / Malicious Request"] --> WAF
+
+    WAF["Layer 1: WAF (Web Application Firewall)\nBlocks: SQLi patterns, XSS payloads,\nknown attack signatures, IP blacklists"]
+    WAF -->|passes| RATELIMIT
+
+    RATELIMIT["Layer 2: Rate Limiting & DDoS Protection\nBlocks: brute force, credential stuffing,\nrequest floods (429 Too Many Requests)"]
+    RATELIMIT -->|passes| AUTHN
+
+    AUTHN["Layer 3: Authentication\nVerifies identity: JWT, OAuth2, mTLS\nBlocks: unauthenticated requests (401)"]
+    AUTHN -->|passes| AUTHZ
+
+    AUTHZ["Layer 4: Authorization\nChecks permissions: RBAC, policy claims\nBlocks: insufficient privileges (403)"]
+    AUTHZ -->|passes| INPUT
+
+    INPUT["Layer 5: Input Validation\nParameterized queries, model validation\nBlocks: SQL injection, XSS, oversized payloads"]
+    INPUT -->|passes| ENCRYPT
+
+    ENCRYPT["Layer 6: Encryption at Rest & in Transit\nTLS 1.3 in transit, AES-256 at rest\nProtects: data even if storage is breached"]
+    ENCRYPT -->|passes| AUDIT
+
+    AUDIT["Layer 7: Audit Logging & Monitoring\nSIEM alerts, anomaly detection\nDetects: breaches that bypassed other layers"]
+
+    AUDIT --> DATA["✅ Protected Data\nAttacker must defeat ALL layers"]
+
+    style ATTACKER fill:#f44336,color:#fff
+    style WAF fill:#ff7043,color:#fff
+    style RATELIMIT fill:#ff8f00,color:#fff
+    style AUTHN fill:#fdd835,color:#333
+    style AUTHZ fill:#7cb342,color:#fff
+    style INPUT fill:#26a69a,color:#fff
+    style ENCRYPT fill:#1e88e5,color:#fff
+    style AUDIT fill:#5e35b1,color:#fff
+    style DATA fill:#2e7d32,color:#fff
+```
+

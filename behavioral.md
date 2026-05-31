@@ -25,6 +25,18 @@
 
 Every behavioral answer should follow STAR:
 
+```mermaid
+flowchart LR
+    S[Situation\nSet the scene\nWhat was the context?] --> T[Task\nYour responsibility\nWhat was at stake?]
+    T --> A[Action\nSpecific steps YOU took\nUse I not we]
+    A --> R[Result\nMeasurable outcome\nWhat did you learn?]
+
+    style S fill:#2196F3,color:#fff
+    style T fill:#FF9800,color:#fff
+    style A fill:#9C27B0,color:#fff
+    style R fill:#4CAF50,color:#fff
+```
+
 ```
 S — Situation   : Set the scene. What was the context?
 T — Task        : What was YOUR responsibility? What was at stake?
@@ -43,6 +55,18 @@ R — Result      : Measurable outcome. What changed? What did you learn?
 ---
 
 ## 2. Conflict Handling
+
+```mermaid
+flowchart LR
+    IC[Identify conflict\nwhat is the disagreement?] --> UP[Understand perspectives\nlisten fully to both sides]
+    UP --> CG[Find common ground\nshared goals / constraints]
+    CG --> SOL[Agree on solution\ndata-driven options]
+    SOL --> FU[Follow up\ndid it stick?]
+
+    style IC fill:#f44336,color:#fff
+    style CG fill:#FF9800,color:#fff
+    style SOL fill:#4CAF50,color:#fff
+```
 
 **What they're testing:** Can you handle disagreement professionally? Can you separate personal from professional? Do you escalate appropriately?
 
@@ -488,6 +512,24 @@ business rules changed mid-sprint. I now force myself to write a
 one-pager before opening my IDE for any non-trivial feature.
 It's a habit I've been deliberately building over the past year
 and it's reduced rework significantly."
+```
+
+---
+
+## Decision-Making Framework
+
+```mermaid
+flowchart LR
+    DP[Define problem\nclearly articulate it] --> GD[Gather data\nfacts · constraints · stakeholders]
+    GD --> IO[Identify options\nbrainstorm alternatives]
+    IO --> ET[Evaluate trade-offs\ncost · risk · time · value]
+    ET --> DE[Decide\ncommit fully]
+    DE --> RV[Review\ndid it work? what to adjust?]
+
+    style DP fill:#2196F3,color:#fff
+    style ET fill:#FF9800,color:#fff
+    style DE fill:#4CAF50,color:#fff
+    style RV fill:#9C27B0,color:#fff
 ```
 
 ---

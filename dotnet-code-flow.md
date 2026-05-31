@@ -2236,6 +2236,52 @@ sequenceDiagram
 
 ---
 
+## Diagram 6 — gRPC vs REST Comparison
+
+```mermaid
+flowchart LR
+    subgraph REST["REST — HTTP/1.1 + JSON"]
+        RC([Client]) -->|HTTP GET /orders/1
+Accept: application/json| RS[REST Server]
+        RS -->|200 OK
+Content-Type: application/json
+{ id:1, status:'pending' }| RC
+        RS2([Client]) -->|HTTP POST /orders
+JSON body
+~500 bytes| RS3[REST Server]
+        RS3 -->|201 Created
+JSON response| RS2
+    end
+
+    subgraph GRPC["gRPC — HTTP/2 + Protobuf"]
+        GC([Client]) -->|Binary Protobuf frame
+~50 bytes
+Streaming possible| GS[gRPC Server]
+        GS -->|Binary Protobuf response
+or server-stream| GC
+        GC2([Client]) -->|Bidirectional stream
+real-time| GS2[gRPC Server]
+        GS2 -->|Stream of messages| GC2
+    end
+
+    subgraph COMPARE["When to Use"]
+        R1[REST: public APIs
+browser clients
+human-readable
+wide tooling support]
+        G1[gRPC: internal microservices
+low-latency
+streaming
+strongly typed contracts]
+    end
+
+    style REST fill:#2196F3,color:#fff
+    style GRPC fill:#4CAF50,color:#fff
+    style COMPARE fill:#FF9800,color:#fff
+```
+
+---
+
 ## Diagram 5 — Singleton Pattern Flow
 
 ```mermaid
@@ -2243,138 +2289,4 @@ flowchart TD
     C1([First Call: GetInstance]) --> CHK{_instance == null?}
     CHK -->|YES| LK[Acquire lock]
     LK --> CHK2{Still null?\ndouble-check}
-    CHK2 -->|YES| NEW[new Singleton created\nstored in _instance]
-    CHK2 -->|NO| RET1[Return existing _instance]
-    NEW --> RET1
-    CHK -->|NO| RET2([Return cached _instance\nno lock needed])
-
-    C2([Second Call: GetInstance]) --> CHK
-    style NEW fill:#4CAF50,color:#fff
-    style RET1 fill:#2196F3,color:#fff
-    style RET2 fill:#2196F3,color:#fff
-```
-
----
-
-## Diagram 6 — Decorator Pattern Layering
-
-```mermaid
-flowchart LR
-    Client([Client]) --> LOG[LoggingDecorator\nlogs before/after]
-    LOG --> CACHE[CachingDecorator\ncheck cache first]
-    CACHE --> REAL[OrderService\nreal DB query]
-    REAL --> DB[(Database)]
-
-    DB --> REAL
-    REAL --> CACHE
-    CACHE -->|MISS: store result| REDIS[(Redis Cache)]
-    CACHE --> LOG
-    LOG --> Client
-
-    style Client fill:#4CAF50,color:#fff
-    style REAL fill:#FF9800,color:#fff
-    style DB fill:#2196F3,color:#fff
-    style REDIS fill:#f44336,color:#fff
-```
-
----
-
-## Diagram 7 — CQRS + MediatR Pipeline
-
-```mermaid
-flowchart TD
-    CON[Controller] -->|mediator.Send| MED[MediatR]
-
-    subgraph Pipeline["Pipeline Behaviours (run in order)"]
-        LB[LoggingBehavior\nlogs request + elapsed]
-        VB[ValidationBehavior\nFluentValidation]
-        LB --> VB
-    end
-
-    MED --> Pipeline
-
-    subgraph Handlers["Handler (Command or Query)"]
-        CH[CreateOrderCommandHandler\nwrite to DB + publish event]
-        QH[GetOrdersQueryHandler\nAsNoTracking projection]
-    end
-
-    VB -->|Command| CH
-    VB -->|Query| QH
-    CH --> DB[(SQL Server\nwrite side)]
-    QH --> RODB[(SQL Server\nread side\nAsNoTracking)]
-    CH -->|publish event| BUS[Message Bus]
-
-    style CON fill:#4CAF50,color:#fff
-    style DB fill:#2196F3,color:#fff
-    style RODB fill:#9C27B0,color:#fff
-    style BUS fill:#FF9800,color:#fff
-```
-
----
-
-## Diagram 8 — State Pattern (ATM Machine)
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-
-    Idle --> HasCard : insertCard()
-    HasCard --> Idle : ejectCard()
-    HasCard --> HasCard : enterPin() [wrong PIN]
-    HasCard --> Authenticated : enterPin() [correct PIN]
-    Authenticated --> Dispensing : selectAmount()
-    Dispensing --> Idle : dispense() ✅ card ejected
-
-    Idle : 💤 Waiting for card
-    HasCard : 💳 Card inserted\nawaiting PIN
-    Authenticated : ✅ PIN verified\nawait amount
-    Dispensing : 💵 Dispensing cash
-```
-
----
-
-## Diagram 9 — Chain of Responsibility (Approval Flow)
-
-```mermaid
-flowchart LR
-    REQ([Request\n$75,000]) --> TL{TeamLead\n≤ $10,000?}
-    TL -->|NO| MGR{Manager\n≤ $50,000?}
-    TL -->|YES| TL_OK([✅ TeamLead\nApproved])
-    MGR -->|NO| DIR{Director\n≤ $100,000?}
-    MGR -->|YES| MGR_OK([✅ Manager\nApproved])
-    DIR -->|YES| DIR_OK([✅ Director\nApproved])
-    DIR -->|NO| ESC([⚠️ Escalate\nto Board])
-
-    style TL_OK fill:#4CAF50,color:#fff
-    style MGR_OK fill:#4CAF50,color:#fff
-    style DIR_OK fill:#4CAF50,color:#fff
-    style ESC fill:#f44336,color:#fff
-```
-
----
-
-## Diagram 10 — Repository + Unit of Work
-
-```mermaid
-flowchart TD
-    SVC[OrderService] -->|AddAsync| UOW[UnitOfWork]
-    SVC -->|UpdateAsync| UOW
-    SVC -->|CommitAsync| UOW
-
-    subgraph UOW_INNER["Unit of Work (shared DbContext)"]
-        OR[OrderRepository]
-        IR[InventoryRepository]
-        CR[CustomerRepository]
-    end
-
-    UOW --> UOW_INNER
-    OR --> CTX[(AppDbContext)]
-    IR --> CTX
-    CR --> CTX
-    CTX -->|SaveChangesAsync\nSingle Transaction| DB[(SQL Server)]
-
-    style SVC fill:#4CAF50,color:#fff
-    style CTX fill:#FF9800,color:#fff
-    style DB fill:#2196F3,color:#fff
-```
-
+    CHK2 -->|YES| NEW[new Singleton created\nstore

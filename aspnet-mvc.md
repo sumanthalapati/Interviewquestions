@@ -396,6 +396,23 @@ app.UseAuthorization();              // what can you do?
 app.MapControllers();
 ```
 
+```mermaid
+flowchart TD
+    REQ["HTTP Request"] --> EXCEPTION["Exception Handler Middleware\n(catches errors from all below)"]
+    EXCEPTION --> HTTPS["HTTPS Redirection"]
+    HTTPS --> STATIC["Static Files\n(short-circuit — no routing needed)"]
+    STATIC --> ROUTING["UseRouting\n(resolve endpoint)"]
+    ROUTING --> AUTHN["UseAuthentication\nWho are you?\nPopulates HttpContext.User"]
+    AUTHN --> AUTHZ["UseAuthorization\nWhat can you do?\nChecks [Authorize] policy"]
+    AUTHZ -->|policy passes| EP["Endpoint / Controller Action"]
+    AUTHZ -->|policy fails| R401["401 Unauthorized\nor 403 Forbidden"]
+
+    style AUTHN fill:#4dabf7,color:#fff
+    style AUTHZ fill:#cc5de8,color:#fff
+    style EP fill:#51cf66,color:#fff
+    style R401 fill:#ff6b6b,color:#fff
+```
+
 ---
 
 ## 6.2 Custom Middleware
@@ -1593,4 +1610,216 @@ builder.Services.AddHttpClient("payments", c => c.BaseAddress = new Uri("https:/
 builder.Services.AddHttpClient<PaymentApiClient>(c => c.BaseAddress = new Uri("https://pay.api/"));
 public class PaymentApiClient { public PaymentApiClient(HttpClient client) { _client = client; } }
 ```
+
+---
+
+## 19. Implementing a REST API — End-to-End
+
+### Q87. Walk me through implementing a complete REST API in ASP.NET Core.
+
+A production REST API has six layers: **Model → Repository → Service → Controller → Middleware → Configuration**. Here is a complete walkthrough for a `Products` resource.
+
+**Step 1 — Domain model and DTO:**
+```csharp
+// Domain entity (never expose directly to clients)
+public class Product {
+    public int     Id          { get; set; }
+    public string  Name        { get; set; } = "";
+    public decimal Price       { get; set; }
+    public bool    IsAvailable { get; set; }
+}
+
+// DTOs — what the API actually sends/receives
+public record ProductDto(int Id, string Name, decimal Price);
+
+public record CreateProductRequest(
+    [Required, MaxLength(200)] string  Name,
+    [Range(0.01, 9999.99)]    decimal Price
+);
+
+public record UpdateProductRequest(
+    [Required, MaxLength(200)] string  Name,
+    [Range(0.01, 9999.99)]    decimal Price,
+    bool IsAvailable
+);
+```
+
+**Step 2 — Repository + EF Core:**
+```csharp
+public interface IProductRepository {
+    Task<IEnumerable<Product>> GetAllAsync();
+    Task<Product?>             GetByIdAsync(int id);
+    Task<Product>              AddAsync(Product product);
+    Task UpdateAsync(Product product);
+    Task DeleteAsync(int id);
+}
+
+public class ProductRepository : IProductRepository {
+    private readonly AppDbContext _db;
+    public ProductRepository(AppDbContext db) => _db = db;
+
+    public async Task<IEnumerable<Product>> GetAllAsync() =>
+        await _db.Products.AsNoTracking().ToListAsync();
+
+    public async Task<Product?> GetByIdAsync(int id) =>
+        await _db.Products.FindAsync(id);
+
+    public async Task<Product> AddAsync(Product product) {
+        _db.Products.Add(product);
+        await _db.SaveChangesAsync();
+        return product;
+    }
+
+    public async Task UpdateAsync(Product product) {
+        _db.Products.Update(product);
+        await _db.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(int id) {
+        var p = await _db.Products.FindAsync(id);
+        if (p is not null) { _db.Products.Remove(p); await _db.SaveChangesAsync(); }
+    }
+}
+```
+
+**Step 3 — Service layer (business logic + mapping):**
+```csharp
+public interface IProductService {
+    Task<IEnumerable<ProductDto>> GetAllAsync();
+    Task<ProductDto?>             GetByIdAsync(int id);
+    Task<ProductDto>              CreateAsync(CreateProductRequest request);
+    Task<bool>                    UpdateAsync(int id, UpdateProductRequest request);
+    Task<bool>                    DeleteAsync(int id);
+}
+
+public class ProductService : IProductService {
+    private readonly IProductRepository _repo;
+    public ProductService(IProductRepository repo) => _repo = repo;
+
+    public async Task<IEnumerable<ProductDto>> GetAllAsync() =>
+        (await _repo.GetAllAsync()).Select(ToDto);
+
+    public async Task<ProductDto?> GetByIdAsync(int id) {
+        var p = await _repo.GetByIdAsync(id);
+        return p is null ? null : ToDto(p);
+    }
+
+    public async Task<ProductDto> CreateAsync(CreateProductRequest req) {
+        var product = new Product { Name = req.Name, Price = req.Price, IsAvailable = true };
+        var created = await _repo.AddAsync(product);
+        return ToDto(created);
+    }
+
+    public async Task<bool> UpdateAsync(int id, UpdateProductRequest req) {
+        var product = await _repo.GetByIdAsync(id);
+        if (product is null) return false;
+        product.Name = req.Name; product.Price = req.Price; product.IsAvailable = req.IsAvailable;
+        await _repo.UpdateAsync(product);
+        return true;
+    }
+
+    public async Task<bool> DeleteAsync(int id) {
+        var product = await _repo.GetByIdAsync(id);
+        if (product is null) return false;
+        await _repo.DeleteAsync(id);
+        return true;
+    }
+
+    private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Price);
+}
+```
+
+**Step 4 — Controller:**
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+[Produces("application/json")]
+public class ProductsController : ControllerBase {
+    private readonly IProductService _svc;
+    public ProductsController(IProductService svc) => _svc = svc;
+
+    // GET api/products
+    [HttpGet]
+    [ProducesResponseType<IEnumerable<ProductDto>>(StatusCodes.Status200OK)]
+    public async Task<ActionResult<IEnumerable<ProductDto>>> GetAll() =>
+        Ok(await _svc.GetAllAsync());
+
+    // GET api/products/5
+    [HttpGet("{id:int}")]
+    [ProducesResponseType<ProductDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ProductDto>> GetById(int id) {
+        var product = await _svc.GetByIdAsync(id);
+        return product is null ? NotFound() : Ok(product);
+    }
+
+    // POST api/products
+    [HttpPost]
+    [ProducesResponseType<ProductDto>(StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<ProductDto>> Create([FromBody] CreateProductRequest request) {
+        var created = await _svc.CreateAsync(request);
+        return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);
+    }
+
+    // PUT api/products/5
+    [HttpPut("{id:int}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(int id, [FromBody] UpdateProductRequest request) {
+        var updated = await _svc.UpdateAsync(id, request);
+        return updated ? NoContent() : NotFound();
+    }
+
+    // DELETE api/products/5
+    [HttpDelete("{id:int}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(int id) {
+        var deleted = await _svc.DeleteAsync(id);
+        return deleted ? NoContent() : NotFound();
+    }
+}
+```
+
+**Step 5 — Program.cs wiring:**
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+// Services
+builder.Services.AddDbContext<AppDbContext>(opt =>
+    opt.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+builder.Services.AddScoped<IProductService, ProductService>();
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Middleware pipeline
+if (app.Environment.IsDevelopment()) {
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+```
+
+**REST conventions summary:**
+
+| Operation | Method | Route | Success code |
+|---|---|---|---|
+| List all | GET | `/api/products` | 200 OK |
+| Get one | GET | `/api/products/{id}` | 200 OK / 404 |
+| Create | POST | `/api/products` | 201 Created |
+| Full replace | PUT | `/api/products/{id}` | 204 No Content |
+| Partial update | PATCH | `/api/products/{id}` | 204 No Content |
+| Delete | DELETE | `/api/products/{id}` | 204 No Content |
 

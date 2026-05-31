@@ -149,6 +149,20 @@ public class ChatService(Kernel kernel) {
 **Answer:**
 A plugin is a class with methods decorated with `[KernelFunction]` and `[Description]`. The description helps the AI choose when to call it. Register with `kernel.Plugins.AddFromType<T>()`.
 
+```mermaid
+flowchart LR
+    UI[User intent\n"What is the weather in London?"] --> K[Kernel]
+    K --> PL[Planner\nfunction calling]
+    PL --> SEL[Select plugin functions\nWeatherPlugin.GetWeather]
+    SEL --> EX[Execute function]
+    EX --> AGG[Aggregate result]
+    AGG --> RES[Response to user]
+
+    style UI fill:#4CAF50,color:#fff
+    style PL fill:#9C27B0,color:#fff
+    style RES fill:#FF9800,color:#fff
+```
+
 ❌ **Wrong — no descriptions, ambiguous method names, AI can't understand when to use them:**
 ```csharp
 public class MyPlugin {
@@ -306,6 +320,20 @@ Console.WriteLine(result);
 
 **Answer:**
 RAG grounds LLM responses in your data: embed documents → store in vector DB → at query time embed the question → retrieve top-k similar chunks → inject as context into the prompt. Prevents hallucination on domain-specific knowledge.
+
+```mermaid
+flowchart LR
+    UQ[User query] --> EQ[Embed query\ntext-embedding-ada-002]
+    EQ --> VS[Vector similarity search\ncosine distance]
+    VS --> RD[Retrieve top-k docs\nfrom vector store]
+    RD --> AP[Augment prompt\nquery + context chunks]
+    AP --> LLM[LLM\nGPT-4 / Claude]
+    LLM --> ANS[Answer\ngrounded in your data]
+
+    style UQ fill:#4CAF50,color:#fff
+    style LLM fill:#2196F3,color:#fff
+    style ANS fill:#FF9800,color:#fff
+```
 
 ❌ **Wrong — sending the entire document corpus to the LLM every time (token limit + expensive):**
 ```csharp
@@ -1398,6 +1426,25 @@ var creative = new OpenAIPromptExecutionSettings
     FrequencyPenalty = 0.5,  // reduce repetition
     MaxTokens        = 500
 };
+```
+
+---
+
+## AI-D1 — AI Ingestion and Retrieval Pipeline
+
+```mermaid
+flowchart LR
+    ING[Data ingestion\nPDFs / docs / web] --> CHUNK[Chunking\n500-token overlapping chunks]
+    CHUNK --> EMB[Embedding\ntext-embedding-ada-002]
+    EMB --> STORE[Vector store\nQdrant / Azure AI Search]
+    STORE --> RET[Retrieval\ntop-k similarity search]
+    RET --> GEN[Generation\nLLM with context]
+    GEN --> OUT[Output\ngrounded answer]
+
+    style ING fill:#4CAF50,color:#fff
+    style STORE fill:#2196F3,color:#fff
+    style GEN fill:#9C27B0,color:#fff
+    style OUT fill:#FF9800,color:#fff
 ```
 
 ---

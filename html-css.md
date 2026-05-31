@@ -159,6 +159,22 @@ p  { font-size: 1rem; }         /* 16px */
 
 ## CSS-C4 — CSS Specificity: Which Rule Wins?
 
+```mermaid
+flowchart TD
+    IS[Inline style\nstyle= attribute\n1000 points] --> ID
+    ID[ID selector\n#myId\n100 points] --> CL
+    CL[Class / pseudo-class / attribute\n.myClass :hover\[attr\]\n10 points] --> EL
+    EL[Element / pseudo-element\np  h1  ::before\n1 point]
+
+    IS -.->|highest specificity wins| WIN[Winning rule\napplied to element]
+
+    style IS fill:#f44336,color:#fff
+    style ID fill:#FF9800,color:#fff
+    style CL fill:#2196F3,color:#fff
+    style EL fill:#4CAF50,color:#fff
+    style WIN fill:#9C27B0,color:#fff
+```
+
 ```
 Specificity scoring:
   Inline style          → 1,0,0,0 (1000)
@@ -189,6 +205,27 @@ Examples:
 
 ## CSS-C5 — `margin` vs `padding` vs `border` (Box Model)
 
+```mermaid
+flowchart TD
+    subgraph BOX["CSS Box Model"]
+        MAR["margin\nouter spacing — transparent"]
+        subgraph INNER[""]
+            BOR["border\nvisual boundary"]
+            subgraph CONTENT_AREA[""]
+                PAD["padding\ninner spacing — background fills here"]
+                subgraph CORE[""]
+                    CONT["content\ntext · image · children"]
+                end
+            end
+        end
+    end
+
+    style MAR fill:#FFF9C4,color:#333
+    style BOR fill:#FFCCBC,color:#333
+    style PAD fill:#C8E6C9,color:#333
+    style CONT fill:#BBDEFB,color:#333
+```
+
 | | `padding` | `border` | `margin` |
 |-|----------|---------|---------|
 | Background colour fills | ✅ Yes | N/A | ❌ No (always transparent) |
@@ -206,5 +243,25 @@ Examples:
   border: 1px solid; /* visual boundary */
   margin: 8px;       /* outer space — transparent */
 }
+```
+
+---
+
+## CSS-D1 — Browser Rendering Pipeline
+
+```mermaid
+flowchart LR
+    HTML[HTML\nparsed] --> DOM[DOM Tree\nnodes + structure]
+    CSS[CSS\nparsed] --> CSSOM[CSSOM\nstyles per node]
+    DOM --> RT[Render Tree\nvisible nodes + styles]
+    CSSOM --> RT
+    RT --> LAYOUT[Layout\ncalculate positions & sizes]
+    LAYOUT --> PAINT[Paint\ndraw pixels]
+    PAINT --> COMP[Composite\nlayers merged → screen]
+
+    style HTML fill:#FF9800,color:#fff
+    style CSS fill:#2196F3,color:#fff
+    style RT fill:#9C27B0,color:#fff
+    style COMP fill:#4CAF50,color:#fff
 ```
 

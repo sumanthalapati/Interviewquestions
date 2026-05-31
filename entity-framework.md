@@ -664,6 +664,21 @@ stateDiagram-v2
 
 ---
 
+## EF-C0 — LINQ to SQL Pipeline
+
+```mermaid
+flowchart LR
+    A["IQueryable&lt;T&gt;\n(LINQ query written in C#)"]
+    --> B["Expression Tree built\n(compiler captures lambda as data)"]
+    --> C["Query Provider\n(EF Core DbContext)"]
+    --> D["SQL Generation\n(translate expression → SQL string)"]
+    --> E["Execute against Database\n(ADO.NET DbCommand)"]
+    --> F["Materialise results\n(map rows → C# objects)"]
+    --> G["Return IEnumerable&lt;T&gt; / List&lt;T&gt;"]
+```
+
+---
+
 ## EF-C1 — EF Core vs Dapper vs ADO.NET
 
 | | EF Core | Dapper | ADO.NET |

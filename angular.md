@@ -1146,6 +1146,28 @@ export class UsersModule {}
 export class AdminModule {}
 ```
 
+```mermaid
+flowchart TD
+    A["@NgModule({ ... })"] --> B["declarations\nComponents, Directives, Pipes\nthat belong to this module"]
+    A --> C["imports\nOther NgModules whose\nexported items are needed here"]
+    A --> D["exports\nDeclarations this module\nmakes available to importers"]
+    A --> E["providers\nServices registered in\nthis module's injector"]
+    A --> F["bootstrap\nRoot component (AppModule only)"]
+
+    B --> G["Registered in module's\ncompilation context"]
+    C --> H["SharedModule, RouterModule,\nHttpClientModule, etc."]
+    D --> I["Re-exported for use in\nother modules that import this one"]
+    E --> J["Service instances scoped\nto this module's injector tree"]
+    F --> K["Angular creates and inserts\nthis component into index.html"]
+
+    style A fill:#c62828,color:#fff
+    style B fill:#1565c0,color:#fff
+    style C fill:#1b5e20,color:#fff
+    style D fill:#4a148c,color:#fff
+    style E fill:#e65100,color:#fff
+    style F fill:#880e4f,color:#fff
+```
+
 ---
 
 ### Q32. What is a standalone component (Angular 14+) and how does it differ from a module-based component?
@@ -1721,6 +1743,104 @@ export class StarRatingComponent implements ControlValueAccessor {
 // Usage — works with both reactive and template-driven forms:
 // <app-star-rating formControlName="rating"></app-star-rating>
 // <app-star-rating [(ngModel)]="model.rating"></app-star-rating>
+```
+
+---
+
+## 6.4 Form Validation Patterns
+
+### Q44b. How do you display validation errors in Angular reactive forms?
+
+**Answer:**
+Access a control via `form.controls.fieldName` or `form.get('field')` and check its `errors` object combined with `touched` or `dirty` — this prevents showing errors before the user has interacted. Built-in validators come from the `Validators` class. On submit, call `markAllAsTouched()` to reveal every error at once. Each control exposes status flags: `valid`, `invalid`, `pending`, `pristine`, `dirty`, `touched`, `untouched`.
+
+❌ **Wrong — errors shown immediately on page load:**
+```html
+<input formControlName="email">
+<span *ngIf="form.get('email')?.invalid">Email is required</span>
+```
+
+✅ **Correct — show errors only after interaction, reveal all on submit:**
+```html
+<form [formGroup]="form" (ngSubmit)="submit()">
+  <div>
+    <label for="email">Email</label>
+    <input id="email" formControlName="email" [class.is-invalid]="emailInvalid">
+    <div *ngIf="emailInvalid" class="error">
+      <span *ngIf="email.errors?.['required']">Email is required.</span>
+      <span *ngIf="email.errors?.['email']">Enter a valid email address.</span>
+    </div>
+  </div>
+
+  <div>
+    <label for="password">Password</label>
+    <input id="password" type="password" formControlName="password">
+    <div *ngIf="password.touched && password.invalid" class="error">
+      <span *ngIf="password.errors?.['required']">Password is required.</span>
+      <span *ngIf="password.errors?.['minlength']">
+        Minimum {{ password.errors?.['minlength'].requiredLength }} characters.
+      </span>
+    </div>
+  </div>
+
+  <!-- Cross-field group-level error -->
+  <div *ngIf="form.errors?.['passwordMismatch'] && form.touched" class="error">
+    Passwords do not match.
+  </div>
+
+  <button type="submit" [disabled]="form.invalid">Register</button>
+</form>
+```
+
+```typescript
+@Component({ standalone: true, imports: [ReactiveFormsModule] })
+export class RegisterComponent {
+  form = new FormGroup({
+    email:    new FormControl('', [Validators.required, Validators.email]),
+    password: new FormControl('', [Validators.required, Validators.minLength(8)]),
+    confirm:  new FormControl('', Validators.required),
+  }, { validators: passwordMatchValidator });
+
+  // Typed getters avoid repeated form.get() calls in template
+  get email()    { return this.form.controls.email; }
+  get password() { return this.form.controls.password; }
+
+  get emailInvalid() {
+    return this.email.invalid && (this.email.dirty || this.email.touched);
+  }
+
+  submit() {
+    if (this.form.invalid) {
+      this.form.markAllAsTouched(); // show all errors at once
+      return;
+    }
+    console.log(this.form.value);
+  }
+}
+```
+
+**Built-in validators quick reference:**
+
+| Validator | Usage | Error key |
+|---|---|---|
+| `required` | `Validators.required` | `errors?.['required']` |
+| `minLength(n)` | `Validators.minLength(3)` | `errors?.['minlength'].requiredLength` |
+| `maxLength(n)` | `Validators.maxLength(100)` | `errors?.['maxlength']` |
+| `email` | `Validators.email` | `errors?.['email']` |
+| `pattern(rx)` | `Validators.pattern(/^\d+$/)` | `errors?.['pattern']` |
+| `min(n)` | `Validators.min(0)` | `errors?.['min'].min` |
+| `max(n)` | `Validators.max(100)` | `errors?.['max'].max` |
+
+**Template-driven form validation** — uses directive-based validators and `#ref="ngModel"`:
+```html
+<form #f="ngForm" (ngSubmit)="f.valid && submit()">
+  <input name="email" ngModel required email #emailRef="ngModel">
+  <div *ngIf="emailRef.invalid && emailRef.touched">
+    <span *ngIf="emailRef.errors?.['required']">Required.</span>
+    <span *ngIf="emailRef.errors?.['email']">Invalid email.</span>
+  </div>
+  <button type="submit">Submit</button>
+</form>
 ```
 
 ---

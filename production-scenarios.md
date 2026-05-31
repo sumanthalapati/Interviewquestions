@@ -1204,3 +1204,83 @@ flowchart LR
     style OK2 fill:#4CAF50,color:#fff
 ```
 
+---
+
+## PS-D6 — Incident Response Flow
+
+```mermaid
+flowchart TD
+    A[Alert fires\nPagerDuty / Grafana] --> B[On-call engineer notified]
+    B --> C{Triage:\nSeverity?}
+    C -->|SEV1 — customer impact| D[Immediate mitigate\nrollback / feature flag off]
+    C -->|SEV2 — degraded| E[Investigate while\nservice limping]
+    D --> F[Root cause analysis\n5 Whys]
+    E --> F
+    F --> G[Permanent fix\ndeploy + test]
+    G --> H[Postmortem\nblameless · action items]
+
+    style A fill:#f44336,color:#fff
+    style D fill:#FF9800,color:#fff
+    style H fill:#4CAF50,color:#fff
+```
+
+---
+
+## PS-D7 — Blue/Green Deployment
+
+```mermaid
+flowchart TD
+    subgraph Before["Before swap"]
+        LB1[Load Balancer] -->|100% traffic| BLUE[Blue v1\nLIVE]
+        LB1 -.->|0% traffic| GREEN[Green v2\nidle — being deployed]
+    end
+
+    subgraph After["After swap"]
+        LB2[Load Balancer] -->|100% traffic| GREEN2[Green v2\nLIVE]
+        LB2 -.->|0% traffic — rollback ready| BLUE2[Blue v1\nidle standby]
+    end
+
+    Before -->|flip load balancer| After
+
+    style BLUE fill:#2196F3,color:#fff
+    style GREEN fill:#4CAF50,color:#fff
+    style GREEN2 fill:#4CAF50,color:#fff
+    style BLUE2 fill:#2196F3,color:#fff
+```
+
+---
+
+## PS-D8 — Canary Release
+
+```mermaid
+flowchart LR
+    T[All traffic] --> SPLIT{Traffic split}
+    SPLIT -->|95%| OLD[Old version\nstable]
+    SPLIT -->|5%| CANARY[Canary\nnew version]
+    CANARY --> M{Metrics OK?\nerror rate · latency}
+    M -->|Issues detected| ROLLBACK[Roll back canary\n0% traffic]
+    M -->|Healthy| INC[Increase to 20% → 50% → 100%]
+    INC --> RETIRE[Retire old version]
+
+    style ROLLBACK fill:#f44336,color:#fff
+    style RETIRE fill:#4CAF50,color:#fff
+    style CANARY fill:#FF9800,color:#fff
+```
+
+---
+
+## PS-D9 — Rollback Decision Tree
+
+```mermaid
+flowchart TD
+    DEP[Deployment completes] --> HC{Automatic\nhealth check}
+    HC -->|healthy — all probes pass| OK[✅ Deployment successful]
+    HC -->|unhealthy — probe fails| RT[Rollback trigger\nkubectl rollout undo]
+    RT --> PV[Previous version\nrestored]
+    PV --> ALERT[Alert on-call\npostmortem scheduled]
+
+    style OK fill:#4CAF50,color:#fff
+    style RT fill:#f44336,color:#fff
+    style PV fill:#FF9800,color:#fff
+```
+

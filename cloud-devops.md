@@ -87,6 +87,23 @@ docker compose up -d                 # run multi-container stack
 docker image prune                   # clean unused images
 ```
 
+### Docker Image Lifecycle
+
+```mermaid
+flowchart LR
+    A[Write Dockerfile] --> B[docker build]
+    B --> C[Image\nlocal]
+    C --> D[docker push]
+    D --> E[Registry\nACR / Docker Hub]
+    E --> F[docker pull]
+    F --> G[docker run]
+    G --> H[Container\nrunning]
+
+    style A fill:#4CAF50,color:#fff
+    style E fill:#2196F3,color:#fff
+    style H fill:#FF9800,color:#fff
+```
+
 ### Docker Compose (local dev)
 ```yaml
 # docker-compose.yml
@@ -217,6 +234,54 @@ spec:
         averageUtilization: 70         # scale out when avg CPU > 70%
 ```
 
+### Kubernetes Architecture
+
+```mermaid
+flowchart TD
+    subgraph CP["Control Plane"]
+        API[API Server] --> ETCD[etcd\ncluster state]
+        API --> SCHED[Scheduler\nassigns pods to nodes]
+        API --> CM[Controller Manager\ndesired vs actual state]
+    end
+
+    subgraph W1["Worker Node 1"]
+        KL1[kubelet] --> POD1[Pod\nContainer A]
+        KP1[kube-proxy\nnetwork rules]
+    end
+
+    subgraph W2["Worker Node 2"]
+        KL2[kubelet] --> POD2[Pod\nContainer B]
+        KP2[kube-proxy]
+    end
+
+    CP -->|schedule & manage| W1
+    CP -->|schedule & manage| W2
+
+    style CP fill:#1565C0,color:#fff
+    style W1 fill:#2E7D32,color:#fff
+    style W2 fill:#2E7D32,color:#fff
+```
+
+### K8s Pod Scheduling and Traffic Flow
+
+```mermaid
+flowchart LR
+    DEP[Deployment\ndeclares desired state] --> RS[ReplicaSet\nmaintains N replicas]
+    RS --> P1[Pod 1]
+    RS --> P2[Pod 2]
+    RS --> P3[Pod 3]
+    SVC[Service\nstable DNS + LB] --> P1
+    SVC --> P2
+    SVC --> P3
+    ING[Ingress\nHTTP routing rules] --> SVC
+    EXT[External Traffic\nbrowser / API client] --> ING
+
+    style DEP fill:#4CAF50,color:#fff
+    style SVC fill:#2196F3,color:#fff
+    style ING fill:#FF9800,color:#fff
+    style EXT fill:#9C27B0,color:#fff
+```
+
 ### Tradeoffs: Docker Compose vs Kubernetes
 | | Docker Compose | Kubernetes |
 |-|---------------|------------|
@@ -259,6 +324,22 @@ Code Push
     ├─ Blue-green or rolling deploy
     ├─ Health check validation
     └─ Alert if failure → auto-rollback
+```
+
+### CI/CD Pipeline Flow
+
+```mermaid
+flowchart LR
+    CC[Code commit\ngit push] --> BUILD[Build\ndotnet build]
+    BUILD --> UT[Unit tests\ndotnet test]
+    UT --> DB[Docker build\ndocker build]
+    DB --> PI[Push image\nto registry]
+    PI --> DS[Deploy to staging]
+    DS --> IT[Integration tests]
+    IT --> DP[Deploy to prod\nmanual gate]
+
+    style CC fill:#4CAF50,color:#fff
+    style DP fill:#FF9800,color:#fff
 ```
 
 ### Azure Pipelines YAML
@@ -1047,6 +1128,22 @@ public async Task<Order> CreateOrderAsync(CreateOrderCommand cmd)
 ```
 
 ---
+
+### Terraform Workflow
+
+```mermaid
+flowchart LR
+    HCL[Write HCL\n.tf files] --> INIT[terraform init\ndownload providers]
+    INIT --> PLAN[terraform plan\npreview changes]
+    PLAN --> REV{Review\nchanges}
+    REV -->|approved| APPLY[terraform apply\nprovision infra]
+    REV -->|rejected| HCL
+    APPLY --> INFRA[Infrastructure\ncreated / updated]
+
+    style HCL fill:#4CAF50,color:#fff
+    style REV fill:#FF9800,color:#fff
+    style INFRA fill:#2196F3,color:#fff
+```
 
 ## CD-C8 — Infrastructure as Code: Terraform vs Bicep vs ARM vs Pulumi
 

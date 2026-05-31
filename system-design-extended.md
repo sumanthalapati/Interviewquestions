@@ -1304,6 +1304,31 @@ Orchestration:
   Full flow visible in one place — easy to track, audit, retry
 ```
 
+```mermaid
+flowchart TD
+    subgraph Choreo["Choreography-Based Saga"]
+        direction LR
+        OS["Order Service\nPublishes: OrderPlaced"] -->|event| PS["Payment Service\nPublishes: PaymentProcessed"]
+        PS -->|event| IS["Inventory Service\nPublishes: StockReserved"]
+        IS -->|event| SS["Shipping Service\nPublishes: OrderShipped"]
+        PS -->|failure event| OS2["Order Service\nCompensate: CancelOrder"]
+    end
+
+    subgraph Orch["Orchestration-Based Saga"]
+        direction TB
+        SAGA["Saga Orchestrator\n(State Machine)"] -->|1. ProcessPayment| P2["Payment Service"]
+        P2 -->|success| SAGA
+        SAGA -->|2. ReserveStock| I2["Inventory Service"]
+        I2 -->|success| SAGA
+        SAGA -->|3. ScheduleShipment| S2["Shipping Service"]
+        S2 -->|success| SAGA
+        SAGA -->|on failure: compensate| COMP["Compensating Transactions\n(Refund / Restock)"]
+    end
+
+    style SAGA fill:#4dabf7,color:#fff
+    style COMP fill:#ff6b6b,color:#fff
+```
+
 ---
 
 ## SD-C2 — At-Least-Once vs Exactly-Once vs At-Most-Once Delivery

@@ -871,6 +871,29 @@ order1.DefaultItems.Add(new("Widget", 29.99m, 2)); // safe — doesn't affect te
 
 The **Single Responsibility Principle** states that a class should have only one reason to change — meaning it should have only one job or responsibility. "Responsibility" here means a *reason to change*: if a class changes both when business logic changes and when persistence changes, it has two responsibilities. SRP doesn't mean a class has only one method; it means all its methods serve a single, cohesive purpose. Violating SRP creates classes that are harder to test, harder to understand, and more fragile — a change to email logic can break database logic if they share a class.
 
+```mermaid
+flowchart TD
+    subgraph BAD["❌ SRP Violation — One class, multiple reasons to change"]
+        US["UserService\n• SaveUser() — DB concern\n• SendWelcomeEmail() — email concern\n• ValidateUser() — validation concern"]
+        DB_CHANGE["DB schema changes"] -->|"forces change to"| US
+        SMTP_CHANGE["SMTP settings change"] -->|"forces change to"| US
+        VAL_CHANGE["Validation rules change"] -->|"forces change to"| US
+    end
+
+    subgraph GOOD["✅ SRP Satisfied — One class, one reason to change"]
+        REPO["SqlUserRepository\n• Save(user)\n• GetById(id)"]
+        EMAIL["SmtpEmailService\n• SendWelcomeEmail(user)"]
+        VALIDATOR["UserValidator\n• IsValid(user)"]
+        ORCHESTRATOR["UserRegistrationService\n• Register(user)"]
+        ORCHESTRATOR --> REPO
+        ORCHESTRATOR --> EMAIL
+        ORCHESTRATOR --> VALIDATOR
+    end
+
+    style BAD fill:#4a0000,color:#fff
+    style GOOD fill:#003300,color:#fff
+```
+
 ❌ **Bad — UserService with multiple responsibilities:**
 ```csharp
 public class UserService
@@ -1003,6 +1026,28 @@ public class UserRegistrationService
 
 The **Open/Closed Principle** states that software entities (classes, modules, functions) should be **open for extension** but **closed for modification**. Once a class is tested and deployed, you should be able to add new behavior by adding new code — not by changing existing code. The classical implementation uses the Strategy or Template Method patterns: define an interface for behavior, then add new behaviors as new classes. The key insight is that `if`/`switch` statements that check a type or category are almost always an OCP violation — every new case requires modifying the original code.
 
+```mermaid
+flowchart TD
+    subgraph BAD["❌ OCP Violation — Modify existing code to add new tier"]
+        DC["DiscountCalculator\n(existing tested class)"]
+        ADD_EMP["Add Employee tier"] -->|"must MODIFY"| DC
+        DC --> SW["switch(customerType)\n• Regular → 0%\n• Silver → 5%\n• Gold → 10%\n• Platinum → 20%\n+ Employee → 30% ← edit here"]
+    end
+
+    subgraph GOOD["✅ OCP Satisfied — Extend without modifying"]
+        IFACE["IDiscountStrategy\n+CalculateDiscount(price)"]
+        IFACE <|.. REG["NoDiscount (Regular)"]
+        IFACE <|.. SIL["SilverDiscount"]
+        IFACE <|.. GOLD["GoldDiscount"]
+        IFACE <|.. PLAT["PlatinumDiscount"]
+        IFACE <|.. EMP["EmployeeDiscount ← NEW class\n(zero changes to existing code)"]
+        DCC["DiscountCalculator\n(never changes)"] --> IFACE
+    end
+
+    style BAD fill:#4a0000,color:#fff
+    style GOOD fill:#003300,color:#fff
+```
+
 ❌ **Bad — discount calculator with switch per customer type:**
 ```csharp
 public class DiscountCalculator
@@ -1095,6 +1140,31 @@ public class DiscountCalculator
 ### Q3: What is the Liskov Substitution Principle (LSP)?
 
 The **Liskov Substitution Principle** (formulated by Barbara Liskov) states that objects of a subclass must be substitutable for objects of their superclass without altering the correctness of the program. In practical terms: if code works with a `Rectangle`, it must work equally well with any `Rectangle` subclass. Subtypes must honor the parent's *behavioral contract*, not just its method signatures. Violations manifest as: strengthening preconditions (requiring more from callers), weakening postconditions (promising less to callers), or changing invariants. The classic violation is Square overriding Rectangle because it breaks the independent-width-height invariant.
+
+```mermaid
+flowchart TD
+    subgraph BAD["❌ LSP Violation — Square breaks Rectangle contract"]
+        RECT["Rectangle\n• Width (settable independently)\n• Height (settable independently)\n• Area() = Width × Height"]
+        SQ["Square : Rectangle\n• Setting Width ALSO sets Height\n• Breaks postcondition:\n  'Width and Height are independent'"]
+        RECT --> SQ
+        FUNC["ResizeAndCheck(Rectangle r)\n  r.Width = 4\n  r.Height = 5\n  expect Area = 20"]
+        SQ -->|"Area = 25 ≠ 20\nLSP VIOLATED"| FUNC
+    end
+
+    subgraph GOOD["✅ LSP Satisfied — Common interface, no forced inheritance"]
+        ISHAPE["IShape\n+Area()\n+Perimeter()"]
+        RECTG["Rectangle\n• Width, Height independent\n• Area = Width × Height"]
+        SQG["Square\n• Side only\n• Area = Side × Side"]
+        ISHAPE <|.. RECTG
+        ISHAPE <|.. SQG
+        PRINTINFO["PrintShapeInfo(IShape s)\n  → always correct for both"]
+        RECTG --> PRINTINFO
+        SQG --> PRINTINFO
+    end
+
+    style BAD fill:#4a0000,color:#fff
+    style GOOD fill:#003300,color:#fff
+```
 
 ❌ **Bad — Square/Rectangle LSP violation:**
 ```csharp
@@ -1196,6 +1266,34 @@ PrintShapeInfo(new Square(5));        // Area: 25.00, Perimeter: 20.00
 
 The **Interface Segregation Principle** states that no client should be forced to depend on methods it does not use. Large ("fat") interfaces force implementors to provide stubs or throw `NotImplementedException` for methods irrelevant to them. This is a design smell — it indicates the interface is doing too much. The fix is to split fat interfaces into smaller, cohesive ones. Clients then depend only on the interfaces they actually use. ISP is closely related to SRP — an interface with too many methods often represents too many responsibilities.
 
+```mermaid
+flowchart TD
+    subgraph BAD["❌ ISP Violation — Fat interface forces stubs"]
+        IWORKER["IWorker\n• Work()\n• Eat()    ← not for robots\n• Sleep()  ← not for robots\n• TakeBreak() ← not for robots"]
+        HUMAN1["HumanWorker\nimplements all ✅"]
+        ROBOT1["RobotWorker\nWork() ✅\nEat() → NotImplementedException ❌\nSleep() → NotImplementedException ❌\nTakeBreak() → NotImplementedException ❌"]
+        IWORKER --> HUMAN1
+        IWORKER --> ROBOT1
+    end
+
+    subgraph GOOD["✅ ISP Satisfied — Segregated interfaces"]
+        IW["IWorkable\n• Work()"]
+        IF["IFeedable\n• Eat()"]
+        IS["ISleepable\n• Sleep()"]
+        IB["IBreakable\n• TakeBreak()"]
+        HUMAN2["HumanWorker\nimplements all 4"]
+        ROBOT2["RobotWorker\nimplements IWorkable only"]
+        IW --> HUMAN2
+        IF --> HUMAN2
+        IS --> HUMAN2
+        IB --> HUMAN2
+        IW --> ROBOT2
+    end
+
+    style BAD fill:#4a0000,color:#fff
+    style GOOD fill:#003300,color:#fff
+```
+
 ❌ **Bad — fat IWorker interface forces Robot to implement Eat():**
 ```csharp
 public interface IWorker
@@ -1292,6 +1390,30 @@ public class BreakCoordinator
 ### Q5: What is the Dependency Inversion Principle (DIP)?
 
 The **Dependency Inversion Principle** has two rules: (1) High-level modules should not depend on low-level modules — both should depend on abstractions. (2) Abstractions should not depend on details — details should depend on abstractions. This inverts the natural tendency to have business logic depend directly on infrastructure. The result is that business logic (high-level policy) is insulated from changes to databases, APIs, or frameworks (low-level details). DIP is the foundation of dependency injection and makes systems testable, flexible, and replaceable.
+
+```mermaid
+flowchart TD
+    subgraph BAD["❌ DIP Violation — High-level depends on low-level concrete"]
+        OS_BAD["OrderService\n(high-level policy)"]
+        SQLREPO["SqlOrderRepository\n(low-level detail)"]
+        OS_BAD -->|"directly instantiates\nnew SqlOrderRepository()"| SQLREPO
+        NOTE1["❌ Can't swap to MongoDB\n❌ Can't test without real SQL Server\n❌ High-level tied to infrastructure"]
+    end
+
+    subgraph GOOD["✅ DIP Satisfied — Both depend on abstraction"]
+        ABSTRACT["IOrderRepository\n(abstraction)\n• SaveAsync()\n• GetByIdAsync()"]
+        OS_GOOD["OrderService\n(high-level)\ndepends on IOrderRepository"]
+        SQL_IMPL["SqlOrderRepository\n(low-level SQL impl)"]
+        MONGO_IMPL["InMemoryOrderRepository\n(test/swap impl)"]
+        OS_GOOD -->|"depends on"| ABSTRACT
+        SQL_IMPL -->|"implements"| ABSTRACT
+        MONGO_IMPL -->|"implements"| ABSTRACT
+        NOTE2["✅ Swap SQL→MongoDB: 1 DI line\n✅ Tests use InMemory\n✅ OrderService never changes"]
+    end
+
+    style BAD fill:#4a0000,color:#fff
+    style GOOD fill:#003300,color:#fff
+```
 
 ❌ **Bad — OrderService directly depends on SqlOrderRepository:**
 ```csharp
@@ -1966,6 +2088,47 @@ public class AppConfigFromEnvironment : IAppConfig
 
 The **Factory Method** pattern defines an interface for creating an object but lets subclasses (or configuration) decide which class to instantiate. Instead of calling `new ConcreteClass()` directly, clients call a factory method that returns an interface type. This shifts the creation decision away from the caller, enabling the Open/Closed Principle for object creation: new types can be created by adding new factory methods or configurations without changing client code. In .NET, this often takes the form of a factory class registered in DI rather than classical inheritance-based factory.
 
+```mermaid
+classDiagram
+    class ILogger {
+        <<interface>>
+        +Log(message) void
+        +LogWarning(message) void
+        +LogError(message, ex) void
+    }
+    class ILoggerFactory {
+        <<interface>>
+        +CreateLogger(name) ILogger
+    }
+    class ConfigurableLoggerFactory {
+        -_settings : LoggerSettings
+        +CreateLogger(name) ILogger
+    }
+    class ConsoleLogger {
+        +Log(message) void
+        +LogWarning(message) void
+        +LogError(message, ex) void
+    }
+    class FileLogger {
+        -_path : string
+        +Log(message) void
+        +LogWarning(message) void
+        +LogError(message, ex) void
+    }
+    class DatabaseLogger {
+        -_connectionString : string
+        +Log(message) void
+        +LogWarning(message) void
+        +LogError(message, ex) void
+    }
+    ILoggerFactory <|.. ConfigurableLoggerFactory : implements
+    ILogger <|.. ConsoleLogger : implements
+    ILogger <|.. FileLogger : implements
+    ILogger <|.. DatabaseLogger : implements
+    ConfigurableLoggerFactory ..> ILogger : creates
+    note for ConfigurableLoggerFactory "Factory decides WHICH\nconcrete logger to create\nbased on configuration"
+```
+
 ❌ **Bad — caller directly decides which logger to create:**
 ```csharp
 public class Application
@@ -2066,6 +2229,70 @@ logger.Log("Order placed");
 ### Q3: What is the Abstract Factory pattern?
 
 The **Abstract Factory** pattern creates *families* of related objects without specifying their concrete classes. It groups related factories under one interface, guaranteeing that the created objects work together. The classic example is UI themes: a `WindowsUIFactory` creates controls that look and behave like Windows, while a `MacUIFactory` creates Mac-style controls. Client code works exclusively through the abstract factory interface and never knows which concrete family it is using. This ensures consistency — you can't accidentally mix a Mac button with a Windows checkbox.
+
+```mermaid
+classDiagram
+    class IUIFactory {
+        <<interface>>
+        +CreateButton() IButton
+        +CreateCheckbox() ICheckbox
+    }
+    class IButton {
+        <<interface>>
+        +Render() void
+        +OnClick(handler) void
+    }
+    class ICheckbox {
+        <<interface>>
+        +Render() void
+        +IsChecked bool
+        +SetChecked(value) void
+    }
+    class WindowsUIFactory {
+        +CreateButton() IButton
+        +CreateCheckbox() ICheckbox
+    }
+    class MacUIFactory {
+        +CreateButton() IButton
+        +CreateCheckbox() ICheckbox
+    }
+    class WindowsButton {
+        +Render() void
+        +OnClick(handler) void
+    }
+    class MacButton {
+        +Render() void
+        +OnClick(handler) void
+    }
+    class WindowsCheckbox {
+        +IsChecked bool
+        +Render() void
+        +SetChecked(value) void
+    }
+    class MacCheckbox {
+        +IsChecked bool
+        +Render() void
+        +SetChecked(value) void
+    }
+    class LoginForm {
+        -_loginButton : IButton
+        -_rememberMe : ICheckbox
+        +LoginForm(factory)
+        +Render() void
+    }
+    IUIFactory <|.. WindowsUIFactory : implements
+    IUIFactory <|.. MacUIFactory : implements
+    IButton <|.. WindowsButton : implements
+    IButton <|.. MacButton : implements
+    ICheckbox <|.. WindowsCheckbox : implements
+    ICheckbox <|.. MacCheckbox : implements
+    WindowsUIFactory ..> WindowsButton : creates
+    WindowsUIFactory ..> WindowsCheckbox : creates
+    MacUIFactory ..> MacButton : creates
+    MacUIFactory ..> MacCheckbox : creates
+    LoginForm --> IUIFactory : uses
+    note for IUIFactory "Abstract Factory guarantees\nconsistent product families —\ncan't mix Win button with Mac checkbox"
+```
 
 ❌ **Bad — mixing UI families:**
 ```csharp
@@ -2186,6 +2413,44 @@ form.Render();
 
 The **Builder** pattern constructs complex objects step by step. It separates the construction algorithm from the representation, allowing the same construction process to create different representations. Builders are ideal when an object has many optional parameters (avoiding "telescoping constructors"), when construction involves multiple steps with validation between steps, or when you want a fluent, readable API for object creation. A **Director** class can encapsulate common construction sequences.
 
+```mermaid
+classDiagram
+    class Email {
+        +From : string
+        +To : string
+        +Subject : string
+        +Body : string
+        +Cc : List~string~
+        +Bcc : List~string~
+        +IsHtml : bool
+        +Attachments : List~string~
+        +Priority : int
+        -Email(builder)
+    }
+    class Builder {
+        +From : string
+        +To : string
+        +Subject : string
+        +Body : string
+        +WithFrom(from) Builder
+        +WithTo(to) Builder
+        +WithSubject(subject) Builder
+        +WithBody(body) Builder
+        +WithCc(cc) Builder
+        +AsHtml() Builder
+        +WithAttachment(path) Builder
+        +WithPriority(p) Builder
+        +Build() Email
+    }
+    class EmailDirector {
+        +CreateWelcomeEmail(to, name) Builder
+    }
+    Email *-- Builder : "nested class"
+    EmailDirector ..> Builder : configures
+    Builder ..> Email : builds
+    note for Builder "Each method returns `this`\nfor fluent chaining.\nBuild() validates & constructs."
+```
+
 ❌ **Bad — telescoping constructors:**
 ```csharp
 public class Email
@@ -2286,6 +2551,31 @@ var email = new Email.Builder()
 ### Q5: What is the Prototype pattern?
 
 The **Prototype** pattern specifies the kinds of objects to create using a prototypical instance, and creates new objects by copying (cloning) that prototype. It is useful when object creation is expensive (DB queries, file I/O, complex calculations), when you need many similar objects that differ only slightly, or when the class to instantiate is specified at runtime. The key decision is always **deep vs shallow clone** — prototypes almost always need deep clones to be independent copies.
+
+```mermaid
+classDiagram
+    class ReportTemplate {
+        <<abstract>>
+        +Charts : List~ChartConfig~
+        +Tables : List~TableConfig~
+        +Style : StyleConfig
+        +Name : string
+        +Clone() ReportTemplate*
+    }
+    class CorporateReportTemplate {
+        +CorporateReportTemplate()
+        +Clone() CorporateReportTemplate
+    }
+    class ReportTemplateRegistry {
+        -_prototypes : Dictionary
+        +Register(template) void
+        +Get(name) ReportTemplate
+    }
+    ReportTemplate <|-- CorporateReportTemplate : extends
+    ReportTemplateRegistry ..> ReportTemplate : "clones & returns"
+    note for ReportTemplateRegistry "Expensive init runs ONCE.\nAll consumers get cheap clones."
+    note for CorporateReportTemplate "Clone() deep-copies all\ncollections so each caller\ngets an independent copy."
+```
 
 ❌ **Bad — re-creating expensive objects from scratch:**
 ```csharp

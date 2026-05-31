@@ -868,6 +868,50 @@ public class OrdersV2Controller : ControllerBase { }
 
 ---
 
+## API-D0a — REST Resource Hierarchy
+
+```mermaid
+flowchart TD
+    ROOT["/api"] --> USERS["/users\nGET list, POST create"]
+    USERS --> USER["/users/{id}\nGET, PUT, DELETE"]
+    USER --> ORDERS["/users/{id}/orders\nGET list orders for user"]
+    ORDERS --> ORDER["/users/{id}/orders/{orderId}\nGET, PUT, DELETE specific order"]
+    ORDER --> ITEMS["/users/{id}/orders/{orderId}/items\nGET line items"]
+
+    style ROOT fill:#4dabf7,color:#fff
+    style USERS fill:#339af0,color:#fff
+    style USER fill:#228be6,color:#fff
+    style ORDERS fill:#1c7ed6,color:#fff
+    style ORDER fill:#1864ab,color:#fff
+    style ITEMS fill:#145490,color:#fff
+```
+
+---
+
+## API-D0b — OAuth2 Authorization Code Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant CA as Client App
+    participant AS as Auth Server (e.g. Azure AD)
+    participant RS as Resource Server (API)
+
+    U->>CA: Click "Login with Google"
+    CA->>AS: Redirect — GET /authorize?client_id=...&response_type=code&scope=openid
+    AS->>U: Show login / consent screen
+    U->>AS: Enter credentials + grant consent
+    AS->>CA: Redirect back — GET /callback?code=AUTH_CODE
+    CA->>AS: POST /token { code, client_id, client_secret }
+    AS-->>CA: { access_token, id_token, refresh_token }
+    CA->>RS: GET /api/profile — Authorization: Bearer access_token
+    RS->>RS: Verify JWT signature + claims
+    RS-->>CA: 200 OK { user data }
+    CA-->>U: Show user profile
+```
+
+---
+
 ## API-D1 — REST Request Lifecycle
 
 ```mermaid

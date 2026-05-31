@@ -58,6 +58,28 @@ public int[] TwoSum(int[] nums, int target) {
 }
 ```
 
+```mermaid
+flowchart TD
+    KEY([key]) --> HASH[hash function
+hash key % capacity]
+    HASH --> IDX[index in array]
+    IDX --> CHECK{Slot empty?}
+    CHECK -->|YES| STORE[Store key-value
+at index]
+    CHECK -->|NO - collision!| RESOLVE{Resolution strategy}
+    RESOLVE -->|Chaining| CHAIN[Append to
+linked list at index
+O 1 avg insert]
+    RESOLVE -->|Open Addressing| PROBE[Probe next slot
+linear or quadratic
+until empty found]
+
+    style HASH fill:#2196F3,color:#fff
+    style CHAIN fill:#4CAF50,color:#fff
+    style PROBE fill:#FF9800,color:#fff
+    style RESOLVE fill:#f44336,color:#fff
+```
+
 ---
 
 ## 1.2 Maximum Subarray (Kadane's Algorithm)
@@ -413,6 +435,42 @@ public IList<IList<int>> LevelOrder(TreeNode root) {
 }
 ```
 
+```mermaid
+flowchart LR
+    subgraph INORDER["In-Order (L → Root → R)
+Result: sorted for BST"]
+        IO1[Go Left] --> IO2[Visit Root]
+        IO2 --> IO3[Go Right]
+    end
+
+    subgraph PREORDER["Pre-Order (Root → L → R)
+Result: copy/serialize tree"]
+        PR1[Visit Root] --> PR2[Go Left]
+        PR2 --> PR3[Go Right]
+    end
+
+    subgraph POSTORDER["Post-Order (L → R → Root)
+Result: delete tree / evaluate expr"]
+        PO1[Go Left] --> PO2[Go Right]
+        PO2 --> PO3[Visit Root]
+    end
+
+    subgraph EXAMPLE["Example Tree: root=4, left=2, right=6"]
+        T4([4]) --> T2([2])
+        T4 --> T6([6])
+        T2 --> T1([1])
+        T2 --> T3([3])
+    end
+
+    INORDER -.->|"visits: 1,2,3,4,6"| EXAMPLE
+    PREORDER -.->|"visits: 4,2,1,3,6"| EXAMPLE
+    POSTORDER -.->|"visits: 1,3,2,6,4"| EXAMPLE
+
+    style INORDER fill:#2196F3,color:#fff
+    style PREORDER fill:#4CAF50,color:#fff
+    style POSTORDER fill:#FF9800,color:#fff
+```
+
 ---
 
 ## 4.2 Validate Binary Search Tree
@@ -666,6 +724,29 @@ public int BinarySearch(int[] nums, int target) {
 }
 ```
 
+```mermaid
+flowchart TD
+    START([Binary Search
+Sorted Array]) --> INIT[left=0, right=len-1]
+    INIT --> LOOP{left <= right?}
+    LOOP -->|NO| NOTFOUND([Return -1
+Not Found])
+    LOOP -->|YES| MID[mid = left + right-left / 2]
+    MID --> CMP{arr[mid] vs target}
+    CMP -->|arr[mid] == target| FOUND([Return mid
+Found!])
+    CMP -->|arr[mid] < target| GORIGHT[left = mid + 1
+Search right half]
+    CMP -->|arr[mid] > target| GOLEFT[right = mid - 1
+Search left half]
+    GORIGHT --> LOOP
+    GOLEFT --> LOOP
+
+    style FOUND fill:#4CAF50,color:#fff
+    style NOTFOUND fill:#f44336,color:#fff
+    style MID fill:#2196F3,color:#fff
+```
+
 ---
 
 ## 6.2 Quick Sort
@@ -708,6 +789,38 @@ void QuickSort(int[] arr, int low, int high) {
         QuickSort(arr, pi + 1, high);
     }
 }
+```
+
+```mermaid
+flowchart TD
+    ARR(["[38, 27, 43, 3, 9, 82, 10]"]) --> D1{Divide}
+    D1 --> L1(["[38, 27, 43]"])
+    D1 --> R1(["[3, 9, 82, 10]"])
+    L1 --> L2(["[38]"])
+    L1 --> L3(["[27, 43]"])
+    R1 --> R2(["[3, 9]"])
+    R1 --> R3(["[82, 10]"])
+    L3 --> L3A(["[27]"])
+    L3 --> L3B(["[43]"])
+    R2 --> R2A(["[3]"])
+    R2 --> R2B(["[9]"])
+    R3 --> R3A(["[82]"])
+    R3 --> R3B(["[10]"])
+    L3A --> M1(["merge → [27,43]"])
+    L3B --> M1
+    R2A --> M2(["merge → [3,9]"])
+    R2B --> M2
+    R3A --> M3(["merge → [10,82]"])
+    R3B --> M3
+    L2 --> M4(["merge → [27,38,43]"])
+    M1 --> M4
+    M2 --> M5(["merge → [3,9,10,82]"])
+    M3 --> M5
+    M4 --> FINAL(["merge → [3,9,10,27,38,43,82]"])
+    M5 --> FINAL
+
+    style FINAL fill:#4CAF50,color:#fff
+    style ARR fill:#2196F3,color:#fff
 ```
 
 ---
@@ -1882,6 +1995,31 @@ queue.Dequeue(); // 1 (FIFO)
 var deque = new LinkedList<int>(); // .NET deque
 deque.AddFirst(1); deque.AddLast(2);
 deque.RemoveFirst(); // 1
+```
+
+```mermaid
+flowchart LR
+    subgraph STACK["Stack — LIFO (Last In, First Out)"]
+        direction TB
+        SP[Push 1] --> SP2[Push 2]
+        SP2 --> SP3[Push 3]
+        SP3 --> POP[Pop → returns 3
+top of stack]
+        POP --> POP2[Pop → returns 2]
+        style SP fill:#2196F3,color:#fff
+        style POP fill:#f44336,color:#fff
+    end
+
+    subgraph QUEUE["Queue — FIFO (First In, First Out)"]
+        direction TB
+        QE[Enqueue 1] --> QE2[Enqueue 2]
+        QE2 --> QE3[Enqueue 3]
+        QE3 --> DQ[Dequeue → returns 1
+front of queue]
+        DQ --> DQ2[Dequeue → returns 2]
+        style QE fill:#4CAF50,color:#fff
+        style DQ fill:#f44336,color:#fff
+    end
 ```
 
 ---

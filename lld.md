@@ -306,6 +306,36 @@ builder.Services.AddSingleton<IConfigManager, ConfigManager>();
 
 ## 2.2 Factory Method Pattern
 
+```mermaid
+classDiagram
+    class ILoggerFactory {
+        <<interface>>
+        +Create() ILogger
+    }
+    class ILogger {
+        <<interface>>
+        +Log(message) void
+    }
+    class FileLoggerFactory {
+        +Create() ILogger
+    }
+    class DatabaseLoggerFactory {
+        +Create() ILogger
+    }
+    class FileLogger {
+        +Log(message) void
+    }
+    class DatabaseLogger {
+        +Log(message) void
+    }
+    ILoggerFactory <|.. FileLoggerFactory : implements
+    ILoggerFactory <|.. DatabaseLoggerFactory : implements
+    ILogger <|.. FileLogger : implements
+    ILogger <|.. DatabaseLogger : implements
+    FileLoggerFactory ..> FileLogger : creates
+    DatabaseLoggerFactory ..> DatabaseLogger : creates
+```
+
 ### Q7. When do you use a Factory Method and how is it implemented?
 
 **Answer:**
@@ -347,6 +377,31 @@ ILogger logger = factories["file"].Create();
 ---
 
 ## 2.3 Builder Pattern
+
+```mermaid
+classDiagram
+    class HttpRequestBuilder {
+        -string _url
+        -string _method
+        -Dictionary _headers
+        -string _body
+        -int _timeout
+        +WithUrl(url) HttpRequestBuilder
+        +WithMethod(method) HttpRequestBuilder
+        +WithHeader(key, value) HttpRequestBuilder
+        +WithBody(body) HttpRequestBuilder
+        +WithTimeout(seconds) HttpRequestBuilder
+        +Build() HttpRequest
+    }
+    class HttpRequest {
+        +string Url
+        +string Method
+        +Dictionary Headers
+        +string Body
+        +int Timeout
+    }
+    HttpRequestBuilder ..> HttpRequest : builds
+```
 
 ### Q8. When should you use the Builder pattern?
 

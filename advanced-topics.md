@@ -1202,3 +1202,118 @@ flowchart LR
     style BUS fill:#9C27B0,color:#fff
 ```
 
+---
+
+## ADV-D7 — Distributed Tracing
+
+```mermaid
+flowchart LR
+    REQ[Incoming Request\ntraceId: abc-123] --> A
+
+    subgraph A["Service A\nspan: 0-50ms"]
+        A1[Process request]
+    end
+
+    A --> B
+
+    subgraph B["Service B\nspan: 10-30ms"]
+        B1[Call database]
+    end
+
+    B --> C
+
+    subgraph C["Service C\nspan: 20-45ms"]
+        C1[Send notification]
+    end
+
+    A --> AGG[Trace aggregated\nin Jaeger / Zipkin]
+    B --> AGG
+    C --> AGG
+
+    AGG --> VIZ[Visual timeline\nwhere is the bottleneck?]
+
+    style REQ fill:#4CAF50,color:#fff
+    style AGG fill:#2196F3,color:#fff
+    style VIZ fill:#FF9800,color:#fff
+```
+
+---
+
+## ADV-D8 — Saga Choreography Pattern
+
+```mermaid
+flowchart LR
+    A[Order Service\nOrderCreated event] -->|publishes| EB1[[Event Bus]]
+    EB1 -->|listens| B[Payment Service\nProcessPayment]
+    B -->|success: publishes| EB2[[Event Bus]]
+    EB2 -->|listens| C[Inventory Service\nReserveStock]
+    C -->|success: publishes| EB3[[Event Bus]]
+    EB3 -->|listens| D[Shipping Service\nScheduleShipment]
+
+    B -->|failure: publishes| COMP[[Compensating events]]
+    COMP -->|CancelOrder| A
+
+    style A fill:#4CAF50,color:#fff
+    style COMP fill:#f44336,color:#fff
+```
+
+---
+
+## ADV-D9 — Saga Orchestration Pattern
+
+```mermaid
+flowchart TD
+    ORCH[Saga Orchestrator] --> A[Call Service A\nProcessPayment]
+    A -->|success| B[Call Service B\nReserveInventory]
+    B -->|success| C[Call Service C\nScheduleShipping]
+    C -->|success| DONE[✅ Saga complete]
+
+    B -->|failure| COMP_A[Call compensate A\nRefundPayment]
+    COMP_A --> FAIL[❌ Saga failed\nroll back completed steps]
+
+    style ORCH fill:#2196F3,color:#fff
+    style DONE fill:#4CAF50,color:#fff
+    style FAIL fill:#f44336,color:#fff
+    style COMP_A fill:#FF9800,color:#fff
+```
+
+---
+
+## ADV-D10 — Event-Driven Architecture
+
+```mermaid
+flowchart LR
+    P1[Producer\nOrder Service] -->|publish event| EB[[Event Bus\nKafka / RabbitMQ]]
+    P2[Producer\nPayment Service] -->|publish event| EB
+
+    EB -->|subscribe| C1[Consumer 1\nInventory Service]
+    EB -->|subscribe| C2[Consumer 2\nNotification Service]
+    EB -->|subscribe| C3[Consumer 3\nAnalytics Service]
+
+    style EB fill:#9C27B0,color:#fff
+    style P1 fill:#4CAF50,color:#fff
+    style P2 fill:#4CAF50,color:#fff
+    style C1 fill:#2196F3,color:#fff
+    style C2 fill:#2196F3,color:#fff
+    style C3 fill:#2196F3,color:#fff
+```
+
+---
+
+## ADV-D11 — Eventual Consistency Flow
+
+```mermaid
+flowchart LR
+    W[Write to Service A\nSQL write succeeds] --> PUB[Publish async event\nto message bus]
+    PUB --> SB[Service B\nreceives event]
+    SB --> UPD[Service B updates\nits read model]
+    UPD --> CONV[Data converges\nover time\nmilliseconds → seconds]
+
+    W -.->|at this moment| STALE[Service B still has\nold data — stale read]
+    CONV --> CONS[Eventually consistent\nboth services agree]
+
+    style W fill:#4CAF50,color:#fff
+    style STALE fill:#FF9800,color:#fff
+    style CONS fill:#2196F3,color:#fff
+```
+

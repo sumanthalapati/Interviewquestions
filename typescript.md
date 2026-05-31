@@ -1195,6 +1195,31 @@ type StringFields = OnlyStrings<{ id: number; name: string; email: string }>;
 // { name: string; email: string } ✅
 ```
 
+```mermaid
+flowchart TD
+    A["Source interface T\n{ id: string; name: string; active: boolean }"] --> B["keyof T\n'id' | 'name' | 'active'"]
+    B --> C["[K in keyof T]\nIterate over each key K"]
+    C --> D["T[K]\nIndexed access — value type\nfor each key"]
+
+    D --> E["Add modifier\n+? or +readonly"]
+    D --> F["Remove modifier\n-? or -readonly"]
+    D --> G["Transform value\nT[K] | null, Array<T[K]>, etc."]
+    D --> H["Remap key\nas \`get\${Capitalize<K>}\`"]
+    D --> I["Filter key\nT[K] extends string ? K : never"]
+
+    E --> J["Partial<T> / Readonly<T>\nall fields optional or readonly"]
+    F --> K["Required<T> / Mutable<T>\nall fields required or writable"]
+    G --> L["Nullable<T>\n{ [K in keyof T]: T[K] | null }"]
+    H --> M["Getters<T>\n{ getName: () => string; ... }"]
+    I --> N["OnlyStrings<T>\n{ name: string; email: string }"]
+
+    style A fill:#1565c0,color:#fff
+    style B fill:#1976d2,color:#fff
+    style C fill:#1e88e5,color:#fff
+    style J fill:#2e7d32,color:#fff
+    style K fill:#2e7d32,color:#fff
+```
+
 ---
 
 ### Q9. How do template literal types combine with generics? Show `type EventName<T extends string> = \`on${Capitalize<T>}\``.
@@ -1443,6 +1468,37 @@ function requireUser(user: NonNullable<MaybeUser>): void {
 type InternalEvent = 'sys:init' | 'sys:cleanup';
 type PublicEvent   = 'user:login' | 'user:logout' | 'sys:init';
 type ExposedEvents = Exclude<PublicEvent, InternalEvent>; // 'user:login' | 'user:logout' ✅
+```
+
+```mermaid
+flowchart TD
+    T["Source type T"] --> P["Partial&lt;T&gt;\nAll properties → optional\n+? modifier on every key"]
+    T --> R["Required&lt;T&gt;\nAll properties → required\n-? modifier on every key"]
+    T --> RO["Readonly&lt;T&gt;\nAll properties → readonly\n+readonly on every key"]
+    T --> MU["Mutable&lt;T&gt; (custom)\nAll properties → writable\n-readonly on every key"]
+
+    T --> PI["Pick&lt;T, K&gt;\nKeep only keys in K\nnew type with subset of T"]
+    T --> OM["Omit&lt;T, K&gt;\nRemove keys in K\nnew type without those keys"]
+    K["Key union K"] --> PI
+    K --> OM
+
+    U["Union type U"] --> EX["Exclude&lt;T, U&gt;\nRemove from T members\nassignable to U"]
+    U --> ET["Extract&lt;T, U&gt;\nKeep in T only members\nassignable to U"]
+    T --> EX
+    T --> ET
+    T --> NN["NonNullable&lt;T&gt;\nExclude&lt;T, null | undefined&gt;"]
+
+    KV["Key K, Value V"] --> RC["Record&lt;K, V&gt;\nObject with keys K\nall values typed V"]
+
+    style T fill:#1565c0,color:#fff
+    style P fill:#2e7d32,color:#fff
+    style R fill:#2e7d32,color:#fff
+    style RO fill:#2e7d32,color:#fff
+    style PI fill:#4a148c,color:#fff
+    style OM fill:#4a148c,color:#fff
+    style EX fill:#880e4f,color:#fff
+    style ET fill:#880e4f,color:#fff
+    style RC fill:#e65100,color:#fff
 ```
 
 ---
@@ -2053,6 +2109,27 @@ function MinLength(min: number) {
     };
   };
 }
+```
+
+```mermaid
+flowchart TD
+    A["TypeScript loads class definition"] --> B["Step 1: Property Decorators\n@MinLength(3) on 'name'\n(evaluated per property, top-to-bottom)"]
+    B --> C["Step 2: Method Decorators\n@Log on getUser()\n(evaluated per method, top-to-bottom)"]
+    C --> D["Step 3: Parameter Decorators\n@Inject() on constructor params\n(innermost parameter first)"]
+    D --> E["Step 4: Class Decorator\n@sealed applied to the class\n(outermost/last to execute)"]
+
+    E --> F["Runtime class is the\ndecorated/replaced version"]
+
+    G["Stacked decorators on same target\n@A @B @C method()"] --> H["Evaluation order: A → B → C\n(top to bottom, like function composition)"]
+    H --> I["Application order: C → B → A\n(bottom to top — innermost first)"]
+
+    style A fill:#1565c0,color:#fff
+    style B fill:#1976d2,color:#fff
+    style C fill:#1e88e5,color:#fff
+    style D fill:#0288d1,color:#fff
+    style E fill:#01579b,color:#fff
+    style F fill:#2e7d32,color:#fff
+    style I fill:#880e4f,color:#fff
 ```
 
 ---
