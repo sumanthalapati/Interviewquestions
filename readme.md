@@ -1171,6 +1171,128 @@ public class Person
 
 ---
 
+## 1.10 Common C# Operations
+
+### How do you handle common string operations in C#?
+
+**Answer:**
+The `string` class is immutable — every operation returns a new string. Use `StringBuilder` for concatenation in loops. For search, split, join, and transformation, the built-in methods cover most cases. Prefer string interpolation (`$""`) over `string.Format` for readability.
+
+```csharp
+string s = "  Hello, World!  ";
+
+// ── Inspection ──────────────────────────────────────────────
+s.Length;                        // 18
+s.Contains("World");             // true
+s.StartsWith("  Hello");         // true
+s.EndsWith("!");                 // false (trailing spaces)
+s.IndexOf("World");              // 9
+s.IsNullOrEmpty(s);              // false
+string.IsNullOrWhiteSpace(s);    // false
+
+// ── Transformation ──────────────────────────────────────────
+s.Trim();                        // "Hello, World!"
+s.TrimStart(); s.TrimEnd();      // trims one side
+s.ToUpper(); s.ToLower();        // "HELLO, WORLD!"
+s.Replace("World", "C#");        // "  Hello, C#!  "
+s.Substring(2, 5);               // "Hello"
+s[2..7];                         // "Hello" — range operator (C#8+)
+
+// ── Split & Join ─────────────────────────────────────────────
+string csv  = "a,b,c,d";
+string[] parts = csv.Split(',');           // ["a", "b", "c", "d"]
+string joined  = string.Join(" | ", parts);// "a | b | c | d"
+
+// ── Formatting ───────────────────────────────────────────────
+string name  = "Alice";
+int    age   = 30;
+string msg1  = $"Name: {name}, Age: {age}";        // interpolation ✅
+string msg2  = string.Format("Name: {0}", name);   // old style
+string padded = age.ToString("D4");                 // "0030"
+string money  = 1234.5m.ToString("C");             // "$1,234.50"
+
+// ── Comparison ───────────────────────────────────────────────
+string a = "hello", b = "HELLO";
+a.Equals(b, StringComparison.OrdinalIgnoreCase);   // true ✅
+a == b;                                             // false (case-sensitive)
+string.Compare(a, b, ignoreCase: true);             // 0 (equal)
+```
+
+**StringBuilder — use for loop concatenation:**
+```csharp
+// ❌ O(n²) — creates a new string object each iteration
+string result = "";
+for (int i = 0; i < 10_000; i++) result += i;
+
+// ✅ O(n) — single buffer
+var sb = new StringBuilder(capacity: 10_000);
+for (int i = 0; i < 10_000; i++) sb.Append(i);
+string result = sb.ToString();
+```
+
+---
+
+### How do you handle common collection operations in C#?
+
+**Answer:**
+The most common collection operations come from LINQ (`System.Linq`). Key concepts: LINQ is lazy — it builds a query that executes only when enumerated (`.ToList()`, `foreach`). `IEnumerable<T>` is for in-memory, `IQueryable<T>` is for databases (translates to SQL).
+
+```csharp
+var products = new List<Product>
+{
+    new("Laptop",  1200, "Electronics"),
+    new("Phone",    800, "Electronics"),
+    new("Desk",     350, "Furniture"),
+    new("Chair",    200, "Furniture"),
+};
+
+// ── Filter ────────────────────────────────────────────────────
+var expensive = products.Where(p => p.Price > 500);
+
+// ── Project / Map ────────────────────────────────────────────
+var names = products.Select(p => p.Name);
+var dtos  = products.Select(p => new { p.Name, p.Price });  // anonymous type
+
+// ── Sort ──────────────────────────────────────────────────────
+var sorted  = products.OrderBy(p => p.Price);
+var sorted2 = products.OrderByDescending(p => p.Price).ThenBy(p => p.Name);
+
+// ── Aggregate ─────────────────────────────────────────────────
+int    count    = products.Count();
+decimal total   = products.Sum(p => p.Price);
+decimal avg     = products.Average(p => p.Price);
+decimal max     = products.Max(p => p.Price);
+Product cheapest = products.MinBy(p => p.Price)!;      // .NET 6+
+
+// ── Group ─────────────────────────────────────────────────────
+var byCategory = products.GroupBy(p => p.Category);
+foreach (var group in byCategory)
+    Console.WriteLine($"{group.Key}: {group.Count()} items, avg ${group.Average(p => p.Price):F0}");
+
+// ── Check existence ────────────────────────────────────────────
+bool anyOver1k = products.Any(p => p.Price > 1000);    // true
+bool allPositive = products.All(p => p.Price > 0);     // true
+
+// ── Find single item ──────────────────────────────────────────
+var laptop = products.FirstOrDefault(p => p.Name == "Laptop"); // null if not found
+var single = products.Single(p => p.Name == "Desk");           // throws if 0 or 2+
+
+// ── Dictionary lookup ─────────────────────────────────────────
+var priceMap = products.ToDictionary(p => p.Name, p => p.Price);
+var lookup   = products.ToLookup(p => p.Category);  // multi-value per key
+```
+
+**Null safety in collections:**
+```csharp
+// Null-conditional before LINQ avoids NullReferenceException:
+int count = items?.Count() ?? 0;
+
+// Filtering nulls:
+var nonNull = items.Where(x => x is not null);
+```
+
+---
+
 # 2. ASP.NET Core / Web API
 
 ---

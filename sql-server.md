@@ -2890,6 +2890,89 @@ CREATE TABLE Employees (EmpID INT PRIMARY KEY, ZipCode CHAR(5) REFERENCES ZipCod
 
 ---
 
+### How do you identify and eliminate data redundancy through normalization?
+
+**Answer:**
+Data redundancy — storing the same fact in multiple rows or columns — causes three types of anomalies:
+- **Update anomaly**: change data in one row but forget others → inconsistency
+- **Insert anomaly**: can't add a fact without unrelated required data
+- **Delete anomaly**: deleting a row accidentally loses an unrelated fact
+
+The fix is normalization: decompose the table until each fact is stored exactly once. Follow these steps:
+
+```sql
+-- ❌ BEFORE — unnormalized Orders table (all facts crammed together)
+-- OrderID | CustomerName | CustomerEmail    | ProductName | Category    | Qty | Price
+-- 1       | Alice        | alice@email.com  | Laptop      | Electronics | 1   | 1200
+-- 1       | Alice        | alice@email.com  | Mouse       | Electronics | 2   | 25
+-- 2       | Bob          | bob@email.com    | Desk        | Furniture   | 1   | 350
+
+-- Problems:
+--   Update anomaly: Alice changes email → must update EVERY row for Alice
+--   Insert anomaly: can't add a Product without an Order
+--   Delete anomaly: delete order 2 → lose Bob's contact info entirely
+```
+
+**Step 1 — 1NF: Atomic values, no repeating groups**
+```sql
+-- Each cell holds a single value; each row is uniquely identifiable (PK exists)
+-- The table above already satisfies 1NF (no multi-valued cells)
+```
+
+**Step 2 — 2NF: Remove partial dependencies (non-key col depends on PART of composite PK)**
+```sql
+-- PK is (OrderID, ProductName) — a composite key
+-- CustomerName depends ONLY on OrderID (not on ProductName) → partial dependency
+
+-- ✅ Split: extract customer info to its own table
+CREATE TABLE Customers (
+    CustomerID   INT          PRIMARY KEY IDENTITY,
+    Name         VARCHAR(100) NOT NULL,
+    Email        VARCHAR(200) NOT NULL UNIQUE
+);
+
+CREATE TABLE Orders (
+    OrderID    INT PRIMARY KEY IDENTITY,
+    CustomerID INT NOT NULL REFERENCES Customers(CustomerID)
+);
+
+CREATE TABLE OrderItems (
+    OrderID   INT NOT NULL REFERENCES Orders(OrderID),
+    ProductID INT NOT NULL REFERENCES Products(ProductID),
+    Qty       INT NOT NULL,
+    PRIMARY KEY (OrderID, ProductID)
+);
+```
+
+**Step 3 — 3NF: Remove transitive dependencies (non-key → non-key)**
+```sql
+-- Category depends on ProductName, not on OrderID — transitive dependency
+-- ProductName → Category (non-key → non-key)
+
+-- ✅ Split: extract product and category into own tables
+CREATE TABLE Categories (
+    CategoryID   INT          PRIMARY KEY IDENTITY,
+    CategoryName VARCHAR(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE Products (
+    ProductID  INT            PRIMARY KEY IDENTITY,
+    Name       VARCHAR(200)   NOT NULL,
+    Price      DECIMAL(10,2)  NOT NULL,
+    CategoryID INT            NOT NULL REFERENCES Categories(CategoryID)
+);
+-- Now each fact lives exactly once — no redundancy
+```
+
+**Result:** Normalized schema eliminates all three anomalies:
+- Change Alice's email → update one row in `Customers`
+- Insert a Product independently of Orders
+- Delete an Order without losing Customer or Product data
+
+**When to denormalize:** OLAP/reporting workloads prefer wider denormalized tables to avoid expensive joins. Use indexed views or separate reporting tables rather than denormalizing your OLTP schema.
+
+---
+
 ### Q82. What is the difference between surrogate keys and natural keys, and when do you use IDENTITY, SEQUENCE, or NEWSEQUENTIALID()?
 
 **Answer:** A natural key is a real-world attribute (e.g., Email, SSN) used as the primary key; it has business meaning but can change, be duplicated across systems, or be too wide for foreign key joins. A surrogate key is a system-generated meaningless integer (INT IDENTITY or BIGINT) that never changes and is compact for joins. SEQUENCE is a database object that generates values independently of a table — useful for cross-table sequences or when you need the next value before inserting. NEWSEQUENTIALID() generates GUIDs in sequential order, reducing index fragmentation compared to NEWID() (which is random).
