@@ -3941,3 +3941,656 @@ ON Orders (CustomerId, Total, Status, CreatedAt);
 SELECT YEAR(CreatedAt), SUM(Total) FROM Orders GROUP BY YEAR(CreatedAt);
 ```
 
+
+---
+
+## 11. Transaction Management: Commit, Rollback & Savepoints
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/t-sql/language-elements/transactions-transact-sql
+> 📚 WAL internals: https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-transaction-log-architecture-and-management-guide
+
+---
+
+### Q101. Explain the full transaction lifecycle — BEGIN, COMMIT, ROLLBACK, SAVEPOINT
+
+**Answer:** A transaction is a unit of work that is either fully committed or fully rolled back — the ACID "Atomicity" guarantee. SQL Server supports both explicit transactions (you write BEGIN TRANSACTION / COMMIT / ROLLBACK) and implicit transactions (SET IMPLICIT_TRANSACTIONS ON, where DML statements auto-open a transaction). Leaving a transaction open without committing or rolling back holds locks and blocks other sessions — one of the most common causes of production blocking.
+
+**What happens physically at each step:**
+
+| Step | What SQL Server Does |
+|------|---------------------|
+| `BEGIN TRANSACTION` | Marks a log sequence number (LSN) as the transaction start in the Write-Ahead Log (WAL); `@@TRANCOUNT` increments to 1 |
+| DML (`INSERT`/`UPDATE`/`DELETE`) | Changes written to WAL **before** modifying data pages in the buffer pool (write-ahead); row locked |
+| `COMMIT` | WAL records are hardened to disk (flushed); data pages may still be in buffer pool (lazy write); locks released; `@@TRANCOUNT` decrements |
+| `ROLLBACK` | WAL UNDO records are applied in reverse order; data pages restored to pre-transaction state; locks released; `@@TRANCOUNT` set to 0 |
+
+**Explicit vs Implicit transactions:**
+- **Explicit:** You control the boundary with `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`.
+- **Implicit:** `SET IMPLICIT_TRANSACTIONS ON` — every DML auto-starts a transaction; you must still manually `COMMIT` or `ROLLBACK`. Dangerous in application code — easy to forget.
+
+❌ **Wrong — no error handling, transaction left open on failure:**
+```sql
+-- No TRY/CATCH, no ROLLBACK on error
+BEGIN TRANSACTION
+
+    INSERT INTO Orders (CustomerId, Total) VALUES (1, 500.00);
+    -- If this next statement errors (e.g., constraint violation),
+    -- the transaction is left open, holding locks on Orders!
+    INSERT INTO OrderItems (OrderId, ProductId, Qty) VALUES (@@IDENTITY, 999, 1);
+
+COMMIT TRANSACTION
+-- If error occurs between BEGIN and COMMIT: transaction stays open,
+-- locks are held, blocking other sessions until connection drops
+```
+
+```csharp
+// C# — no rollback on exception
+using var conn = new SqlConnection(connectionString);
+conn.Open();
+var cmd = conn.CreateCommand();
+cmd.CommandText = "BEGIN TRANSACTION; INSERT INTO Orders...; INSERT INTO OrderItems...;";
+cmd.ExecuteNonQuery(); // if second INSERT throws, transaction is open
+// connection.Close() eventually rolls back but only when connection is recycled — too late
+```
+
+✅ **Correct — TRY/CATCH with ROLLBACK in T-SQL and C#:**
+```sql
+-- T-SQL: always use SET XACT_ABORT ON + TRY/CATCH
+SET XACT_ABORT ON;   -- auto-rollback on any runtime error
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+        INSERT INTO Orders (CustomerId, Total) VALUES (1, 500.00);
+        DECLARE @OrderId INT = SCOPE_IDENTITY();
+        INSERT INTO OrderItems (OrderId, ProductId, Qty) VALUES (@OrderId, 42, 1);
+
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0
+        ROLLBACK TRANSACTION;  -- undo all changes atomically
+
+    THROW;  -- re-raise original error to caller
+END CATCH;
+```
+
+```csharp
+// C# — use SqlTransaction with try/catch/finally
+using var conn = new SqlConnection(connectionString);
+await conn.OpenAsync();
+using var tx = conn.BeginTransaction();
+try
+{
+    var cmd1 = new SqlCommand("INSERT INTO Orders (CustomerId,Total) VALUES (@cid,@total)", conn, tx);
+    cmd1.Parameters.AddWithValue("@cid", 1);
+    cmd1.Parameters.AddWithValue("@total", 500.00m);
+    await cmd1.ExecuteNonQueryAsync();
+
+    var orderId = (int)(await new SqlCommand("SELECT SCOPE_IDENTITY()", conn, tx).ExecuteScalarAsync()!);
+
+    var cmd2 = new SqlCommand("INSERT INTO OrderItems (OrderId,ProductId,Qty) VALUES (@oid,@pid,@qty)", conn, tx);
+    cmd2.Parameters.AddWithValue("@oid", orderId);
+    cmd2.Parameters.AddWithValue("@pid", 42);
+    cmd2.Parameters.AddWithValue("@qty", 1);
+    await cmd2.ExecuteNonQueryAsync();
+
+    await tx.CommitAsync();   // all-or-nothing
+}
+catch
+{
+    await tx.RollbackAsync(); // undo everything on any error
+    throw;
+}
+```
+
+```mermaid
+flowchart TD
+    A([BEGIN TRANSACTION]) --> B[Execute DML statements\nWrites go to WAL first]
+    B --> C{Error\noccurred?}
+    C -->|No| D[COMMIT\nHarden WAL · Release locks]
+    C -->|Yes — with XACT_ABORT ON| E[ROLLBACK\nApply UNDO log · Release locks]
+    C -->|Yes — no error handling| F[❌ Transaction left OPEN\nLocks held · Blocks other sessions]
+    D --> G([✅ Changes visible\nto other sessions])
+    E --> H([✅ DB restored to\npre-transaction state])
+    F --> I([⚠️ Blocking until\nconnection timeout])
+
+    style A fill:#FF9800,color:#fff
+    style D fill:#2d6a4f,color:#fff
+    style E fill:#40916c,color:#fff
+    style F fill:#d62828,color:#fff
+    style G fill:#2d6a4f,color:#fff
+    style H fill:#40916c,color:#fff
+    style I fill:#d62828,color:#fff
+```
+
+---
+
+### Q102. What is a savepoint and when should you use it?
+
+**Answer:** A savepoint marks an intermediate point within a transaction that you can roll back to without abandoning the entire transaction. In SQL Server the syntax is `SAVE TRANSACTION <name>` and `ROLLBACK TRANSACTION <name>`. This is useful when a transaction has multiple independent logical steps and a failure in a later step should not discard the successful earlier steps.
+
+**Important SQL Server behaviour — nested transactions:**
+SQL Server does not truly support nested transactions. `BEGIN TRANSACTION` inside an existing transaction increments `@@TRANCOUNT` but does NOT create an independent inner transaction. Only the outermost `COMMIT` (when `@@TRANCOUNT` reaches 0) actually commits. An inner `ROLLBACK` without a savepoint name rolls back the **entire** transaction to the outermost `BEGIN`, regardless of `@@TRANCOUNT`.
+
+```sql
+-- @@TRANCOUNT behaviour:
+BEGIN TRANSACTION      -- @@TRANCOUNT = 1
+  BEGIN TRANSACTION    -- @@TRANCOUNT = 2 (NOT a real nested transaction)
+  COMMIT               -- @@TRANCOUNT = 1 (NOT committed yet!)
+COMMIT                 -- @@TRANCOUNT = 0 → actually commits
+
+-- Inner ROLLBACK without savepoint name:
+BEGIN TRANSACTION      -- @@TRANCOUNT = 1
+  BEGIN TRANSACTION    -- @@TRANCOUNT = 2
+  ROLLBACK             -- @@TRANCOUNT = 0 → rolls back EVERYTHING (outer too!)
+```
+
+❌ **Wrong — rolling back entire transaction when only a sub-step failed:**
+```sql
+BEGIN TRANSACTION;
+
+    -- Step 1: record audit log entry
+    INSERT INTO AuditLog (Action, UserId) VALUES ('ORDER_CREATED', 1);
+
+    -- Step 2: try to apply a promotional discount (optional, non-critical)
+    BEGIN TRY
+        INSERT INTO DiscountApplications (OrderId, Code) VALUES (101, 'INVALID_CODE');
+    END TRY
+    BEGIN CATCH
+        -- No savepoint used — forced to roll back everything
+        ROLLBACK TRANSACTION;  -- ❌ also loses the AuditLog insert!
+        THROW;
+    END CATCH;
+
+COMMIT TRANSACTION;
+```
+
+✅ **Correct — savepoint allows partial rollback, preserving earlier work:**
+```sql
+BEGIN TRANSACTION;
+
+    -- Step 1: record audit log entry (must be preserved regardless)
+    INSERT INTO AuditLog (Action, UserId) VALUES ('ORDER_CREATED', 1);
+
+    -- Mark savepoint AFTER step 1 is done
+    SAVE TRANSACTION AfterAuditLog;
+
+    -- Step 2: try optional promotional discount
+    BEGIN TRY
+        INSERT INTO DiscountApplications (OrderId, Code) VALUES (101, 'PROMO10');
+    END TRY
+    BEGIN CATCH
+        -- Roll back only to savepoint — AuditLog insert is preserved
+        ROLLBACK TRANSACTION AfterAuditLog;  -- ✅ partial rollback
+        -- Log the discount failure, continue
+    END CATCH;
+
+    -- Step 3: update order status (continues even if discount failed)
+    UPDATE Orders SET Status = 'CONFIRMED' WHERE OrderId = 101;
+
+COMMIT TRANSACTION;  -- commits AuditLog + Order update; discount attempt was rolled back
+```
+
+```mermaid
+flowchart TD
+    A([BEGIN TRANSACTION]) --> B[Step 1: INSERT AuditLog]
+    B --> C[SAVE TRANSACTION AfterAuditLog]
+    C --> D[Step 2: INSERT DiscountApplications]
+    D --> E{Step 2\nsucceeded?}
+    E -->|Yes| F[Step 3: UPDATE Orders]
+    E -->|No — partial failure| G[ROLLBACK TRANSACTION AfterAuditLog\nOnly undoes Step 2]
+    G --> F
+    F --> H[COMMIT TRANSACTION\nAll remaining work committed]
+
+    style A fill:#FF9800,color:#fff
+    style C fill:#2196F3,color:#fff
+    style G fill:#e07b39,color:#fff
+    style H fill:#2d6a4f,color:#fff
+```
+
+---
+
+### Q103. What is the Write-Ahead Log (WAL) and how does it ensure durability?
+
+**Answer:** The Write-Ahead Log (WAL) is the fundamental durability mechanism in SQL Server (and most RDBMS). The rule is: **log records must be written to disk before the corresponding data page is modified** (hence "write-ahead"). This ensures that even if the server crashes mid-transaction, the log contains enough information to either REDO committed changes or UNDO uncommitted changes during crash recovery.
+
+**WAL components:**
+
+| Component | Description |
+|-----------|-------------|
+| **Log record** | Each change (INSERT/UPDATE/DELETE) generates a log record with old value (for UNDO) and new value (for REDO) |
+| **LSN (Log Sequence Number)** | Monotonically increasing identifier for each log record |
+| **Log buffer** | In-memory buffer for log records; flushed to disk on COMMIT, checkpoint, or when full |
+| **Checkpoint** | SQL Server periodically writes all dirty pages from buffer pool to data files and records the checkpoint LSN; limits how far back crash recovery must replay |
+| **Buffer pool** | In-memory cache of data pages; pages can be "dirty" (modified but not yet written to disk) |
+
+**REDO and UNDO logs:**
+- **REDO (roll-forward):** After a crash, apply all log records for committed transactions that weren't yet written to data files — ensures committed work is not lost.
+- **UNDO (roll-back):** After a crash, reverse all log records for transactions that were active at crash time and never committed — ensures partial work is removed.
+
+**Checkpoint mechanism:**
+```
+Without checkpoint: crash recovery must replay ALL log records since DB creation
+With checkpoint:    crash recovery only replays records after last checkpoint LSN
+→ Checkpoints bound recovery time (SQL Server auto-checkpoints every ~1 min by default)
+```
+
+❌ **Wrong — assuming in-memory write = durable:**
+```csharp
+// Developer assumes writing to buffer pool = committed
+// In reality, data page may stay in memory for minutes before checkpoint writes it to disk
+// If server crashes in this window → data page change is LOST
+// (WAL saves it — but if WAL buffer not flushed either → both lost)
+
+// This is why COMMIT flushes the LOG buffer (not the data buffer):
+// - Log flush on COMMIT = durability guaranteed
+// - Data page write = eventually lazy-written by checkpoint
+```
+
+✅ **Correct — understanding what COMMIT actually guarantees:**
+```sql
+-- On COMMIT, SQL Server guarantees:
+-- 1. All log records for this transaction are flushed to disk (log file)
+-- 2. @@TRANCOUNT returns to 0
+-- 3. Locks released
+
+-- Data pages may still be in buffer pool (NOT yet on disk) — that is fine:
+-- If crash occurs, REDO log replay will re-apply the changes to data pages on recovery.
+
+-- To verify log usage and VLFs:
+DBCC LOGINFO;                          -- view Virtual Log Files
+SELECT * FROM sys.dm_db_log_info(DB_ID());  -- SQL 2016+: detailed log info
+
+-- Monitor log space:
+DBCC SQLPERF(LOGSPACE);
+```
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant LB as Log Buffer (Memory)
+    participant LF as Log File (Disk)
+    participant BP as Buffer Pool (Memory)
+    participant DF as Data File (Disk)
+
+    App->>LB: BEGIN TRANSACTION
+    App->>LB: Write log record (UNDO+REDO) for INSERT
+    App->>BP: Modify data page in buffer pool (dirty page)
+    App->>LB: COMMIT → flush log buffer to disk
+
+    LB->>LF: ✅ Log flushed — durability guaranteed
+
+    Note over BP,DF: Data page still in memory (dirty)
+    Note over LF: Crash occurs here ↓
+
+    rect rgb(80,30,30)
+        Note over LF,DF: CRASH RECOVERY
+        LF->>DF: REDO: re-apply committed log records to data files
+        LF->>BP: UNDO: reverse uncommitted transactions
+    end
+
+    Note over DF: ✅ Data consistent — WAL saved it
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-transaction-log-architecture-and-management-guide
+
+---
+
+### Q104. What are distributed transactions and the two-phase commit (2PC) protocol?
+
+**Answer:** A distributed transaction spans multiple independent resource managers (separate databases, message queues, etc.) and must ensure atomicity across all of them — either all commit or all roll back. The **Two-Phase Commit (2PC)** protocol coordinates this.
+
+**Phase 1 — Prepare (voting):**
+The coordinator sends a `PREPARE` message to all participants. Each participant writes its changes to its local WAL and votes `YES` (can commit) or `NO` (cannot — constraint violation, timeout, etc.). A `YES` vote is a promise to commit when told to.
+
+**Phase 2 — Commit or Abort:**
+If all votes are `YES`, coordinator sends `COMMIT` to all participants. If any vote is `NO`, coordinator sends `ABORT` to all. Each participant then commits or rolls back locally and releases locks.
+
+**Problems with 2PC:**
+- **Blocking:** If the coordinator crashes after Phase 1 but before Phase 2, participants are stuck holding locks — they voted YES but haven't heard the final decision. They cannot unilaterally commit or abort.
+- **SPOF on coordinator:** Coordinator failure halts all participants.
+- **Latency:** Two network round trips minimum; in geo-distributed systems this adds significant latency.
+
+**Alternatives:**
+- **Saga pattern:** Break the distributed transaction into a sequence of local transactions, each with a compensating transaction. No locking across services. Eventual consistency — not ACID. Better for microservices.
+- **Outbox pattern:** Write event to local DB outbox table in same local transaction; separate relay publishes to message bus.
+
+❌ **Wrong — distributed transaction without coordination (inconsistency risk):**
+```csharp
+// Service A writes to its DB
+await _orderDb.ExecuteAsync("INSERT INTO Orders...");
+
+// Service B writes to its DB — no coordination with Service A
+await _inventoryDb.ExecuteAsync("UPDATE Inventory SET Stock = Stock - 1...");
+
+// If Service B call fails → Order exists but inventory not decremented → INCONSISTENCY
+// No way to automatically roll back Service A from Service B's failure
+```
+
+✅ **Correct — using Saga pattern for distributed consistency:**
+```csharp
+// Saga orchestrator (or choreography via events)
+// Step 1: Create Order (local transaction)
+var orderId = await _orderService.CreateOrderAsync(orderRequest);
+// Publishes OrderCreated event to message bus
+
+// Step 2: Reserve Inventory (local transaction in inventory service)
+// Inventory service handles OrderCreated → reserves stock
+// Publishes InventoryReserved event
+
+// Step 3: Charge Payment
+// Payment service handles InventoryReserved → charges card
+// If payment FAILS → publish PaymentFailed event
+
+// Compensating transactions on failure:
+// - InventoryService handles PaymentFailed → releases reserved stock
+// - OrderService handles PaymentFailed → marks order as Cancelled
+// Each service handles its own local rollback → eventual consistency
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P1 as Participant 1\n(Orders DB)
+    participant P2 as Participant 2\n(Inventory DB)
+
+    Note over C,P2: Phase 1 — PREPARE
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P1->>P1: Write to WAL, lock rows
+    P2->>P2: Write to WAL, lock rows
+    P1-->>C: VOTE YES
+    P2-->>C: VOTE YES
+
+    Note over C,P2: Phase 2 — COMMIT
+    C->>P1: COMMIT
+    C->>P2: COMMIT
+    P1->>P1: Commit local transaction
+    P2->>P2: Commit local transaction
+    P1-->>C: ACK
+    P2-->>C: ACK
+
+    Note over C: ✅ Distributed commit complete
+
+    Note over C,P2: Failure scenario
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P2-->>C: VOTE NO (constraint violation)
+    C->>P1: ABORT
+    C->>P2: ABORT
+    Note over P1,P2: ✅ Both rolled back
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/standard/data/transactions/implementing-an-implicit-transaction-using-transaction-scope
+
+---
+
+### Q105. How do you handle long-running transactions and lock contention?
+
+**Answer:** Long-running transactions hold locks for their entire duration, blocking other sessions from reading or writing the same rows. They are one of the top causes of production incidents. The strategies below reduce lock duration, reduce the scope of locks, or eliminate read locks entirely.
+
+**Lock escalation:** SQL Server automatically escalates many row locks to a table lock when the number of locks on a table exceeds a threshold (~5,000 locks per table). Table locks block all other access. To prevent unwanted escalation: `ALTER TABLE Orders SET (LOCK_ESCALATION = DISABLE)` — but use carefully, as it increases per-row lock memory.
+
+**Pessimistic concurrency (default):** Read acquires a shared lock; write acquires an exclusive lock. Readers block writers and vice versa at the locked row level. Deadlocks can occur when two sessions hold locks the other needs.
+
+**Optimistic concurrency (MVCC / row versioning):** Readers never block writers. SQL Server implements this via `READ_COMMITTED_SNAPSHOT ISOLATION (RCSI)` — instead of shared locks on reads, SQL Server serves a row's last committed version from `tempdb`. Writers still take exclusive locks.
+
+```sql
+-- Enable RCSI for a database (online operation, no downtime required)
+ALTER DATABASE MyDB SET READ_COMMITTED_SNAPSHOT ON;
+-- After this: SELECT statements under READ COMMITTED isolation no longer take shared locks
+-- → readers never block writers, writers never block readers
+-- → dramatic reduction in blocking for typical OLTP workloads
+```
+
+**Tips for short transactions:**
+1. Do all data preparation (lookups, calculations) OUTSIDE the transaction; only open transaction for the actual write.
+2. Never include user interaction, HTTP calls, or file I/O inside a transaction — the user might walk away.
+3. Keep batch deletes/updates chunked (e.g., delete 1,000 rows per transaction) rather than one giant transaction.
+4. Use `SET LOCK_TIMEOUT` to prevent indefinite waiting: `SET LOCK_TIMEOUT 5000` (ms).
+
+❌ **Wrong — user interaction inside transaction, long-running lock:**
+```csharp
+// Transaction opened BEFORE showing confirmation dialog to user
+using var tx = conn.BeginTransaction();
+var cmd = new SqlCommand("SELECT * FROM Orders WHERE Id = @id FOR UPDATE", conn, tx);
+// ... show data to user, wait for them to click "Confirm"
+// User goes to lunch → transaction holds lock for 30 minutes → entire table blocked
+await tx.CommitAsync(); // only called after user clicks button
+```
+
+✅ **Correct — optimistic concurrency: read → check version → update or retry:**
+```sql
+-- Read phase (OUTSIDE transaction — no lock held)
+SELECT OrderId, Status, RowVersion FROM Orders WHERE OrderId = 101;
+-- User reviews data... takes 10 seconds... no locks held
+
+-- Write phase (short transaction — lock held for milliseconds)
+BEGIN TRANSACTION;
+    UPDATE Orders
+    SET    Status = 'SHIPPED'
+    WHERE  OrderId = 101
+    AND    RowVersion = @capturedRowVersion;  -- optimistic check: has it changed?
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        ROLLBACK;
+        -- Return "conflict" to caller → retry with fresh read
+        THROW 50409, 'Conflict: order was modified by another session. Please retry.', 1;
+    END
+COMMIT;
+```
+
+```mermaid
+flowchart TD
+    A([Start]) --> B[READ row + capture RowVersion\nNo transaction open — no locks held]
+    B --> C[User reviews data\nPrepare changes in application]
+    C --> D[BEGIN TRANSACTION\nShort window — lock held]
+    D --> E["UPDATE ... WHERE RowVersion = @captured"]
+    E --> F{@@ROWCOUNT = 1?}
+    F -->|Yes — row unchanged| G[COMMIT\nSuccess]
+    F -->|No — row changed by another session| H[ROLLBACK]
+    H --> I{Retry\nlimit reached?}
+    I -->|No| B
+    I -->|Yes| J([❌ Return conflict error\nto caller])
+
+    style A fill:#FF9800,color:#fff
+    style G fill:#2d6a4f,color:#fff
+    style H fill:#e07b39,color:#fff
+    style J fill:#d62828,color:#fff
+    style D fill:#2196F3,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-transaction-locking-and-row-versioning-guide
+> 📚 RCSI: https://learn.microsoft.com/en-us/sql/relational-databases/databases/database-properties-options-page
+
+---
+
+---
+
+### Q104. What are distributed transactions and the two-phase commit (2PC) protocol?
+
+**Answer:** A distributed transaction spans multiple independent resource managers (separate databases, message queues, etc.) and must ensure atomicity across all of them — either all commit or all roll back. The **Two-Phase Commit (2PC)** protocol coordinates this.
+
+**Phase 1 — Prepare (voting):**
+The coordinator sends a `PREPARE` message to all participants. Each participant writes its changes to its local WAL and votes `YES` (can commit) or `NO` (cannot commit). A `YES` vote is a binding promise to commit when told to.
+
+**Phase 2 — Commit or Abort:**
+If all votes are `YES`, coordinator sends `COMMIT` to all. If any vote is `NO`, coordinator sends `ABORT` to all. Each participant then commits or rolls back locally and releases locks.
+
+**Problems with 2PC:**
+
+| Problem | Description |
+|---------|-------------|
+| **Blocking** | If coordinator crashes after Phase 1, participants are stuck holding locks — they voted YES but never received the commit/abort decision |
+| **SPOF on coordinator** | Coordinator failure halts all participants |
+| **Latency** | Two network round trips minimum; expensive in geo-distributed systems |
+
+**Alternatives to 2PC:**
+
+- **Saga pattern:** Break the distributed transaction into a sequence of local transactions, each with a compensating transaction. No cross-service locking. Eventual consistency (not ACID). Preferred in microservices.
+- **Outbox pattern:** Write event to a local DB outbox table in the same local transaction; a separate relay publishes to the message bus — guarantees at-least-once delivery without distributed locking.
+
+❌ **Wrong — distributed writes without coordination (inconsistency risk):**
+```csharp
+// Service A writes to its DB
+await _orderDb.ExecuteAsync("INSERT INTO Orders (CustomerId, Total) VALUES (@cid, @total)", ...);
+
+// Service B writes to its DB — no coordination with Service A
+await _inventoryDb.ExecuteAsync("UPDATE Inventory SET Stock = Stock - 1 WHERE ProductId = @pid", ...);
+
+// If Service B call fails: Order exists but stock not decremented -> INCONSISTENCY
+// No mechanism to automatically roll back Service A's committed insert
+```
+
+✅ **Correct — Saga pattern with compensating transactions:**
+```csharp
+// Saga orchestrator coordinates steps via events
+
+// Step 1: OrderService creates order (local transaction)
+//   -> publishes OrderCreated event
+
+// Step 2: InventoryService handles OrderCreated
+//   -> reserves stock (local transaction)
+//   -> publishes InventoryReserved event
+
+// Step 3: PaymentService handles InventoryReserved
+//   -> charges card (local transaction)
+//   -> if FAILS: publishes PaymentFailed event
+
+// Compensating transactions on PaymentFailed:
+//   InventoryService: releases reserved stock (local transaction)
+//   OrderService: marks order Cancelled (local transaction)
+
+// Each service owns its own data and its own rollback logic
+// Result: eventual consistency without distributed locks
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P1 as Participant 1\n(Orders DB)
+    participant P2 as Participant 2\n(Inventory DB)
+
+    Note over C,P2: Phase 1 - PREPARE
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P1->>P1: Write to WAL, lock rows
+    P2->>P2: Write to WAL, lock rows
+    P1-->>C: VOTE YES
+    P2-->>C: VOTE YES
+
+    Note over C,P2: Phase 2 - COMMIT
+    C->>P1: COMMIT
+    C->>P2: COMMIT
+    P1->>P1: Commit local transaction, release locks
+    P2->>P2: Commit local transaction, release locks
+    P1-->>C: ACK
+    P2-->>C: ACK
+    Note over C: Distributed commit complete
+
+    Note over C,P2: Abort scenario (P2 votes NO)
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P2-->>C: VOTE NO
+    C->>P1: ABORT
+    C->>P2: ABORT
+    Note over P1,P2: Both rolled back
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/dotnet/standard/data/transactions/implementing-an-implicit-transaction-using-transaction-scope
+
+---
+
+### Q105. How do you handle long-running transactions and lock contention?
+
+**Answer:** Long-running transactions hold locks for their entire duration, blocking other sessions from reading or writing the same rows. They are one of the top causes of production incidents in SQL Server. The core strategies are: reduce lock duration, reduce lock scope, or eliminate read locks entirely using row versioning.
+
+**Lock escalation:** SQL Server automatically escalates many row-level locks to a table lock when the count on a single table exceeds ~5,000. Table locks block all other access. To prevent unwanted escalation on a specific table: `ALTER TABLE Orders SET (LOCK_ESCALATION = DISABLE)` — use carefully as it increases per-row lock memory.
+
+**Pessimistic concurrency (SQL Server default):**
+Reads acquire shared locks; writes acquire exclusive locks. Readers can block writers and vice versa at the locked row. Deadlocks can occur when two sessions each hold a lock the other needs.
+
+**Optimistic concurrency (MVCC via RCSI):**
+`READ_COMMITTED_SNAPSHOT ISOLATION (RCSI)` — reads are served from the last committed row version stored in `tempdb`. Readers never take shared locks, so readers never block writers and writers never block readers. A dramatic improvement for typical OLTP workloads.
+
+```sql
+-- Enable RCSI for a database (online, no downtime)
+ALTER DATABASE MyDB SET READ_COMMITTED_SNAPSHOT ON;
+-- All READ COMMITTED queries now use row versioning instead of shared locks
+```
+
+**Best practices to keep transactions short:**
+
+1. Do all lookups and calculations **outside** the transaction; open `BEGIN TRANSACTION` only for the actual write operations.
+2. Never include user-facing waits, HTTP calls, or file I/O inside a transaction.
+3. Batch large deletes/updates into chunks (e.g., 1,000 rows per transaction) to avoid holding locks on millions of rows.
+4. Use `SET LOCK_TIMEOUT 5000` (ms) to fail fast rather than waiting indefinitely.
+5. Monitor long-running transactions: `SELECT * FROM sys.dm_exec_sessions WHERE open_transaction_count > 0`.
+
+❌ **Wrong — user interaction inside an open transaction:**
+```csharp
+// Transaction opened BEFORE user confirms
+using var tx = conn.BeginTransaction();
+var cmd = new SqlCommand("SELECT * FROM Orders WHERE Id = @id", conn, tx);
+var order = await cmd.ExecuteReaderAsync(); // shared lock held on row
+
+// Show order to user and wait for them to click "Approve"...
+// User goes to lunch -> transaction holds lock for 30+ minutes
+// -> entire row (or table after escalation) blocked for all other sessions
+
+await tx.CommitAsync(); // only reached after user responds
+```
+
+✅ **Correct — optimistic concurrency: read outside transaction, check version on write:**
+```sql
+-- Phase 1: READ (no transaction open, no locks held)
+SELECT OrderId, Status, RowVersion
+FROM   Orders
+WHERE  OrderId = 101;
+-- User reviews the data... 10 seconds pass... no locks held on the row
+
+-- Phase 2: WRITE (short transaction, lock held for milliseconds)
+BEGIN TRANSACTION;
+
+    UPDATE Orders
+    SET    Status = 'APPROVED'
+    WHERE  OrderId = 101
+    AND    RowVersion = @capturedRowVersion; -- optimistic check
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        ROLLBACK;
+        -- Row was modified by another session between read and write
+        THROW 50409, 'Conflict: order was modified. Please refresh and retry.', 1;
+    END
+
+COMMIT;
+-- Lock held only for the duration of the UPDATE + COMMIT: milliseconds
+```
+
+```mermaid
+flowchart TD
+    A([Start]) --> B[READ row + capture RowVersion\nNo transaction open - no locks held]
+    B --> C[Application prepares changes\nUser reviews data]
+    C --> D[BEGIN TRANSACTION\nLock held from here]
+    D --> E[UPDATE ... WHERE RowVersion = captured]
+    E --> F{RowCount = 1?}
+    F -->|Yes - row unchanged| G[COMMIT\nSuccess - lock released]
+    F -->|No - row changed by another session| H[ROLLBACK\nLock released]
+    H --> I{Retry\nlimit reached?}
+    I -->|No| B
+    I -->|Yes| J([Return conflict error to caller])
+
+    style A fill:#FF9800,color:#fff
+    style G fill:#2d6a4f,color:#fff
+    style H fill:#e07b39,color:#fff
+    style J fill:#d62828,color:#fff
+    style D fill:#2196F3,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-transaction-locking-and-row-versioning-guide
+> 📚 RCSI: https://learn.microsoft.com/en-us/sql/relational-databases/databases/database-properties-options-page
+
+---

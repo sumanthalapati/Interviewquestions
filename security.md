@@ -1022,3 +1022,667 @@ flowchart TD
     style DATA fill:#2e7d32,color:#fff
 ```
 
+
+---
+
+# 🔑 Authentication & Authorization — Complete Mechanisms Guide
+
+> Covers every major auth mechanism end-to-end: sessions, JWT, OAuth2, OIDC, API keys, mTLS, SSO/SAML, RBAC/ABAC, ASP.NET Core pipeline, and Zero Trust.
+
+---
+
+## Q1. What is the core difference between Authentication and Authorization?
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/security/
+
+**Authentication (AuthN)** — *Who are you?* Proves identity. You present a credential (password, token, certificate) and the system verifies it.  
+**Authorization (AuthZ)** — *What can you do?* Proves permission. After identity is established, the system checks what that identity is allowed to do.
+
+AuthN always runs first. AuthZ makes no sense without a verified identity.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant S as Server
+    participant R as Protected Resource
+
+    U->>S: POST /login { username, password }
+    S->>S: AuthN: verify credentials → identity confirmed
+    S-->>U: 200 OK — JWT access token
+
+    U->>R: GET /orders (Authorization: Bearer <token>)
+    R->>R: AuthZ: decode token → check claims → user has "orders:read"?
+    R-->>U: 200 OK — order data
+```
+
+---
+
+## Q2. How does session-based authentication work and what are its security requirements?
+
+> 📚 Reference: https://owasp.org/www-community/attacks/Session_fixation
+
+In session-based auth the server is stateful — it stores session data (user ID, roles, expiry) in server memory or a distributed store like Redis. The client holds only an opaque session ID in a cookie.
+
+**Flow:**
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant S as Server
+    participant R as Redis
+
+    U->>S: POST /login { username, password }
+    S->>S: Verify credentials
+    S->>R: SET session:abc123 { userId:1, roles:[Admin] } EX 3600
+    S-->>U: Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Strict
+
+    U->>S: GET /dashboard (Cookie: sessionId=abc123)
+    S->>R: GET session:abc123 → { userId:1, roles:[Admin] }
+    S-->>U: 200 OK — dashboard data
+```
+
+**Session Fixation Attack** — attacker tricks user into using a session ID the attacker already knows:
+
+❌ **Vulnerable** — session ID issued before login, reused after:
+```csharp
+// Attacker sends victim: https://app.com/login?sessionId=ATTACKER_KNOWN_ID
+// Server sets session with that ID and victim logs in
+// Attacker now shares the victim's authenticated session
+HttpContext.Session.SetString("userId", userId.ToString()); // reusing pre-login session
+```
+
+✅ **Prevention** — always regenerate session ID after authentication:
+```csharp
+// ASP.NET Core: clear old session and issue a new one on login
+HttpContext.Session.Clear();
+await HttpContext.SignInAsync(principal); // issues new authenticated session
+
+// Cookie must always be:
+options.Cookie.HttpOnly = true;   // JS cannot read it — prevents XSS theft
+options.Cookie.Secure   = true;   // HTTPS only — prevents network sniffing
+options.Cookie.SameSite = SameSiteMode.Strict; // blocks CSRF cross-origin requests
+```
+
+| Cookie attribute | Without it | With it |
+|-----------------|-----------|---------|
+| `HttpOnly` | XSS can read `document.cookie` | JS cannot access the cookie |
+| `Secure` | Cookie sent over HTTP → sniffed | Cookie only sent over HTTPS |
+| `SameSite=Strict` | Cookie sent in cross-site requests → CSRF | Cookie blocked on cross-origin requests |
+
+---
+
+## Q3. Explain JWT structure, signing algorithms, and its major vulnerabilities.
+
+> 📚 Reference: https://jwt.io/ · https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html
+
+### Structure
+
+A JWT is three base64url-encoded JSON objects joined by dots:
+
+```
+Header.Payload.Signature
+
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9        ← Header
+.eyJzdWIiOiIxMjMiLCJlbWFpbCI6ImFsaWNlQHRlc3QuY29tIiwiZXhwIjoxNzM1Njg5NjAwfQ==  ← Payload
+.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c  ← Signature
+
+Header:  { "alg": "RS256", "typ": "JWT" }
+Payload: { "sub": "123", "email": "alice@test.com", "roles": ["Admin"], "exp": 1735689600 }
+```
+
+JWT is **signed, not encrypted**. The payload is readable by anyone who base64-decodes it. Never put secrets, passwords, or PII in a JWT payload.
+
+### Signing algorithms
+
+| Algorithm | Type | Secret | Use when |
+|-----------|------|--------|----------|
+| HS256 | Symmetric HMAC | Single shared secret | All components are internal and trust the same secret |
+| RS256 | Asymmetric RSA | Private key signs, public key verifies | Multiple services verify tokens; public key can be distributed |
+| ES256 | Asymmetric EC | Smaller keys than RS256 | Same as RS256 but prefer smaller payloads |
+
+### Access token + Refresh token pattern
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth Server
+    participant API as Resource API
+
+    U->>A: POST /login { username, password }
+    A-->>U: access_token (5 min, in memory)\n+ refresh_token (7 days, HttpOnly cookie)
+
+    U->>API: GET /data (Authorization: Bearer access_token)
+    API-->>U: 200 OK
+
+    note over U,API: access_token expires after 5 min
+
+    U->>A: POST /refresh (Cookie: refresh_token=...)
+    A->>A: Validate refresh token (check DB/Redis — it IS stored)
+    A-->>U: new access_token (in memory)\n+ rotate refresh_token (HttpOnly cookie)
+
+    U->>API: GET /data (Authorization: Bearer new_access_token)
+    API-->>U: 200 OK
+```
+
+❌ **Vulnerable patterns:**
+```js
+// Storing JWT in localStorage — XSS can steal it
+localStorage.setItem("token", jwt);
+
+// Using alg:none — no signature verification
+// Attacker crafts: { "alg": "none" } + { "roles": ["Admin"] } + empty signature
+// Old libraries accepted this and granted Admin access without any secret
+```
+
+✅ **Secure patterns:**
+```csharp
+// Access token lives in JS memory only (not localStorage, not cookie)
+// Refresh token in HttpOnly Secure SameSite=Strict cookie
+
+// Server: whitelist only the algorithm you expect
+options.TokenValidationParameters = new TokenValidationParameters
+{
+    ValidAlgorithms          = new[] { SecurityAlgorithms.RsaSha256 }, // HS256 accepted only if expected
+    ValidateIssuerSigningKey = true,
+    ValidateIssuer           = true,
+    ValidateAudience         = true,
+    ValidateLifetime         = true,
+    ClockSkew                = TimeSpan.FromSeconds(30) // small tolerance only
+};
+```
+
+---
+
+## Q4. Explain OAuth 2.0 and all four grant types. When do you use each?
+
+> 📚 Reference: https://oauth.net/2/ · https://www.rfc-editor.org/rfc/rfc6749
+
+OAuth 2.0 is a **delegation framework** — it lets a user (Resource Owner) grant a third-party app (Client) limited access to their data on another service (Resource Server) without sharing their password.
+
+### Grant Types
+
+| Grant Type | Who uses it | When to use |
+|-----------|------------|-------------|
+| Authorization Code + PKCE | Public/confidential clients (web, SPA, mobile) | User-facing login — the only grant to use for new apps |
+| Client Credentials | Machine-to-machine (no user) | Background services, microservice-to-microservice |
+| Resource Owner Password | Legacy (user gives password directly to client) | **Avoid** — defeats the purpose of OAuth |
+| Implicit | SPAs (deprecated, replaced by Auth Code + PKCE) | **Do not use** — tokens in URL fragment, no refresh |
+
+### Authorization Code + PKCE Flow (the most important)
+
+PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. Required for all public clients (SPAs, mobile apps).
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant C as Client App
+    participant A as Auth Server
+    participant R as Resource Server
+
+    C->>C: Generate code_verifier (random 128-byte string)\ncode_challenge = BASE64URL(SHA256(code_verifier))
+
+    U->>A: GET /authorize?client_id=...\n&response_type=code\n&code_challenge=xyz\n&code_challenge_method=S256\n&redirect_uri=...&scope=openid profile
+
+    A->>U: Login page
+    U->>A: Enter credentials
+    A-->>U: 302 redirect to redirect_uri?code=AUTH_CODE
+
+    C->>A: POST /token\n{ code: AUTH_CODE, code_verifier: original_verifier,\n  client_id, redirect_uri }
+    A->>A: SHA256(code_verifier) == stored code_challenge? ✅
+    A-->>C: { access_token, refresh_token, id_token }
+
+    C->>R: GET /api/data\n(Authorization: Bearer access_token)
+    R-->>C: 200 OK — protected data
+```
+
+---
+
+## Q5. What is OpenID Connect (OIDC) and how does it extend OAuth2?
+
+> 📚 Reference: https://openid.net/connect/ · https://learn.microsoft.com/en-us/azure/active-directory/develop/v2-protocols-oidc
+
+OAuth 2.0 handles **authorization** (access to resources). OIDC adds an **identity layer** on top — it answers "who is the user?" not just "what can they access?".
+
+| Token | Purpose | Format |
+|-------|---------|--------|
+| Access token | Authorize API calls | Opaque or JWT |
+| ID token | Authenticate user (who they are) | Always JWT |
+| Refresh token | Obtain new access/ID tokens | Opaque |
+
+**Key OIDC additions:**
+
+- **ID token** — JWT with identity claims (`sub`, `email`, `name`)
+- **UserInfo endpoint** — `GET /userinfo` with access token returns user claims
+- **Discovery document** — `GET /.well-known/openid-configuration` returns all endpoints, signing keys, supported scopes
+- **Standard claims**: `sub` (subject/user ID), `iss` (issuer URL), `aud` (audience/client), `exp` (expiry), `iat` (issued at)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Client App
+    participant IDP as Identity Provider (OIDC)
+    participant API as Resource API
+
+    U->>C: Click "Sign in with Google"
+    C->>IDP: GET /authorize?scope=openid profile email\n(Authorization Code + PKCE flow)
+    IDP->>U: Google login page
+    U->>IDP: Authenticate
+    IDP-->>C: Authorization code
+
+    C->>IDP: POST /token { code, code_verifier }
+    IDP-->>C: { access_token, id_token (JWT), refresh_token }
+
+    C->>C: Decode & verify id_token:\nsub=google|123, email=alice@test.com,\niss=https://accounts.google.com, exp=...
+
+    C->>IDP: GET /userinfo (Authorization: Bearer access_token)
+    IDP-->>C: { sub, name, email, picture }
+
+    C->>API: GET /api/orders (Authorization: Bearer access_token)
+    API-->>C: 200 OK
+```
+
+---
+
+## Q6. How does API Key authentication work and what are the security requirements?
+
+> 📚 Reference: https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html
+
+An API key is a static or rotatable shared secret that identifies a calling application (not a user). Common for server-to-server integrations and public APIs.
+
+**Best practices:**
+
+| Practice | Detail |
+|----------|--------|
+| Transport | Header only — never query string (logs, browser history, referrer headers expose it) |
+| Storage | Secrets manager (Azure Key Vault, AWS Secrets Manager) — never in source code or config files |
+| Scope | Issue per-client, per-scope keys — least privilege |
+| Rotation | Keys must be rotatable without downtime (two valid keys during transition) |
+| Hashing | Store hash of key in DB, not the plaintext (same principle as passwords) |
+
+❌ **Insecure:**
+```bash
+# API key in query string — appears in server logs, browser history, referrer header
+GET https://api.example.com/data?api_key=sk_live_abc123
+
+# API key hardcoded in source code
+const apiKey = "sk_live_abc123"; // in Git forever
+```
+
+✅ **Secure:**
+```csharp
+// API key in header — not logged by default
+GET https://api.example.com/data
+X-API-Key: sk_live_abc123
+
+// ASP.NET Core — validate API key from header
+public class ApiKeyMiddleware
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (!context.Request.Headers.TryGetValue("X-API-Key", out var key))
+        { context.Response.StatusCode = 401; return; }
+
+        var storedHash = await _secrets.GetApiKeyHashAsync(); // from Key Vault
+        if (!BCrypt.Verify(key, storedHash))
+        { context.Response.StatusCode = 403; return; }
+
+        await _next(context);
+    }
+}
+```
+
+---
+
+## Q7. When is Basic Auth acceptable and what are the rules?
+
+> 📚 Reference: https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication
+
+Basic Auth sends credentials as `Authorization: Basic base64(username:password)`. Base64 is **not encryption** — it is trivially reversible. Basic Auth is only safe when:
+
+1. The connection is **always HTTPS** (TLS encrypts the header)
+2. Used for **internal tooling, CI/CD systems, or simple service-to-service** calls where OAuth2 is impractical
+3. Passwords are **strong and not shared**
+
+Digest Auth uses a challenge-response hash (MD5 by default) — avoids sending plaintext credentials but MD5 is weak and it doesn't prevent MITM if not on HTTPS. Not recommended for new systems.
+
+❌ **Never acceptable:**
+```bash
+# Basic Auth over plain HTTP — base64 decoded in transit by any observer
+curl http://api.internal.com/data -u "admin:password123"
+```
+
+✅ **Acceptable use:**
+```csharp
+// HTTPS only, internal health-check dashboard
+app.MapHealthChecks("/health/detail", new HealthCheckOptions { ... })
+   .RequireAuthorization("BasicAuthPolicy");
+
+// Or simple service credentials over HTTPS in headers
+services.AddHttpClient("InternalService", client =>
+{
+    var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes("svc_user:strong_random_pwd"));
+    client.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Basic", credentials);
+    // credential stored in Key Vault, retrieved at startup — never in appsettings
+});
+```
+
+---
+
+## Q8. What is Mutual TLS (mTLS) and when should you use it?
+
+> 📚 Reference: https://www.cloudflare.com/learning/access-management/what-is-mutual-tls/
+
+In standard TLS the client verifies the server's certificate. In **mTLS both sides present and verify certificates** — the server proves its identity to the client AND the client proves its identity to the server.
+
+**Use cases:**
+
+| Use case | Why mTLS fits |
+|----------|--------------|
+| Service mesh (Istio, Linkerd) | Every pod has a certificate — automatic zero-trust service identity |
+| B2B APIs | Partner proves identity via certificate — no shared secrets needed |
+| Zero-trust internal APIs | Replace VPN — verify every caller regardless of network |
+| IoT devices | Device certificate proves authenticity at the TLS layer |
+
+**Certificate pinning** — client rejects any certificate not matching a known fingerprint, preventing MITM even with a compromised CA. Used in mobile apps for high-security APIs.
+
+```mermaid
+sequenceDiagram
+    participant C as Client Service
+    participant S as Server Service
+
+    C->>S: ClientHello [TLS 1.3, cipher suites]
+    S-->>C: ServerHello + Server Certificate\n(signed by internal CA)
+    S-->>C: CertificateRequest (I require a client cert too)
+
+    C->>C: Verify server cert:\n✅ Signed by trusted internal CA?\n✅ Hostname matches?
+
+    C->>S: Client Certificate\n(signed by same internal CA)
+    C->>S: CertificateVerify (signature proves possession of private key)
+
+    S->>S: Verify client cert:\n✅ Signed by trusted internal CA?\n✅ Subject matches expected service name?
+
+    C-->>S: Finished
+    S-->>C: Finished
+
+    C->>S: 🔒 Encrypted request — identity proven at TLS layer
+    S-->>C: 🔒 Encrypted response
+```
+
+---
+
+## Q9. Compare RBAC, ABAC, PBAC, and ReBAC authorization models.
+
+> 📚 Reference: https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html · https://www.openpolicyagent.org/
+
+### Models at a glance
+
+| Model | Full name | Decision basis | Best for |
+|-------|-----------|---------------|----------|
+| RBAC | Role-Based Access Control | User's assigned roles | Simple apps, clear role boundaries |
+| ABAC | Attribute-Based Access Control | Attributes of user, resource, environment | Fine-grained, context-aware policies |
+| PBAC | Policy-Based Access Control | Centralized policy rules (OPA, Casbin) | Complex orgs, auditable central policy |
+| ReBAC | Relationship-Based Access Control | Relationships between entities (Google Zanzibar) | Collaborative apps (Docs, GitHub) |
+
+**RBAC hierarchy:**
+
+```mermaid
+flowchart TD
+    U1[User: Alice] --> R1[Role: Manager]
+    U2[User: Bob]   --> R2[Role: Viewer]
+    R1 --> P1[Permission: orders:read]
+    R1 --> P2[Permission: orders:write]
+    R1 --> P3[Permission: reports:read]
+    R2 --> P1
+    P1 --> RS1[Resource: /api/orders GET]
+    P2 --> RS2[Resource: /api/orders POST/PUT]
+    P3 --> RS3[Resource: /api/reports GET]
+```
+
+**ABAC example** — policy: user can read document only if `user.department == document.department AND user.clearance >= document.classification`:
+
+```csharp
+// ABAC: evaluated at request time against attributes
+bool CanRead(User user, Document doc) =>
+    user.Department == doc.Department &&
+    user.ClearanceLevel >= doc.ClassificationLevel;
+```
+
+**PBAC with OPA** — policies live in `.rego` files, evaluated by a sidecar:
+
+```rego
+# policy.rego
+allow {
+    input.method == "GET"
+    input.user.roles[_] == "orders:read"
+    input.resource.owner_dept == input.user.department
+}
+```
+
+❌ **Hardcoded role checks scattered in controllers:**
+```csharp
+// Every controller action has its own ad-hoc logic — impossible to audit
+if (User.IsInRole("Admin") || User.IsInRole("Manager") || userId == resourceOwnerId)
+    return Ok(data);
+```
+
+✅ **Centralized policy-based authorization:**
+```csharp
+// Policy defined once, reused everywhere
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("CanReadOrders", policy =>
+        policy.AddRequirements(new SameDepartmentRequirement("orders:read")));
+});
+
+// Handler encapsulates all logic
+public class SameDepartmentHandler : AuthorizationHandler<SameDepartmentRequirement, Order>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext ctx, SameDepartmentRequirement req, Order order)
+    {
+        var userDept = ctx.User.FindFirstValue("department");
+        if (ctx.User.HasClaim("permissions", req.RequiredPermission) &&
+            userDept == order.Department)
+            ctx.Succeed(req);
+        return Task.CompletedTask;
+    }
+}
+
+// Controller stays clean
+[Authorize(Policy = "CanReadOrders")]
+public IActionResult GetOrder(int id) => Ok(_repo.Get(id));
+```
+
+---
+
+## Q10. Walk through the ASP.NET Core authentication and authorization pipeline.
+
+> 📚 Reference: https://learn.microsoft.com/en-us/aspnet/core/security/authorization/introduction
+
+```mermaid
+flowchart TD
+    REQ[Incoming HTTP Request] --> AUTH_MW[UseAuthentication middleware\nReads token/cookie → calls IAuthenticationHandler]
+    AUTH_MW --> CLAIMS[Set HttpContext.User\nas ClaimsPrincipal with claims]
+    CLAIMS --> AUTHZ_MW[UseAuthorization middleware\nChecks [Authorize] attributes / endpoint metadata]
+    AUTHZ_MW --> POLICY{Evaluate policy\nIAuthorizationService}
+    POLICY -- All requirements met --> HANDLER[Execute controller action]
+    POLICY -- Requirement failed --> FORBIDDEN[403 Forbidden / 401 Unauthorized]
+    HANDLER --> RESP[HTTP Response]
+```
+
+**Registration order matters — UseAuthentication MUST come before UseAuthorization:**
+
+```csharp
+// Program.cs — correct order
+app.UseRouting();
+app.UseAuthentication();   // 1. Who are you? — populates User
+app.UseAuthorization();    // 2. What can you do? — checks User against policy
+app.MapControllers();
+```
+
+**Claims-based identity** — the `ClaimsPrincipal` is a collection of `ClaimsIdentity` objects, each a collection of `Claim` (type + value pairs). Policies, roles, and custom handlers all read from claims.
+
+**Custom policy requirement — the right pattern:**
+
+❌ **Role-based if/else in controllers:**
+```csharp
+[HttpDelete("{id}")]
+public IActionResult Delete(int id)
+{
+    if (!User.IsInRole("Admin") && !User.IsInRole("Manager"))
+        return Forbid();
+    if (User.IsInRole("Manager") && GetOrder(id).Amount > 50_000)
+        return Forbid(); // business rule buried in controller
+    _repo.Delete(id);
+    return NoContent();
+}
+```
+
+✅ **Policy with custom requirement handler:**
+```csharp
+// Requirement (data class)
+public class DeleteOrderRequirement : IAuthorizationRequirement
+{
+    public decimal MaxAmountForManager { get; } = 50_000;
+}
+
+// Handler (all logic in one place, testable in isolation)
+public class DeleteOrderHandler : AuthorizationHandler<DeleteOrderRequirement, Order>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext ctx,
+        DeleteOrderRequirement req,
+        Order order)
+    {
+        if (ctx.User.IsInRole("Admin"))
+        { ctx.Succeed(req); return Task.CompletedTask; }
+
+        if (ctx.User.IsInRole("Manager") && order.Amount <= req.MaxAmountForManager)
+        { ctx.Succeed(req); return Task.CompletedTask; }
+
+        return Task.CompletedTask; // ctx.Fail() optional — leaves door open for other handlers
+    }
+}
+
+// Controller — zero business logic
+[HttpDelete("{id}")]
+public async Task<IActionResult> Delete(int id)
+{
+    var order = _repo.Get(id);
+    var authResult = await _authService.AuthorizeAsync(User, order, "DeleteOrder");
+    if (!authResult.Succeeded) return Forbid();
+    _repo.Delete(id);
+    return NoContent();
+}
+```
+
+---
+
+## Q11. How does Single Sign-On (SSO) work and what is SAML?
+
+> 📚 Reference: https://developer.okta.com/docs/concepts/saml/ · https://www.cloudflare.com/learning/access-management/what-is-sso/
+
+**SSO** lets a user authenticate once with an **Identity Provider (IdP)** and gain access to multiple **Service Providers (SPs)** without re-entering credentials. The IdP (e.g., Okta, Azure AD, Ping) is the single source of truth for identity.
+
+**SAML 2.0** is the XML-based SSO standard used in enterprise. The IdP issues a signed **SAML assertion** (XML document) that the SP validates to grant access. OIDC is the modern equivalent used for web/mobile.
+
+| Feature | SAML 2.0 | OIDC |
+|---------|----------|------|
+| Format | XML | JSON / JWT |
+| Transport | HTTP POST / Redirect | HTTP redirect + token endpoint |
+| Age | 2005 | 2014 |
+| Mobile/SPA | Poor | Native |
+| Enterprise SSO | Dominant | Growing |
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant SP as Service Provider\n(your app)
+    participant IDP as Identity Provider\n(Okta / Azure AD)
+
+    U->>SP: Access app.company.com/dashboard
+    SP->>SP: No session — user not authenticated
+    SP-->>U: 302 Redirect to IdP\n(SAML AuthnRequest)
+
+    U->>IDP: SAML AuthnRequest + SP info
+    IDP->>U: Login page (if no IdP session)
+    U->>IDP: Enter corporate credentials
+
+    IDP->>IDP: Authenticate user\nGenerate signed SAML assertion:\n{ sub, email, groups, exp }
+
+    IDP-->>U: HTTP POST to SP assertion consumer URL\nwith signed SAML Response
+
+    U->>SP: POST /saml/acs (SAML Response)
+    SP->>SP: Verify XML signature with IdP's public cert\nExtract claims from assertion
+    SP->>SP: Create local session
+    SP-->>U: 302 Redirect to /dashboard\n(session cookie set)
+
+    U->>SP: Access app.company.com/other-app
+    SP->>SP: No local session
+    SP-->>U: 302 Redirect to IdP
+    IDP->>IDP: IdP session already exists (SSO)
+    IDP-->>U: Immediate SAML assertion (no login screen)
+    U->>SP: POST SAML Response → access granted (SSO!)
+```
+
+---
+
+## Q12. What is the Zero Trust security model and how is it implemented?
+
+> 📚 Reference: https://www.nist.gov/publications/zero-trust-architecture · https://learn.microsoft.com/en-us/azure/security/fundamentals/zero-trust
+
+Traditional security assumed anything inside the corporate network was trusted. Zero Trust rejects this assumption entirely.
+
+**Core principles:**
+
+| Principle | Meaning |
+|----------|---------|
+| Verify explicitly | Authenticate and authorize every request based on all available data points (identity, location, device, service, workload) |
+| Least privilege access | Limit user and service access with just-in-time and just-enough-access; limit lateral movement |
+| Assume breach | Minimize blast radius. Segment access, encrypt all traffic, use analytics to detect and respond to anomalies |
+
+**Technical implementation:**
+
+```mermaid
+flowchart TD
+    REQ[Every Request\n(internal or external)] --> ID[Verify Identity\nmTLS cert / JWT / OIDC token]
+    ID --> DEVICE[Check Device Posture\ncompliant? patched? enrolled?]
+    DEVICE --> POLICY[Enforce Least Privilege\nOPA / RBAC — only what this identity needs]
+    POLICY --> SEGMENT[Network Micro-segmentation\nservice can only reach declared dependencies]
+    SEGMENT --> LOG[Log & Monitor Everything\nSIEM, anomaly detection, audit trail]
+    LOG --> ALLOW[✅ Allow request]
+
+    ID -- unverified --> DENY[❌ Deny — 401]
+    DEVICE -- non-compliant --> DENY2[❌ Deny — 403]
+    POLICY -- unauthorized --> DENY3[❌ Deny — 403]
+
+    style ALLOW fill:#4CAF50,color:#fff
+    style DENY fill:#f44336,color:#fff
+    style DENY2 fill:#f44336,color:#fff
+    style DENY3 fill:#f44336,color:#fff
+```
+
+**Implementation checklist in a .NET microservices architecture:**
+
+```csharp
+// 1. mTLS between all services (via Istio or manual cert validation)
+//    No service accepts a plain HTTP call from another service
+
+// 2. Short-lived tokens — access tokens max 15 min
+options.TokenValidationParameters.ClockSkew = TimeSpan.Zero; // no tolerance
+
+// 3. Scoped service identities — each service has its own client_credentials token
+//    Service A cannot call Service C unless its token includes scope "serviceC:read"
+
+// 4. Structured logging on every auth decision
+_logger.LogInformation(
+    "AuthZ decision: {Decision} for {User} on {Resource} — policy={Policy}",
+    result.Succeeded ? "ALLOW" : "DENY", user.Identity?.Name, resource, policyName);
+
+// 5. Secrets rotation — short-lived credentials via managed identity, never static
+// DefaultAzureCredential with Managed Identity → no passwords in config at all
+services.AddAzureClients(builder =>
+    builder.AddSecretClient(new Uri(keyVaultUri))
+           .WithCredential(new DefaultAzureCredential()));
+```

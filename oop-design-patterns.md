@@ -3233,245 +3233,1055 @@ class OrderService { private SqlOrderRepo _repo = new SqlOrderRepo(); } // tight
 | What it means | Class has one focused responsibility | Class does many unrelated things |
 | Change impact | Small — one class changed per feature | Large — many classes touched |
 
+
 | | Loose Coupling (✅ Good) | Tight Coupling (❌ Bad) |
 |-|------------------------|----------------------|
-| What it means | Classes interact via interfaces/events | Classes directly depend on concrete types |
-| Testability | ✅ Easy to mock dependencies | ❌ Hard — must instantiate everything |
-| Change impact | Small — change one without breaking others | Large — cascade changes |
+| What it means | Depend on abstractions, not concretions | Classes directly reference each other's internals |
+| Change impact | Change one class without touching others | Ripple changes across many classes |
+
+---
+
+## 11. OOAD — Object-Oriented Analysis & Design Concepts
+
+📚 **References**
+- [Object-Oriented Analysis and Design — Wikipedia](https://en.wikipedia.org/wiki/Object-oriented_analysis_and_design)
+- [GRASP Patterns — Craig Larman](https://en.wikipedia.org/wiki/GRASP_(object-oriented_design))
+- [Domain-Driven Design — Eric Evans](https://domainlanguage.com/ddd/)
+
+---
+
+### Q1: What is OOAD and what are its phases?
+
+**Object-Oriented Analysis and Design (OOAD)** is a software engineering approach that models a system as a collection of interacting objects. It has two major phases:
+
+- **Object-Oriented Analysis (OOA):** Understand the *problem domain*. Identify the objects, classes, and their responsibilities from requirements and use cases. Answer: *what* the system must do.
+- **Object-Oriented Design (OOD):** Design the *solution*. Map analysis artifacts to class hierarchies, define relationships, assign method responsibilities, and produce design artifacts (class diagrams, sequence diagrams). Answer: *how* the system will do it.
+
+**Key Activities:**
+| Activity | Phase | Purpose |
+|---|---|---|
+| Use-case modeling | OOA | Capture system behavior from user perspective |
+| CRC cards | OOA | Identify classes, responsibilities, collaborators |
+| Class diagrams | OOD | Show static structure — classes and relationships |
+| Sequence diagrams | OOD | Show dynamic behavior — object interactions over time |
+| Package diagrams | OOD | Organize classes into modules/layers |
+
+```mermaid
+flowchart LR
+    A[📋 Requirements] --> B[OOA\nIdentify objects\n& responsibilities]
+    B --> C[OOD\nDesign classes\n& relationships]
+    C --> D[Implementation\nC# code]
+    D --> E[Testing &\nRefactoring]
+
+    style A fill:#4a9eff,color:#fff
+    style B fill:#f59e0b,color:#fff
+    style C fill:#10b981,color:#fff
+    style D fill:#8b5cf6,color:#fff
+    style E fill:#ef4444,color:#fff
+```
+
+---
+
+### Q2: The Four Pillars of OOP — Deep Interview Answers
+
+The four pillars are **Encapsulation**, **Abstraction**, **Inheritance**, and **Polymorphism**. Most candidates give textbook definitions. The deeper answer connects each pillar to design principles and shows how violations look in practice.
+
+**Encapsulation** — Bundle data and behavior together; protect invariants via access modifiers. The real point is not "private fields" — it is *invariant protection*. An object should always be in a valid state; no external code should be able to corrupt it.
+
+**Abstraction** — Expose *what*, hide *how*. Use interfaces and abstract classes to define contracts. Callers depend on the abstraction, not the implementation. This is the foundation of the Dependency Inversion Principle.
+
+**Inheritance** — IS-A relationship enabling polymorphism and code reuse. The danger is the *fragile base class problem*: changes to a base class silently break all subclasses. Prefer composition when the goal is code reuse, not IS-A substitutability.
+
+**Polymorphism** — *Compile-time* (overloading — resolved by the compiler based on argument types) vs *Runtime* (overriding — resolved by the CLR vtable at runtime). Runtime polymorphism is what makes Open/Closed Principle practical.
+
+❌ **Pillar violations:**
+```csharp
+// ❌ Encapsulation violation — public mutable field, invariant unprotected
+public class Account { public decimal Balance; } // anyone can set Balance = -99999
+
+// ❌ Abstraction violation — depends on concrete, not interface
+public class OrderService { private StripeProcessor _stripe = new StripeProcessor(); }
+
+// ❌ Inheritance violation — Square breaks Rectangle LSP contract
+public class Square : Rectangle {
+    public override int Width { set { base.Width = value; base.Height = value; } }
+}
+static void Test(Rectangle r) { r.Width = 4; r.Height = 5; Debug.Assert(r.Area() == 20); } // fails for Square
+
+// ❌ Polymorphism violation — type-switch instead of virtual dispatch
+public void Draw(object shape) {
+    if (shape is Circle c) { /* ... */ }
+    else if (shape is Rectangle r) { /* ... */ } // every new shape requires editing this method
+}
+```
+
+✅ **Pillar correct usage:**
+```csharp
+// ✅ Encapsulation — private state, validated mutations
+public class Account
+{
+    private decimal _balance;
+    public decimal Balance => _balance;
+    public void Deposit(decimal amount)
+    {
+        if (amount <= 0) throw new ArgumentException("Amount must be positive.");
+        _balance += amount;
+    }
+    public void Withdraw(decimal amount)
+    {
+        if (amount > _balance) throw new InvalidOperationException("Insufficient funds.");
+        _balance -= amount;
+    }
+}
+
+// ✅ Abstraction — depend on interface
+public interface IPaymentGateway { Task<PaymentResult> ChargeAsync(decimal amount, string token); }
+public class OrderService { public OrderService(IPaymentGateway gw) { _gw = gw; } } // swap freely
+
+// ✅ Inheritance — genuine IS-A with LSP preserved
+public abstract class Shape { public abstract double Area(); }
+public class Circle : Shape { public override double Area() => Math.PI * Radius * Radius; }
+public class Rectangle : Shape { public override double Area() => Width * Height; }
+// All subclasses are fully substitutable for Shape ✅
+
+// ✅ Polymorphism — runtime dispatch, no type checks
+foreach (var shape in shapes) Console.WriteLine(shape.Area()); // CLR dispatches correctly
+```
+
+```mermaid
+classDiagram
+    class Shape {
+        <<abstract>>
+        +Area() double
+        +Draw() void
+    }
+    class Circle {
+        -double _radius
+        +Area() double
+        +Draw() void
+    }
+    class Rectangle {
+        -double _width
+        -double _height
+        +Area() double
+        +Draw() void
+    }
+    class IPaymentGateway {
+        <<interface>>
+        +ChargeAsync(amount, token) Task
+    }
+    class StripeGateway {
+        +ChargeAsync(amount, token) Task
+    }
+    class Account {
+        -decimal _balance
+        +Balance decimal
+        +Deposit(amount) void
+        +Withdraw(amount) void
+    }
+
+    Shape <|-- Circle : Inheritance IS-A
+    Shape <|-- Rectangle : Inheritance IS-A
+    IPaymentGateway <|.. StripeGateway : Abstraction
+    Account --> Account : Encapsulation
+
+    note for Shape "Polymorphism: runtime dispatch\nvia virtual method table"
+    note for Account "Encapsulation: _balance is\nprotected by methods"
+```
+
+---
+
+### Q3: Relationships Between Classes — Association, Aggregation, Composition, Dependency
+
+Understanding relationship *strength* is a key OOD interview topic. Choosing the wrong relationship leads to lifecycle bugs and tight coupling.
+
+| Relationship | Keyword | Ownership | Lifecycle | Example |
+|---|---|---|---|---|
+| Dependency | "uses" | None | Independent | Method takes ILogger as parameter |
+| Association | "has a ref to" | None/Weak | Independent | Customer references Orders |
+| Aggregation | "has a" (weak) | Partial | Part survives whole | Team has Players |
+| Composition | "owns" (strong) | Full | Part dies with whole | House owns Rooms |
+
+❌ **Bad — using Composition when Aggregation is correct:**
+```csharp
+// ❌ Team "owns" Player — if Team is deleted, Player is deleted too
+// But players exist independently and can join other teams!
+public class Team
+{
+    private readonly List<Player> _players = new();
+    public void AddPlayer(string name) => _players.Add(new Player(name)); // Team creates Player
+    // Player objects are destroyed when Team is destroyed — lifecycle coupled ❌
+}
+```
+
+✅ **Good — correct relationship per domain:**
+```csharp
+// ✅ Aggregation: Team HAS Players, but Players exist independently
+public class Player
+{
+    public string Name { get; }
+    public Player(string name) => Name = name;
+}
+
+public class Team
+{
+    private readonly List<Player> _players = new();
+    public void AddPlayer(Player player) => _players.Add(player);   // receives from outside
+    public void RemovePlayer(Player player) => _players.Remove(player); // Player still lives ✅
+}
+
+// ✅ Composition: House OWNS Rooms — Room cannot meaningfully exist without House
+public class House
+{
+    private readonly List<Room> _rooms;
+    public House(int numberOfRooms)
+    {
+        _rooms = Enumerable.Range(1, numberOfRooms)
+                           .Select(i => new Room($"Room {i}"))
+                           .ToList(); // House creates and owns Rooms ✅
+    }
+}
+
+// ✅ Dependency: OrderService uses ILogger only during method execution
+public class OrderService
+{
+    public void PlaceOrder(Order order, ILogger logger) // parameter = dependency, loosest coupling
+    {
+        logger.Log($"Placing order {order.Id}");
+    }
+}
+```
+
+```mermaid
+classDiagram
+    class OrderService {
+        +PlaceOrder(order, logger) void
+    }
+    class ILogger {
+        <<interface>>
+        +Log(msg) void
+    }
+    class Customer {
+        +CustomerId string
+    }
+    class Order {
+        +OrderId string
+    }
+    class Team {
+        +AddPlayer(player) void
+    }
+    class Player {
+        +Name string
+    }
+    class House {
+        -List~Room~ _rooms
+    }
+    class Room {
+        +Name string
+    }
+
+    OrderService ..> ILogger : Dependency (uses, loosest)
+    Customer --> Order : Association (has reference)
+    Team o-- Player : Aggregation (has, weak ownership)
+    House *-- Room : Composition (owns, strong)
+```
+
+---
+
+### Q4: Cohesion and Coupling
+
+**High cohesion** and **low coupling** are the two most important structural quality metrics in OOD. They directly relate to how easy a codebase is to change, test, and understand.
+
+- **High Cohesion:** A class does one thing well. All its methods and fields serve its single purpose. Related to SRP. Low cohesion = "god class."
+- **Low Coupling:** Classes depend on each other as little as possible, and only through stable abstractions. Tight coupling = changes ripple everywhere.
+
+**Coupling types (best to worst):**
+| Type | Description |
+|---|---|
+| Data coupling | Pass only the data needed (primitives/DTOs) |
+| Stamp coupling | Pass a whole object when only part is needed |
+| Control coupling | Pass a flag that changes the callee's behavior |
+| Common coupling | Share global state (singletons, static fields) |
+| Content coupling | One class directly modifies another's internals |
+
+❌ **Bad — god class with low cohesion and high coupling:**
+```csharp
+// ❌ Low cohesion: one class does user management, orders, email, PDF, reporting
+// ❌ High coupling: directly newing up concrete classes everywhere
+public class ApplicationManager
+{
+    private SqlConnection _conn = new SqlConnection("...");  // content coupling
+    private static int _orderCount = 0;                      // common coupling (static state)
+
+    public void CreateUser(string name)        { /* db logic */ }
+    public void SendWelcomeEmail(string email) { /* SMTP logic */ }
+    public void PlaceOrder(int userId)         { _orderCount++; }
+    public void GenerateInvoicePdf(int id)     { /* PDF logic */ }
+    public void RunMonthlyReport()             { /* reporting */ }
+    // 5 reasons to change, impossible to unit test ❌
+}
+```
+
+✅ **Good — focused classes with dependency injection:**
+```csharp
+// ✅ High cohesion: each class has ONE responsibility
+// ✅ Low coupling: depend on interfaces, injected not newed
+
+public interface IUserRepository  { Task SaveAsync(User user); }
+public interface IEmailService    { Task SendAsync(string to, string subject, string body); }
+public interface IOrderRepository { Task<Order> GetAsync(int orderId); }
+public interface IPaymentGateway  { Task<PaymentResult> ChargeAsync(decimal amount, string token); }
+
+public class UserService
+{
+    private readonly IUserRepository _repo;
+    private readonly IEmailService _email;
+    public UserService(IUserRepository repo, IEmailService email) { _repo = repo; _email = email; }
+
+    public async Task RegisterAsync(string name, string email)
+    {
+        var user = new User(name, email);
+        await _repo.SaveAsync(user);
+        await _email.SendAsync(email, "Welcome!", $"Hello {name}");
+    }
+}
+
+public class OrderService
+{
+    private readonly IOrderRepository _orders;
+    private readonly IPaymentGateway _payment;
+    public OrderService(IOrderRepository orders, IPaymentGateway payment)
+    { _orders = orders; _payment = payment; }
+
+    public async Task<bool> CheckoutAsync(int orderId, string paymentToken)
+    {
+        var order = await _orders.GetAsync(orderId);
+        var result = await _payment.ChargeAsync(order.Total, paymentToken);
+        return result.Success;
+    }
+}
+// Each class: 1 responsibility, depends only on interfaces — easy to test and swap ✅
+```
+
+```mermaid
+flowchart TB
+    subgraph BAD["❌ Tight Coupling / Low Cohesion"]
+        AM["ApplicationManager\n(god class)"]
+        AM --> DB["new SqlConnection()"]
+        AM --> SMTP["new SmtpClient()"]
+        AM --> PDF["new PdfGenerator()"]
+        AM --> PAY["new PaymentProcessor()"]
+    end
+
+    subgraph GOOD["✅ Loose Coupling / High Cohesion"]
+        US["UserService"]
+        OS["OrderService"]
+        IUR["«interface» IUserRepository"]
+        IEM["«interface» IEmailService"]
+        IOR["«interface» IOrderRepository"]
+        IPG["«interface» IPaymentGateway"]
+        US --> IUR
+        US --> IEM
+        OS --> IOR
+        OS --> IPG
+    end
+
+    style BAD fill:#fee2e2,stroke:#ef4444
+    style GOOD fill:#dcfce7,stroke:#16a34a
+```
+
+---
+
+### Q5: CRC Cards (Class-Responsibility-Collaborator)
+
+**CRC cards** are a lightweight OOA technique used in design workshops to brainstorm and assign class responsibilities before writing any code. Each index card represents one class:
+
+| Section | Content |
+|---|---|
+| Class Name (top) | The class being designed |
+| Responsibilities (left) | What the class *knows* and *does* |
+| Collaborators (right) | Other classes it needs to fulfill responsibilities |
+
+**How to run a CRC session:**
+1. Gather stakeholders and developers with index cards and a whiteboard.
+2. Walk through each use case or user story step by step.
+3. When a responsibility is identified, write it on the card of the most appropriate class.
+4. If a class needs help from another, list that class as a collaborator.
+5. If a card gets too full — split it into two classes (SRP signal).
+6. Simulate interactions by physically handing cards to people playing each class.
+
+**Example CRC for e-commerce checkout:**
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Class: Order                                         │
+├───────────────────────────┬──────────────────────────┤
+│ Responsibilities          │ Collaborators            │
+│ - Know order lines        │ OrderLine                │
+│ - Know total price        │ Money                    │
+│ - Know order status       │                          │
+│ - Add/remove items        │ Product                  │
+└───────────────────────────┴──────────────────────────┘
+
+┌──────────────────────────────────────────────────────┐
+│ Class: CheckoutService                               │
+├───────────────────────────┬──────────────────────────┤
+│ Responsibilities          │ Collaborators            │
+│ - Coordinate checkout     │ Order                    │
+│ - Validate stock          │ InventoryService         │
+│ - Process payment         │ IPaymentGateway          │
+│ - Send confirmation       │ INotificationService     │
+└───────────────────────────┴──────────────────────────┘
+
+┌──────────────────────────────────────────────────────┐
+│ Class: InventoryService                              │
+├───────────────────────────┬──────────────────────────┤
+│ Responsibilities          │ Collaborators            │
+│ - Know stock levels       │ IInventoryRepository     │
+│ - Reserve stock           │                          │
+│ - Release reserved stock  │                          │
+└───────────────────────────┴──────────────────────────┘
+```
+
+```mermaid
+flowchart TD
+    A[📋 Read User Stories & Use Cases] --> B[Write Class Names on Index Cards]
+    B --> C[Walk Through Each Use Case Step]
+    C --> D{Responsibility Identified?}
+    D -- Yes --> E[Assign to Best-Fit Class Card]
+    E --> F{Card Overloaded?}
+    F -- Yes --> G[Split Into Two Classes\nSRP Signal]
+    F -- No --> C
+    D -- No --> C
+    G --> C
+    C --> H{All Use Cases Covered?}
+    H -- No --> C
+    H -- Yes --> I[Review Collaborator Relationships]
+    I --> J[Produce Class Diagram from Cards]
+
+    style A fill:#4a9eff,color:#fff
+    style J fill:#10b981,color:#fff
+    style G fill:#f59e0b,color:#fff
+```
+
+---
+
+### Q6: Use Case Modeling and Sequence Diagrams in OOD
+
+**Use cases** capture system behavior from the *user's perspective* — they describe a goal a user (actor) wants to achieve and the steps the system takes to fulfill it. They are written in OOA to understand *what* the system must do, before deciding *how*.
+
+**Sequence diagrams** are produced in OOD to show *which objects* collaborate and *in what order* to realize a use case. They reveal: which classes are needed, what methods they must expose, and how control flows between them.
+
+**Workflow: Use Case → Sequence Diagram → Class Responsibilities**
+1. Write the use case (narrative): "Customer places an order."
+2. List participating objects: Customer, Order, Inventory, Payment, Notification.
+3. Draw the sequence diagram showing message flow.
+4. Extract method signatures from the messages — these become class responsibilities.
+5. Assign responsibilities back to classes (GRASP Information Expert guides this).
+
+```mermaid
+sequenceDiagram
+    actor Customer
+    participant UI as CheckoutController
+    participant OS as OrderService
+    participant INV as InventoryService
+    participant PAY as PaymentGateway
+    participant NOTIF as NotificationService
+
+    Customer->>UI: submitOrder(cartId, paymentToken)
+    UI->>OS: checkout(cartId, paymentToken)
+    OS->>INV: reserveStock(cartId)
+    INV-->>OS: StockReservation(reservationId)
+    OS->>PAY: chargeAsync(total, paymentToken)
+    PAY-->>OS: PaymentResult(transactionId, success=true)
+    OS->>OS: createOrder(reservation, payment)
+    OS->>NOTIF: sendConfirmation(order)
+    NOTIF-->>Customer: Order Confirmation Email
+    OS-->>UI: OrderConfirmation(orderId)
+    UI-->>Customer: 200 OK - Order confirmed
+```
+
+---
+
+### Q7: The Law of Demeter (Principle of Least Knowledge)
+
+The **Law of Demeter** (LoD) states that a method should only call methods on:
+1. **Itself** (`this`)
+2. **Its direct fields** (instance variables)
+3. **Objects passed as parameters**
+4. **Objects it creates locally**
+
+The core idea: *don't talk to strangers*. If you find yourself navigating through a chain of object references to get to what you need, that is a LoD violation — sometimes called a **train wreck**.
+
+**Why it matters:** Train wrecks tightly couple the caller to the internal structure of every intermediate object. If any link in the chain changes its type or structure, the caller breaks — even though it has no logical dependency on those intermediaries.
+
+❌ **Bad — train wreck, talking to strangers:**
+```csharp
+// ❌ OrderService knows about Order, Product, and Price internals
+public class OrderService
+{
+    public decimal GetFirstItemPrice(Customer customer)
+    {
+        // Violates LoD — navigating through customer → order → product → price
+        return customer.GetOrder().GetFirstItem().GetProduct().GetPrice();
+        // Coupled to: Customer, Order, OrderItem, Product, Money — all indirectly ❌
+    }
+}
+```
+
+✅ **Good — delegate to the object that knows:**
+```csharp
+// ✅ Customer knows its own order total — we ask it directly
+public class Customer
+{
+    private readonly Order _currentOrder;
+    public Customer(Order order) => _currentOrder = order;
+
+    public decimal GetOrderTotal() => _currentOrder.GetTotal(); // delegates to its own field ✅
+}
+
+public class Order
+{
+    private readonly List<OrderLine> _lines;
+    public Order(List<OrderLine> lines) => _lines = lines;
+
+    public decimal GetTotal() => _lines.Sum(l => l.LineTotal); // navigates own internals only ✅
+}
+
+public class OrderService
+{
+    public decimal GetOrderTotal(Customer customer)
+    {
+        return customer.GetOrderTotal(); // only talks to direct parameter ✅
+    }
+}
+```
+
+```mermaid
+flowchart TB
+    subgraph BAD["❌ Train Wreck — LoD Violated"]
+        OS1["OrderService"]
+        C1["Customer"]
+        O1["Order"]
+        P1["Product"]
+        M1["Money"]
+        OS1 -->|"customer.GetOrder()"| C1
+        C1 -->|".GetFirstItem().GetProduct()"| O1
+        O1 -->|".GetPrice()"| P1
+        P1 --> M1
+    end
+
+    subgraph GOOD["✅ Delegate — LoD Respected"]
+        OS2["OrderService"]
+        C2["Customer\n+GetOrderTotal()"]
+        O2["Order\n+GetTotal()"]
+        OS2 -->|"customer.GetOrderTotal()"| C2
+        C2 -->|"_order.GetTotal()\n(its own field)"| O2
+    end
+
+    style BAD fill:#fee2e2,stroke:#ef4444
+    style GOOD fill:#dcfce7,stroke:#16a34a
+```
+
+---
+
+### Q8: Tell Don't Ask Principle
+
+The **Tell Don't Ask** principle says: *tell an object what to do* rather than *asking for its state, making a decision, and mutating it externally*. This keeps behavior with the data that drives it — the heart of encapsulation.
+
+When you ask for state and act on it outside the object, you scatter the business rule across the codebase. Every caller has to know the rule. Change the rule — update every caller. The object's invariants leak outside it.
+
+❌ **Bad — Ask pattern (external logic, scattered rules):**
+```csharp
+// ❌ Caller asks for state, decides, then mutates — business logic is OUTSIDE the object
+public class AccountController
+{
+    public void ProcessWithdrawal(BankAccount account, decimal amount)
+    {
+        if (account.GetBalance() >= amount && account.IsActive && !account.IsFrozen)
+        {
+            account.SetBalance(account.GetBalance() - amount);
+            account.SetLastTransactionDate(DateTime.UtcNow);
+            // Every caller must repeat this rule — fragile, duplicated, not encapsulated ❌
+        }
+    }
+}
+```
+
+✅ **Good — Tell pattern (behavior lives with data):**
+```csharp
+// ✅ Tell the account to withdraw — it owns the rule, the state, and the side effects
+public class BankAccount
+{
+    private decimal _balance;
+    private bool _isActive;
+    private bool _isFrozen;
+    private DateTime _lastTransactionDate;
+
+    public void Withdraw(decimal amount)
+    {
+        if (!_isActive) throw new InvalidOperationException("Account is not active.");
+        if (_isFrozen) throw new InvalidOperationException("Account is frozen.");
+        if (amount <= 0) throw new ArgumentException("Amount must be positive.");
+        if (amount > _balance) throw new InvalidOperationException("Insufficient funds.");
+
+        _balance -= amount;
+        _lastTransactionDate = DateTime.UtcNow;
+    }
+}
+
+public class AccountController
+{
+    public void ProcessWithdrawal(BankAccount account, decimal amount)
+    {
+        account.Withdraw(amount); // Tell, don't ask — one line, no scattered logic ✅
+    }
+}
+```
+
+```mermaid
+flowchart LR
+    subgraph ASK["❌ Ask Pattern"]
+        direction TB
+        A1["Caller"]
+        A2["Object\n(data holder only)"]
+        A1 -->|"1. GetBalance()"| A2
+        A2 -->|"2. returns state"| A1
+        A1 -->|"3. decides externally"| A1
+        A1 -->|"4. SetBalance()"| A2
+    end
+
+    subgraph TELL["✅ Tell Pattern"]
+        direction TB
+        T1["Caller"]
+        T2["Object\n(data + behavior)"]
+        T1 -->|"Withdraw(amount)"| T2
+        T2 -->|"handles all rules\ninternally"| T2
+    end
+
+    style ASK fill:#fee2e2,stroke:#ef4444
+    style TELL fill:#dcfce7,stroke:#16a34a
+```
+
+---
+
+### Q9: Design by Contract (DbC)
+
+**Design by Contract**, introduced by Bertrand Meyer, formalizes the obligations and benefits between a method and its callers using three types of assertions:
+
+| Contract Type | Description | Violated By |
+|---|---|---|
+| **Precondition** | What must be true *before* the method executes | Caller |
+| **Postcondition** | What will be true *after* the method executes | Implementer |
+| **Invariant** | What must always be true about the object's state | Implementer |
+
+The contract metaphor: the caller must meet preconditions (caller's obligation), and in return the method guarantees postconditions (method's obligation). Invariants protect the object at all times.
+
+❌ **Bad — assumes valid input, crashes with unhelpful errors:**
+```csharp
+// ❌ No contracts — null and negative inputs crash cryptically
+public class InvoiceService
+{
+    public decimal CalculateTax(decimal amount, string countryCode)
+    {
+        var rate = _taxRates[countryCode]; // KeyNotFoundException — no hint of what was wrong ❌
+        return amount * rate;              // silent wrong result for negative amounts ❌
+    }
+}
+```
+
+✅ **Good — explicit precondition guards, postcondition assertions, invariant protection:**
+```csharp
+public class InvoiceService
+{
+    private readonly IReadOnlyDictionary<string, decimal> _taxRates;
+
+    public InvoiceService(IReadOnlyDictionary<string, decimal> taxRates)
+    {
+        // Constructor invariant: tax rates must be provided and non-empty
+        ArgumentNullException.ThrowIfNull(taxRates);
+        if (!taxRates.Any()) throw new ArgumentException("Tax rates cannot be empty.", nameof(taxRates));
+        _taxRates = taxRates;
+    }
+
+    public decimal CalculateTax(decimal amount, string countryCode)
+    {
+        // Preconditions — caller's obligations
+        if (amount < 0) throw new ArgumentOutOfRangeException(nameof(amount), "Amount must be non-negative.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(countryCode, nameof(countryCode));
+        if (!_taxRates.TryGetValue(countryCode, out var rate))
+            throw new ArgumentException($"Unknown country code '{countryCode}'.", nameof(countryCode));
+
+        var tax = amount * rate;
+
+        // Postcondition — method's guarantee
+        Debug.Assert(tax >= 0, "Postcondition violated: tax must be non-negative.");
+        return tax;
+    }
+}
+// CalculateTax(-100, "US") → ArgumentOutOfRangeException: "Amount must be non-negative."
+// CalculateTax(100, "XX") → ArgumentException: "Unknown country code 'XX'."
+```
+
+---
+
+### Q10: Object vs Value Object vs Entity vs Aggregate (DDD Alignment)
+
+These distinctions come from **Domain-Driven Design (DDD)** and are frequently asked in senior interviews. They determine how you model identity, equality, and lifecycle in your domain.
+
+| Concept | Identity | Mutability | Equality | Example |
+|---|---|---|---|---|
+| **Value Object** | By attributes | Immutable | By value | Money(100, USD), Address |
+| **Entity** | By unique ID | Mutable | By ID | Customer(id=42) |
+| **Aggregate** | By root ID | Partially mutable | By root ID | Order + OrderLines |
+| **Aggregate Root** | Root entity ID | Guards consistency | By root ID | Order (guards OrderLines) |
+
+❌ **Bad — treating a Value Object as an Entity:**
+```csharp
+// ❌ Money as Entity — unnecessary ID, mutability, wrong equality
+public class Money
+{
+    public int Id { get; set; }          // ❌ Money doesn't need identity
+    public decimal Amount { get; set; }  // ❌ should be immutable
+    public string Currency { get; set; } // ❌ mutable
+
+    // Two Money(100, USD) objects are NOT equal because IDs differ ❌
+    public override bool Equals(object obj) => obj is Money m && m.Id == Id;
+}
+```
+
+✅ **Good — immutable Value Object with equality by value:**
+```csharp
+// ✅ Money as immutable Value Object — equality by attributes, no ID
+public sealed record Money(decimal Amount, string Currency)
+{
+    public Money Add(Money other)
+    {
+        if (Currency != other.Currency)
+            throw new InvalidOperationException($"Cannot add {Currency} and {other.Currency}.");
+        return this with { Amount = Amount + other.Amount };
+    }
+
+    public Money Multiply(decimal factor)
+    {
+        if (factor < 0) throw new ArgumentOutOfRangeException(nameof(factor));
+        return this with { Amount = Amount * factor };
+    }
+}
+
+// ✅ Customer as Entity — identity by CustomerId
+public class Customer
+{
+    public CustomerId Id { get; }
+    public string Name { get; private set; }
+    public Email Email { get; private set; } // Email is a Value Object
+
+    public Customer(CustomerId id, string name, Email email) { Id = id; Name = name; Email = email; }
+
+    public override bool Equals(object obj) => obj is Customer c && c.Id == Id; // identity by ID ✅
+    public override int GetHashCode() => Id.GetHashCode();
+}
+
+// ✅ Order as Aggregate Root — guards OrderLines consistency
+public class Order
+{
+    public OrderId Id { get; }
+    private readonly List<OrderLine> _lines = new();
+    public IReadOnlyList<OrderLine> Lines => _lines.AsReadOnly();
+
+    public Money Total => _lines.Aggregate(new Money(0, "USD"), (acc, l) => acc.Add(l.LineTotal));
+
+    public void AddLine(Product product, int quantity)
+    {
+        if (quantity <= 0) throw new ArgumentException("Quantity must be positive.");
+        var existing = _lines.FirstOrDefault(l => l.ProductId == product.Id);
+        if (existing != null) existing.IncreaseQuantity(quantity); // route through root ✅
+        else _lines.Add(new OrderLine(product, quantity));
+    }
+    // OrderLines are NEVER modified from outside — only through Order (the Aggregate Root) ✅
+}
+```
+
+```mermaid
+classDiagram
+    class Order {
+        <<Aggregate Root>>
+        +OrderId Id
+        +Money Total
+        +AddLine(product, qty) void
+        +RemoveLine(productId) void
+    }
+    class OrderLine {
+        <<Entity>>
+        +OrderLineId Id
+        +ProductId ProductId
+        +int Quantity
+        +Money LineTotal
+        +IncreaseQuantity(qty) void
+    }
+    class Money {
+        <<Value Object>>
+        +decimal Amount
+        +string Currency
+        +Add(other) Money
+        +Multiply(factor) Money
+    }
+    class Customer {
+        <<Entity>>
+        +CustomerId Id
+        +string Name
+        +Email Email
+    }
+    class Email {
+        <<Value Object>>
+        +string Value
+    }
+
+    Order *-- OrderLine : Composition (Aggregate boundary)
+    OrderLine --> Money : uses
+    Order --> Money : Total
+    Customer --> Email : has
+    note for Order "Aggregate Root: only entry point\nto modify OrderLines"
+    note for Money "Value Object: immutable,\nequality by Amount+Currency"
+```
+
+---
+
+### Q11: GRASP Patterns (General Responsibility Assignment Software Patterns)
+
+**GRASP** is a set of nine principles for assigning responsibilities to classes in OOD, introduced by Craig Larman. They answer the question: *"Which class should be responsible for this?"*
+
+| Pattern | Core Question | Answer |
+|---|---|---|
+| **Information Expert** | Who has the info to fulfill this responsibility? | Assign to the class with the data needed |
+| **Creator** | Who should create instances of class X? | The class that aggregates, contains, uses, or records X |
+| **Controller** | Who handles system events from the UI? | A use-case controller class (not UI, not domain) |
+| **Low Coupling** | How to reduce change impact? | Assign so dependencies are minimized |
+| **High Cohesion** | How to keep classes manageable? | Assign so each class stays focused |
+| **Polymorphism** | How to handle type-based variation? | Use polymorphism, not type-switch |
+| **Pure Fabrication** | No domain class fits — what now? | Create a class with no domain counterpart (e.g., Repository) |
+| **Indirection** | How to decouple two classes? | Introduce an intermediary (e.g., interface, adapter) |
+| **Protected Variations** | How to protect against changes? | Wrap variation points with stable interfaces |
 
 ```csharp
-// High cohesion + loose coupling (✅)
-public class OrderService              // focused: only order business logic
+// GRASP Information Expert → Order knows its own total (it has the lines)
+public class Order
 {
-    private readonly IOrderRepository _repo;      // depends on abstraction
-    private readonly IEmailService _email;        // injected — can mock
-    public OrderService(IOrderRepository r, IEmailService e) { _repo = r; _email = e; }
+    private readonly List<OrderLine> _lines;
+    public decimal Total => _lines.Sum(l => l.LineTotal); // Expert: Order has the data ✅
 }
 
-// Low cohesion + tight coupling (❌)
-public class OrderService {
-    private SqlOrderRepository _repo = new();    // tight — concrete type
-    public void Create() { }
-    public void SendEmail() { }     // unrelated responsibility
-    public void GeneratePdf() { }  // another unrelated responsibility
-    public void UpdateInventory() { } // yet another
+// GRASP Creator → OrderFactory creates Orders (aggregates the data needed)
+public class OrderFactory
+{
+    public Order Create(Customer customer, List<CartItem> items)
+        => new Order(customer.Id, items.Select(i => new OrderLine(i.Product, i.Quantity)).ToList());
 }
+
+// GRASP Controller → CheckoutController handles the "place order" use-case event
+public class CheckoutController
+{
+    private readonly OrderService _orderService;
+    public CheckoutController(OrderService orderService) => _orderService = orderService;
+    public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
+        => Ok(await _orderService.CheckoutAsync(request.CartId, request.PaymentToken));
+}
+
+// GRASP Pure Fabrication → IOrderRepository has no domain counterpart, decouples persistence
+public interface IOrderRepository { Task SaveAsync(Order order); Task<Order> GetAsync(OrderId id); }
+
+// GRASP Protected Variations → IPaymentGateway wraps the variation point (Stripe / PayPal / etc.)
+public interface IPaymentGateway { Task<PaymentResult> ChargeAsync(decimal amount, string token); }
+```
+
+```mermaid
+flowchart TD
+    Q["Which class gets\nthis responsibility?"] --> IE["Information Expert?\nDoes a class already\nhave the data?"]
+    IE -- Yes --> ASSIGN["Assign to that class"]
+    IE -- No --> CR["Creator?\nDoes a class aggregate\nor use instances of X?"]
+    CR -- Yes --> ASSIGN
+    CR -- No --> PF["Pure Fabrication:\nCreate a new service /\nrepository class"]
+    PF --> ASSIGN
+
+    ASSIGN --> LC["Does it increase\ncoupling?"]
+    LC -- Yes --> IND["Apply Indirection:\nIntroduce interface\nor adapter"]
+    LC -- No --> HC["Does it hurt\ncohesion?"]
+    HC -- Yes --> SPLIT["Split the class\n(SRP / High Cohesion)"]
+    HC -- No --> DONE["✅ Responsibility\nAssigned"]
+
+    style Q fill:#4a9eff,color:#fff
+    style DONE fill:#10b981,color:#fff
+    style IND fill:#f59e0b,color:#fff
+    style SPLIT fill:#f59e0b,color:#fff
 ```
 
 ---
 
-## OOP-C6 — Creational Patterns Comparison
+### Q12: Common OOD Interview — Design a Parking Lot
 
-| Pattern | Problem solved | Creates | Key mechanism |
-|---------|---------------|---------|---------------|
-| Singleton | Ensure one instance | One object | Lazy init + private constructor |
-| Factory Method | Decouple creation from use | One product type | Subclass decides which class |
-| Abstract Factory | Create consistent product families | Family of related objects | Factory of factories |
-| Builder | Complex object construction | One complex object | Step-by-step, fluent API |
-| Prototype | Copy existing object | Copy of existing | `Clone()` |
+This is a classic OOD interview question. The expected approach: identify objects, assign responsibilities (GRASP), choose relationships, and justify design decisions.
 
-```
-When to choose:
-"I need exactly one instance globally" → Singleton (or DI AddSingleton)
-"I need to create different types at runtime" → Factory Method
-"I need consistent UI families (Win/Mac)" → Abstract Factory
-"My object has 10+ optional fields" → Builder
-"I need to copy a complex object" → Prototype (ICloneable)
-```
+**Step 1 — Identify Objects and Responsibilities:**
 
----
+| Class | Responsibility |
+|---|---|
+| `ParkingLot` | Knows all floors, entry/exit gates; overall capacity |
+| `ParkingFloor` | Knows its spots; finds available spot by type |
+| `ParkingSpot` | Knows its type, size, occupation state |
+| `Vehicle` | Knows its type (Motorcycle/Car/Truck) and plate |
+| `Ticket` | Records entry time, spot assigned, vehicle |
+| `Payment` | Calculates fee, processes payment |
+| `Gate` (Entry/Exit) | Issues ticket on entry; processes payment on exit |
+| `IPricingStrategy` | Calculates fee based on duration and spot type |
 
-## OOP-C7 — Structural Patterns Comparison
-
-| Pattern | Purpose | Wraps same interface? | Adds behaviour? | Converts interface? |
-|---------|---------|----------------------|----------------|---------------------|
-| Decorator | Add behaviour dynamically | ✅ | ✅ | ❌ |
-| Proxy | Control access | ✅ | Optionally | ❌ |
-| Adapter | Bridge incompatible interfaces | ❌ | ❌ | ✅ |
-| Facade | Simplify complex subsystem | ❌ | ❌ | Simplifies |
-| Bridge | Separate abstraction from implementation | — | — | — |
-| Composite | Tree structures (part-whole) | ✅ | — | ❌ |
-| Flyweight | Share many fine-grained objects | ❌ | ❌ | ❌ |
-
----
-
-## OOP-C8 — Behavioral Patterns Comparison
-
-| Pattern | Who controls flow | Key feature | Example |
-|---------|------------------|-------------|---------|
-| Strategy | Context (holds strategy) | Swap algorithm at runtime | Payment method, discount calc |
-| Command | Invoker (holds commands) | Undo/redo, queue commands | Text editor undo |
-| Observer | Subject (notifies) | Decoupled event notification | Event bus, UI bindings |
-| Template Method | Abstract class (skeleton) | Invariant algorithm, variable steps | Report generation |
-| Chain of Responsibility | Request passed up chain | Dynamic handler selection | Middleware, approval chain |
-| State | Context (delegates to state) | Behaviour changes with state | ATM, vending machine, order lifecycle |
-| Mediator | Mediator (centralises comms) | Reduce many-to-many coupling | MediatR, air traffic control |
-| Iterator | Iterator object | Traverse without exposing internals | `foreach`, `IEnumerator<T>` |
-
-
----
-
-# ⚖️ OOP & Design Pattern Comparisons — Side-by-Side Differences
-
----
-
-## OOP-C1 — Creational vs Structural vs Behavioral Patterns
-
-| Category | Purpose | Patterns |
-|----------|---------|---------|
-| **Creational** | HOW objects are created (hide creation logic) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
-| **Structural** | HOW objects are composed (class/object structure) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
-| **Behavioral** | HOW objects communicate (responsibility assignment) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
-
----
-
-## OOP-C2 — Encapsulation vs Abstraction vs Information Hiding
-
-| | Encapsulation | Abstraction | Information Hiding |
-|-|--------------|-------------|-------------------|
-| What | Bundle data + methods | Show only relevant interface | Hide implementation details |
-| How | Private fields + public methods | Interfaces / abstract classes | Access modifiers |
-| Why | Protect state | Reduce complexity | Limit dependencies |
+**Step 2 — Key Design Decisions:**
+- **Spot types** modeled as an enum: `Motorcycle`, `Compact`, `Large` — spot only accepts compatible vehicle types.
+- **Pricing** uses the **Strategy pattern** — `IPricingStrategy` with `HourlyPricing`, `FlatRatePricing`. Swap pricing without touching `Payment`.
+- **Entry/Exit** uses the **Command pattern** — `EntryCommand`/`ExitCommand` encapsulate the operation and support logging/undo.
+- **Finding a spot** follows GRASP Information Expert — `ParkingFloor` knows its spots, so it finds available ones.
 
 ```csharp
-// All three together:
-public abstract class BankAccount      // Abstraction — only shows Deposit/Withdraw
-{
-    private decimal _balance;          // Encapsulation — data bundled with class
-                                       // Information Hiding — balance not directly accessible
-    public abstract void Deposit(decimal amount);
+public enum SpotType { Motorcycle, Compact, Large }
+public enum VehicleType { Motorcycle, Car, Truck }
 
-    protected void SetBalance(decimal amount) => _balance = amount;
-    public decimal GetBalance() => _balance; // controlled access only
+public class Vehicle
+{
+    public string LicensePlate { get; }
+    public VehicleType Type { get; }
+    public Vehicle(string plate, VehicleType type) { LicensePlate = plate; Type = type; }
+}
+
+public class ParkingSpot
+{
+    public int SpotId { get; }
+    public SpotType Type { get; }
+    public bool IsOccupied { get; private set; }
+    public ParkingSpot(int id, SpotType type) { SpotId = id; Type = type; }
+
+    public bool CanFit(Vehicle vehicle) => Type switch {
+        SpotType.Motorcycle => vehicle.Type == VehicleType.Motorcycle,
+        SpotType.Compact    => vehicle.Type is VehicleType.Car or VehicleType.Motorcycle,
+        SpotType.Large      => true,
+        _                   => false
+    };
+
+    public void Occupy()  { if (IsOccupied) throw new InvalidOperationException("Spot already taken."); IsOccupied = true; }
+    public void Vacate()  { IsOccupied = false; }
+}
+
+public interface IPricingStrategy
+{
+    decimal Calculate(DateTime entry, DateTime exit, SpotType spotType);
+}
+
+public class HourlyPricingStrategy : IPricingStrategy
+{
+    private readonly IReadOnlyDictionary<SpotType, decimal> _rates;
+    public HourlyPricingStrategy(IReadOnlyDictionary<SpotType, decimal> rates) => _rates = rates;
+
+    public decimal Calculate(DateTime entry, DateTime exit, SpotType spotType)
+    {
+        var hours = Math.Ceiling((exit - entry).TotalHours);
+        return (decimal)hours * _rates[spotType];
+    }
+}
+
+public record Ticket(Guid TicketId, Vehicle Vehicle, ParkingSpot Spot, DateTime EntryTime);
+
+public class ParkingFloor
+{
+    public int FloorNumber { get; }
+    private readonly List<ParkingSpot> _spots;
+    public ParkingFloor(int floor, IEnumerable<ParkingSpot> spots) { FloorNumber = floor; _spots = spots.ToList(); }
+
+    // GRASP Information Expert: ParkingFloor knows its spots → finds available spot
+    public ParkingSpot? FindAvailableSpot(Vehicle vehicle)
+        => _spots.FirstOrDefault(s => !s.IsOccupied && s.CanFit(vehicle));
+}
+
+public class ParkingLot
+{
+    private readonly List<ParkingFloor> _floors;
+    private readonly IPricingStrategy _pricing;
+    private readonly Dictionary<Guid, Ticket> _activeTickets = new();
+
+    public ParkingLot(IEnumerable<ParkingFloor> floors, IPricingStrategy pricing)
+    { _floors = floors.ToList(); _pricing = pricing; }
+
+    public Ticket? Enter(Vehicle vehicle)
+    {
+        var spot = _floors.Select(f => f.FindAvailableSpot(vehicle)).FirstOrDefault(s => s != null);
+        if (spot == null) return null; // lot full
+        spot.Occupy();
+        var ticket = new Ticket(Guid.NewGuid(), vehicle, spot, DateTime.UtcNow);
+        _activeTickets[ticket.TicketId] = ticket;
+        return ticket;
+    }
+
+    public decimal Exit(Guid ticketId)
+    {
+        if (!_activeTickets.Remove(ticketId, out var ticket))
+            throw new ArgumentException("Invalid ticket.");
+        var fee = _pricing.Calculate(ticket.EntryTime, DateTime.UtcNow, ticket.Spot.Type);
+        ticket.Spot.Vacate();
+        return fee;
+    }
 }
 ```
 
----
+```mermaid
+classDiagram
+    class ParkingLot {
+        -List~ParkingFloor~ _floors
+        -IPricingStrategy _pricing
+        -Dictionary _activeTickets
+        +Enter(vehicle) Ticket
+        +Exit(ticketId) decimal
+    }
+    class ParkingFloor {
+        +int FloorNumber
+        -List~ParkingSpot~ _spots
+        +FindAvailableSpot(vehicle) ParkingSpot
+    }
+    class ParkingSpot {
+        +int SpotId
+        +SpotType Type
+        +bool IsOccupied
+        +CanFit(vehicle) bool
+        +Occupy() void
+        +Vacate() void
+    }
+    class Vehicle {
+        +string LicensePlate
+        +VehicleType Type
+    }
+    class Ticket {
+        <<record>>
+        +Guid TicketId
+        +Vehicle Vehicle
+        +ParkingSpot Spot
+        +DateTime EntryTime
+    }
+    class IPricingStrategy {
+        <<interface>>
+        +Calculate(entry, exit, spotType) decimal
+    }
+    class HourlyPricingStrategy {
+        -rates Dictionary
+        +Calculate(entry, exit, spotType) decimal
+    }
+    class FlatRatePricingStrategy {
+        +Calculate(entry, exit, spotType) decimal
+    }
 
-## OOP-C3 — Inheritance vs Composition vs Aggregation vs Association
-
-| Relationship | Meaning | Lifetime | C# example |
-|-------------|---------|---------|------------|
-| **Inheritance** (is-a) | Child extends parent | Same | `class Dog : Animal` |
-| **Composition** (has-a, strong) | Owner owns component, component dies with owner | Shared | `class Car { Engine engine = new(); }` |
-| **Aggregation** (has-a, weak) | Owner references component, component lives independently | Independent | `class Team { List<Player> players; }` |
-| **Association** (uses-a) | Knows about / uses temporarily | Independent | Method parameter |
-
-```csharp
-// Composition — Engine dies when Car dies
-class Car { private Engine _engine = new Engine(); }
-
-// Aggregation — Players exist independently of Team
-class Team { public List<Player> Players { get; init; } = []; }
-// Players can belong to multiple teams, outlive the team
-
-// Association — temporary use
-class OrderProcessor
-{
-    public void Process(Order order) { /* uses order but doesn't own it */ }
-}
+    ParkingLot *-- ParkingFloor : Composition
+    ParkingFloor *-- ParkingSpot : Composition
+    ParkingLot --> IPricingStrategy : Strategy Pattern
+    IPricingStrategy <|.. HourlyPricingStrategy : implements
+    IPricingStrategy <|.. FlatRatePricingStrategy : implements
+    Ticket --> Vehicle : references
+    Ticket --> ParkingSpot : references
+    ParkingLot --> Ticket : manages
 ```
 
 ---
-
-## OOP-C4 — Abstract Class vs Interface vs Concrete Class
-
-| | Concrete Class | Abstract Class | Interface |
-|-|---------------|---------------|-----------|
-| Instantiate | ✅ | ❌ | ❌ |
-| Multiple inheritance | ❌ | ❌ | ✅ |
-| State / fields | ✅ | ✅ | ❌ |
-| Constructor | ✅ | ✅ | ❌ |
-| Default method body | ✅ | ✅ (partial) | ✅ (C# 8+ default impl) |
-| Design intent | "Here is a complete thing" | "Here is a partial blueprint" | "Here is a contract" |
-
----
-
-## OOP-C5 — Overloading vs Overriding vs Hiding (`new` keyword)
-
-| | Overloading | Overriding | Hiding (`new`) |
-|-|------------|-----------|----------------|
-| Same name | ✅ | ✅ | ✅ |
-| Same signature | ❌ (different params) | ✅ (same params) | ✅ (same params) |
-| Runtime polymorphism | ❌ Compile-time | ✅ | ❌ |
-| Requires `virtual` | ❌ | ✅ base needs `virtual` | ❌ |
-| Risk | None | None | ❌ Breaks polymorphism |
-
-```csharp
-class Logger
-{
-    // Overloading — same name, different params (compile-time resolution)
-    public void Log(string msg) { }
-    public void Log(string msg, int level) { }
-
-    // Virtual — allows overriding
-    public virtual void Write(string msg) => Console.WriteLine(msg);
-}
-
-class FileLogger : Logger
-{
-    // Overriding — runtime polymorphism ✅
-    public override void Write(string msg) => File.AppendAllText("log.txt", msg);
-
-    // Hiding — breaks polymorphism ❌
-    public new void Log(string msg) => Console.WriteLine($"[File] {msg}");
-}
-
-Logger log = new FileLogger();
-log.Write("test");  // ✅ calls FileLogger.Write (override works)
-log.Log("test");    // ❌ calls Logger.Log (hidden method not visible via base ref)
-```
-
----
-
-## OOP-C6 — SOLID: Each Principle with Common Violation
-
-| Principle | Violation | Fix |
-|-----------|----------|-----|
-| **S** — SRP | `UserService` also sends emails | Split into `UserService` + `EmailService` |
-| **O** — OCP | `if (type == "pdf") ... else if (type == "csv")` | `IExporter` interface + `PdfExporter`, `CsvExporter` |
-| **L** — LSP | `Rectangle.SetWidth()` breaks `Square` subclass | Favour composition over inheritance |
-| **I** — ISP | `IWorker` with `Work()`, `Eat()`, `Sleep()` | Split into `IWorker`, `IEater`, `ISleeper` |
-| **D** — DIP | `new SqlRepository()` inside service | Inject `IRepository` via constructor |
-
----
-
-## OOP-C7 — Four GoF Creational Patterns Compared
-
-| | Singleton | Factory Method | Abstract Factory | Builder |
-|-|-----------|---------------|-----------------|---------|
-| Creates how many | Exactly ONE | One product, type varies | Family of products | One complex product |
-| Controlled by | Self | Subclass / method | Factory class | Builder + Director |
-| Use for | Config, Logger | Plugin systems | Platform-specific UI | Complex object construction |
-| DI equivalent | `AddSingleton` | `AddTransient` with factory | Named factory | `OptionsBuilder<T>` |
-
----
-
-## OOP-C8 — Cohesion vs Coupling
-
-| | Cohesion | Coupling |
-|-|---------|---------|
-| Definition | How related are a class's responsibilities | How dependent classes are on each other |
-| Goal | ✅ HIGH cohesion | ✅ LOW coupling |
-| Violation | God class with 50 methods | Concrete dependency `new SqlRepo()` |
-| Fix | Split classes by SRP | Depend on interfaces (DIP) |
-
-```csharp
-// ❌ Low cohesion + high coupling
-class OrderManager  // does EVERYTHING
-{
-    private SqlOrderRepository _repo = new(); // high coupling to SQL
-    public void CreateOrder() { }
-    public void SendEmail()   { }   // not order's job
-    public void GeneratePdf() { }   // not order's job
-    public void UpdateStock() { }   // not order's job
-}
-
-// ✅ High cohesion + low coupling
-class OrderService(IOrderRepository repo, IEventBus bus)
-{
-    public async Task CreateOrderAsync(CreateOrderDto dto) { /* only order logic */ }
-}
-// Each class has one clear purpose; depends on abstractions
-```
-

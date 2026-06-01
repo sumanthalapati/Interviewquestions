@@ -2289,4 +2289,856 @@ flowchart TD
     C1([First Call: GetInstance]) --> CHK{_instance == null?}
     CHK -->|YES| LK[Acquire lock]
     LK --> CHK2{Still null?\ndouble-check}
-    CHK2 -->|YES| NEW[new Singleton created\nstore
+    CHK2 -->|YES| NEW[new Singleton created\nstore in static field]
+    CHK2 -->|NO| RET2[Return existing instance]
+    NEW --> RET[Return new instance]
+    CHK -->|NO| RET3[Return existing instance]
+
+    style NEW fill:#4CAF50,color:#fff
+    style CHK fill:#FF9800,color:#fff
+```
+
+---
+
+# async/await in .NET — Deep Dive
+
+---
+
+## Q: How does async/await actually work under the hood in .NET?
+
+When you mark a method `async`, the C# compiler transforms it into a **state machine** that implements `IAsyncStateMachine`. Each `await` point becomes a numbered state. The runtime calls `MoveNext()` to advance through states.
+
+Key mechanics:
+- The method returns an incomplete `Task` to the caller immediately when it hits the first `await`
+- A `SynchronizationContext` (if present) captures where the continuation should resume
+- `ConfigureAwait(false)` tells the runtime: *do not capture the current SynchronizationContext* — resume on any ThreadPool thread
+- In **ASP.NET Core** there is no SynchronizationContext, so `ConfigureAwait(false)` has no practical scheduling effect, but it is still a best practice in library code to avoid problems when your library is consumed from WinForms/WPF
+
+```csharp
+// What you write:
+public async Task<string> GetDataAsync()
+{
+    var result = await _httpClient.GetStringAsync("https://api.example.com/data");
+    return result.ToUpper();
+}
+
+// What the compiler generates (simplified):
+private struct GetDataAsyncStateMachine : IAsyncStateMachine
+{
+    public int _state;           // -1 = not started, 0 = awaiting, -2 = done
+    public AsyncTaskMethodBuilder<string> _builder;
+    private TaskAwaiter<string> _awaiter;
+
+    public void MoveNext()
+    {
+        switch (_state)
+        {
+            case -1:  // STEP 1: first call
+                _awaiter = _httpClient.GetStringAsync("...").GetAwaiter();
+                if (!_awaiter.IsCompleted)
+                {
+                    _state = 0;
+                    _builder.AwaitUnsafeOnCompleted(ref _awaiter, ref this);
+                    return;  // ← returns incomplete Task to caller
+                }
+                goto case 0;
+
+            case 0:   // STEP 2: continuation — called when HTTP response arrives
+                var result = _awaiter.GetResult();
+                _builder.SetResult(result.ToUpper());  // ← completes the returned Task
+                break;
+        }
+    }
+}
+
+// ❌ WRONG — async void: exceptions are unobservable and crash the process
+public async void FireAndForget() { await DoSomethingAsync(); }
+
+// ✅ CORRECT — async Task: exceptions are captured in the returned Task
+public async Task DoWorkAsync()
+{
+    // Library code: use ConfigureAwait(false) to avoid context capture
+    var data = await _repo.GetAsync().ConfigureAwait(false);
+    await _cache.SetAsync(data).ConfigureAwait(false);
+}
+```
+
+```mermaid
+flowchart TD
+    START([Method called]) --> HIT{Hits await?}
+    HIT -->|No awaits / already complete| SYNC[Runs synchronously\nreturns completed Task]
+    HIT -->|Yes - async op not done| SM[Compiler state machine\ncaptures state + locals]
+    SM --> CTX{SynchronizationContext\ncaptured?}
+    CTX -->|ConfigureAwait false| POOL[Continuation scheduled\non ThreadPool]
+    CTX -->|Default - context present| CTXPOST[Continuation posted\nback to captured context\neg UI thread]
+    SM --> RETURN[Incomplete Task\nreturned to caller]
+    RETURN --> CALLER[Caller continues\nits own work]
+    POOL --> RESUME[MoveNext called\nstate machine resumes\nafter await]
+    CTXPOST --> RESUME
+    RESUME --> COMPLETE([Task completed\nresult set])
+
+    style SM fill:#2196F3,color:#fff
+    style RETURN fill:#FF9800,color:#fff
+    style RESUME fill:#4CAF50,color:#fff
+```
+
+---
+
+## Q: What is the difference between Task, ValueTask, and IAsyncEnumerable?
+
+| Type | Allocation | Best For |
+|------|-----------|----------|
+| `Task<T>` | Always heap-allocated | General async operations |
+| `ValueTask<T>` | Zero alloc when synchronous | Cache hits, hot paths |
+| `IAsyncEnumerable<T>` | Streaming | Large result sets, real-time feeds |
+
+```csharp
+// Task<T> — standard, always allocates a Task object on the heap
+public async Task<Order> GetOrderAsync(Guid id)
+{
+    return await _db.Orders.FindAsync(id);
+}
+
+// ValueTask<T> — avoids allocation when result is already available (cache hit)
+private readonly Dictionary<Guid, Order> _cache = new();
+
+public ValueTask<Order> GetOrderAsync(Guid id)
+{
+    if (_cache.TryGetValue(id, out var order))
+        return new ValueTask<Order>(order);  // ← zero allocation, synchronous path
+
+    return new ValueTask<Order>(FetchFromDbAsync(id));  // async path
+}
+
+// ❌ WRONG — ValueTask must only be awaited ONCE
+var vt = GetOrderAsync(id);
+var r1 = await vt;
+var r2 = await vt;  // undefined behavior — second await on ValueTask is not allowed
+
+// ✅ CORRECT — if you need to await multiple times, convert to Task first
+var task = GetOrderAsync(id).AsTask();
+var r1 = await task;
+var r2 = await task;  // fine — Task can be awaited multiple times
+
+// IAsyncEnumerable<T> — async streaming, one item at a time
+public async IAsyncEnumerable<Order> StreamOrdersAsync(
+    [EnumeratorCancellation] CancellationToken ct = default)
+{
+    await foreach (var order in _db.Orders.AsAsyncEnumerable().WithCancellation(ct))
+    {
+        yield return order;  // ← each item delivered as it arrives, no buffering all into memory
+    }
+}
+
+// Consumer
+await foreach (var order in StreamOrdersAsync(cancellationToken))
+{
+    await ProcessAsync(order);  // process each item as it streams in
+}
+```
+
+```mermaid
+flowchart TD
+    Q{What do you need?} --> A1[Single async result\ngeneral purpose]
+    Q --> A2[Single result\nhot path / cache]
+    Q --> A3[Multiple results\nstreamed over time]
+
+    A1 --> T[Task / Task-of-T\nAlways heap alloc\nAwaitable multiple times]
+    A2 --> VT{Is result often\nsynchonously available?}
+    VT -->|Yes| VTY[ValueTask / ValueTask-of-T\nZero alloc on sync path\nAwait ONCE only]
+    VT -->|No| T
+    A3 --> IAE[IAsyncEnumerable-of-T\nawait foreach\nCancel via CancellationToken\nNo buffering entire set]
+
+    style T fill:#2196F3,color:#fff
+    style VTY fill:#4CAF50,color:#fff
+    style IAE fill:#9C27B0,color:#fff
+```
+
+---
+
+## Q: What is SynchronizationContext and how does it interact with async/await?
+
+`SynchronizationContext` is a mechanism to marshal work back to a specific thread or context (e.g., the UI thread in WinForms/WPF, or the request thread in old ASP.NET).
+
+| Runtime | SynchronizationContext | Continuation behavior |
+|---------|----------------------|----------------------|
+| WinForms / WPF | Present (UI thread) | Continuation posted back to UI thread |
+| ASP.NET (classic) | Present (request context) | Continuation posted back to request thread |
+| **ASP.NET Core** | **None** | Continuation runs on any ThreadPool thread |
+| Console app | None (default) | ThreadPool |
+
+```csharp
+// ❌ DEADLOCK in old ASP.NET or WinForms — blocking on async
+public string GetData()
+{
+    // SynchronizationContext is captured by GetStringAsync
+    // .Result blocks the current thread
+    // Continuation tries to post back to this SAME blocked thread → DEADLOCK
+    return _httpClient.GetStringAsync("https://api.example.com").Result;
+}
+
+// ✅ FIX 1 — go async all the way
+public async Task<string> GetDataAsync()
+{
+    return await _httpClient.GetStringAsync("https://api.example.com");
+}
+
+// ✅ FIX 2 — use ConfigureAwait(false) to detach from the captured context
+// (continuation runs on ThreadPool, not blocked UI/request thread)
+public string GetData()
+{
+    return _httpClient.GetStringAsync("https://api.example.com")
+                      .ConfigureAwait(false)
+                      .GetAwaiter()
+                      .GetResult();  // still blocking, but no deadlock
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant UI as UI / Request Thread
+    participant SC as SynchronizationContext
+    participant TP as ThreadPool
+
+    rect rgb(255, 200, 200)
+        Note over UI,TP: DEADLOCK scenario (WinForms / classic ASP.NET)
+        UI->>UI: calls GetStringAsync().Result (blocks thread)
+        UI->>SC: await captures SynchronizationContext
+        TP->>SC: HTTP completes, posts continuation to SC
+        SC--xUI: UI thread is BLOCKED — cannot process continuation
+        Note over UI: DEADLOCK — thread waits forever
+    end
+
+    rect rgb(200, 255, 200)
+        Note over UI,TP: NO DEADLOCK — ASP.NET Core (no SynchronizationContext)
+        UI->>TP: calls GetStringAsync() — returns Task
+        UI->>UI: continues other work (or returns)
+        TP->>TP: HTTP completes, continuation runs on ThreadPool
+        TP-->>UI: Task completed, result available
+    end
+
+    rect rgb(200, 230, 255)
+        Note over UI,TP: ConfigureAwait(false) fix in any context
+        UI->>TP: await op.ConfigureAwait(false)
+        Note over TP: Context NOT captured
+        TP->>TP: continuation runs on ThreadPool
+        TP-->>UI: result returned normally
+    end
+```
+
+---
+
+## Q: What are common async/await pitfalls and anti-patterns?
+
+### 1. async void
+
+```csharp
+// ❌ async void — exception escapes, crashes the process
+public async void LoadData() { await FetchAsync(); throw new Exception("boom"); }
+
+// ✅ async Task — exception captured in Task
+public async Task LoadDataAsync() { await FetchAsync(); }
+
+// async void is ONLY acceptable for event handlers
+private async void Button_Click(object s, EventArgs e) { await LoadDataAsync(); }
+```
+
+### 2. Fire and forget without error handling
+
+```csharp
+// ❌ Lost exception — nobody observes the Task
+_ = DoWorkAsync();
+
+// ✅ Explicit fire-and-forget with error logging
+_ = DoWorkAsync().ContinueWith(t =>
+    _logger.LogError(t.Exception, "Background task failed"),
+    TaskContinuationOptions.OnlyOnFaulted);
+```
+
+### 3. Blocking on async (.Result / .Wait())
+
+```csharp
+// ❌ Potential deadlock (especially in SynchronizationContext environments)
+var data = GetDataAsync().Result;
+GetDataAsync().Wait();
+
+// ✅ Await all the way up
+var data = await GetDataAsync();
+```
+
+### 4. Sequential awaits in a loop when parallel is possible
+
+```csharp
+// ❌ Sequential — total time = sum of all operations
+foreach (var id in orderIds)
+{
+    var order = await _repo.GetAsync(id);  // waits for each one before starting next
+    results.Add(order);
+}
+
+// ✅ Parallel — total time ≈ slowest single operation
+var tasks = orderIds.Select(id => _repo.GetAsync(id));
+var results = await Task.WhenAll(tasks);
+```
+
+### 5. CancellationToken not propagated
+
+```csharp
+// ❌ Long operation can never be cancelled
+public async Task<byte[]> ProcessFileAsync()
+{
+    var data = await File.ReadAllBytesAsync("huge.bin");  // no cancellation
+    return await TransformAsync(data);
+}
+
+// ✅ CancellationToken threaded through every layer
+public async Task<byte[]> ProcessFileAsync(CancellationToken ct = default)
+{
+    var data = await File.ReadAllBytesAsync("huge.bin", ct);
+    ct.ThrowIfCancellationRequested();
+    return await TransformAsync(data, ct);
+}
+```
+
+### 6. Async over sync (unnecessary Task.Run)
+
+```csharp
+// ❌ Fake async — wastes a thread, adds overhead
+public Task<int> ComputeAsync() => Task.Run(() => 1 + 1);
+
+// ✅ Only use Task.Run for CPU-bound work that would block the calling thread
+public async Task<int> ProcessImageAsync(byte[] data, CancellationToken ct)
+{
+    // CPU-bound: offload to ThreadPool so the calling thread is free
+    return await Task.Run(() => _imageProcessor.Process(data), ct);
+}
+```
+
+```mermaid
+flowchart TD
+    START([Async code review]) --> Q1{Returns void?}
+    Q1 -->|async void| AVOID1[❌ async void\nChange to async Task\nexcept event handlers]
+    Q1 -->|async Task| Q2{Blocking call?\n.Result or .Wait}
+    Q2 -->|Yes| AVOID2[❌ Blocking on async\nAwait instead\nor go fully async]
+    Q2 -->|No| Q3{Awaiting in a loop\nfor independent ops?}
+    Q3 -->|Yes - sequential| AVOID3[❌ Sequential awaits\nUse Task.WhenAll\nfor parallel execution]
+    Q3 -->|No| Q4{CancellationToken\naccepted + forwarded?}
+    Q4 -->|Not forwarded| AVOID4[❌ Missing CT propagation\nPass CT to every awaitable]
+    Q4 -->|Forwarded| GOOD[✅ Looks good]
+
+    style AVOID1 fill:#f44336,color:#fff
+    style AVOID2 fill:#f44336,color:#fff
+    style AVOID3 fill:#f44336,color:#fff
+    style AVOID4 fill:#f44336,color:#fff
+    style GOOD fill:#4CAF50,color:#fff
+```
+
+---
+
+## Q: How do you run multiple async operations in parallel?
+
+```csharp
+var ids = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+
+// ── Task.WhenAll — wait for ALL to complete ──────────────────────────────
+
+// ❌ Sequential — each await waits before starting the next
+var results = new List<Order>();
+foreach (var id in ids)
+    results.Add(await _repo.GetOrderAsync(id));  // 3 x 200ms = ~600ms total
+
+// ✅ Parallel — all start simultaneously
+var tasks   = ids.Select(id => _repo.GetOrderAsync(id));
+var orders  = await Task.WhenAll(tasks);          // ~200ms total (runs concurrently)
+
+// ── Task.WhenAny — first one to finish ───────────────────────────────────
+var fastest = await Task.WhenAny(
+    _primaryService.GetAsync(id),
+    _fallbackService.GetAsync(id));
+var result = await fastest;  // unwrap the winning Task
+
+// ── SemaphoreSlim — bounded concurrency (throttle parallel ops) ──────────
+var semaphore = new SemaphoreSlim(5); // max 5 concurrent operations
+
+var tasks2 = ids.Select(async id =>
+{
+    await semaphore.WaitAsync();          // acquire slot
+    try   { return await _repo.GetOrderAsync(id); }
+    finally { semaphore.Release(); }      // always release
+});
+var bounded = await Task.WhenAll(tasks2);
+
+// ── Parallel.ForEachAsync (.NET 6+) ──────────────────────────────────────
+await Parallel.ForEachAsync(ids,
+    new ParallelOptions { MaxDegreeOfParallelism = 5 },
+    async (id, ct) => await ProcessAsync(id, ct));
+```
+
+```mermaid
+flowchart LR
+    subgraph SEQ["❌ Sequential (600ms)"]
+        S1[Await op1\n200ms] --> S2[Await op2\n200ms] --> S3[Await op3\n200ms]
+    end
+
+    subgraph PAR["✅ Parallel Task.WhenAll (~200ms)"]
+        direction TB
+        P0([Start]) --> P1[op1 starts]
+        P0 --> P2[op2 starts]
+        P0 --> P3[op3 starts]
+        P1 & P2 & P3 --> DONE([All complete ~200ms])
+    end
+
+    subgraph BND["✅ Bounded SemaphoreSlim (max N concurrent)"]
+        SEM[SemaphoreSlim\nmax 5] --> W1[op1]
+        SEM --> W2[op2]
+        SEM --> W3[op3]
+        SEM --> W4[op4]
+        SEM --> W5[op5]
+        W1 -->|Release| W6[op6 unblocked]
+    end
+
+    style SEQ fill:#ffebee
+    style PAR fill:#e8f5e9
+    style BND fill:#e3f2fd
+```
+
+---
+
+## Q: How does CancellationToken work and why should you always support it?
+
+```csharp
+// ── Setup ────────────────────────────────────────────────────────────────
+
+// Cancellable after 30 seconds OR when user cancels
+using var cts     = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+using var userCts = new CancellationTokenSource();
+
+// Link multiple cancellation sources
+using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+    cts.Token, userCts.Token);  // cancels if EITHER fires
+
+// ── Producing the token ──────────────────────────────────────────────────
+// ASP.NET Core: HttpContext.RequestAborted is provided automatically
+[HttpGet("{id}")]
+public async Task<IActionResult> Get(Guid id, CancellationToken ct)  // ← injected by framework
+{
+    var order = await _service.GetOrderAsync(id, ct);
+    return Ok(order);
+}
+
+// ── Consuming the token ──────────────────────────────────────────────────
+
+// ❌ Ignoring cancellation — runs forever even if client disconnects
+public async Task<Order> GetOrderAsync(Guid id)
+{
+    await Task.Delay(5000);                        // simulate slow work, no cancellation
+    return await _db.Orders.FindAsync(id);
+}
+
+// ✅ Propagating cancellation throughout
+public async Task<Order> GetOrderAsync(Guid id, CancellationToken ct = default)
+{
+    await Task.Delay(5000, ct);                    // throws OperationCanceledException if cancelled
+    ct.ThrowIfCancellationRequested();             // explicit check after CPU-bound work
+    return await _db.Orders.FindAsync(new object[] { id }, ct);
+}
+
+// ── Handling cancellation at the top level ───────────────────────────────
+try
+{
+    var result = await GetOrderAsync(id, ct);
+}
+catch (OperationCanceledException)
+{
+    // Normal cancellation — log if needed, do NOT rethrow as 500
+    _logger.LogInformation("Request cancelled for order {Id}", id);
+    return StatusCode(499); // Client Closed Request
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Controller
+    participant Service
+    participant Repo
+    participant DB
+
+    Client->>Controller: GET /orders/42
+    Note over Controller: CancellationToken ct = HttpContext.RequestAborted
+    Controller->>Service: GetOrderAsync(42, ct)
+    Service->>Repo: FindAsync(42, ct)
+    Repo->>DB: SQL query (with ct)
+
+    Client-->>Controller: Client disconnects / timeout fires
+    Note over Controller: ct.IsCancellationRequested = true
+
+    DB-->>Repo: (query cancelled)
+    Repo-->>Service: throws OperationCanceledException
+    Service-->>Controller: OperationCanceledException propagates
+    Controller-->>Client: 499 / 408 (no response sent)
+
+    Note over Service,Repo: Each layer passes ct down\nEach awaitable respects ct\nNo wasted work after cancel
+```
+
+---
+
+# Additional .NET Concepts
+
+---
+
+## Q: What is the difference between IEnumerable, IQueryable, and IAsyncEnumerable?
+
+| Interface | Where LINQ runs | When data loads | Use case |
+|-----------|----------------|----------------|----------|
+| `IEnumerable<T>` | CLR / in-memory | When iterated | In-memory collections |
+| `IQueryable<T>` | Database (SQL) | When materialized (ToList/First/etc.) | EF Core queries |
+| `IAsyncEnumerable<T>` | Async source | One item at a time, async | Large streams, real-time |
+
+```csharp
+// IQueryable<T> — expression tree, translated to SQL, deferred execution
+IQueryable<Order> query = _db.Orders
+    .Where(o => o.Status == "Pending")    // ← adds WHERE clause, no SQL yet
+    .OrderBy(o => o.CreatedAt);           // ← adds ORDER BY, no SQL yet
+
+// SQL executes HERE when materialized:
+var orders = await query.ToListAsync();   // SELECT * FROM Orders WHERE Status='Pending' ORDER BY CreatedAt
+
+// ❌ WRONG — calling ToList() early materializes ALL rows, LINQ runs in CLR
+var allOrders = await _db.Orders.ToListAsync();                      // loads everything
+var pending   = allOrders.Where(o => o.Status == "Pending").ToList(); // filters in memory
+
+// ✅ CORRECT — compose query before materializing
+var pending = await _db.Orders
+    .Where(o => o.Status == "Pending")    // translated to SQL WHERE
+    .Select(o => new OrderDto(o.Id, o.Status))  // translated to SELECT columns
+    .ToListAsync();
+
+// ❌ WRONG — IEnumerable parameter forces client-side evaluation in EF
+public IEnumerable<Order> Filter(IEnumerable<Order> src, string status)
+    => src.Where(o => o.Status == status);  // already materialized — too late
+
+// ✅ CORRECT — keep IQueryable for composable server-side filters
+public IQueryable<Order> Filter(IQueryable<Order> src, string status)
+    => src.Where(o => o.Status == status);  // still an expression tree
+
+// IAsyncEnumerable<T> — stream large results without buffering all in memory
+public async IAsyncEnumerable<OrderDto> StreamLargeReportAsync(
+    [EnumeratorCancellation] CancellationToken ct = default)
+{
+    await foreach (var order in _db.Orders.AsAsyncEnumerable().WithCancellation(ct))
+    {
+        yield return new OrderDto(order.Id, order.Total);
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    SRC([Data source]) --> Q{Where does\nLINQ execute?}
+
+    Q -->|In-memory collection| IE[IEnumerable-of-T\nLINQ runs in CLR\nAll data already loaded]
+    Q -->|Database via EF Core| IQ[IQueryable-of-T\nExpression tree\nTranslated to SQL\nDeferred until ToList/First]
+    Q -->|Async stream| IAE[IAsyncEnumerable-of-T\nOne item at a time\nAsync iteration\nNo full buffering]
+
+    IQ --> COMP[Compose filters\nProjections\nJoins in code]
+    COMP --> MAT{Materialization\nToList / First\nCount / Any}
+    MAT --> SQL[(SQL executes\non database)]
+    SQL --> MEM[Results in memory]
+
+    IE --> CLR[All filtering\nin CLR memory]
+    IAE --> STREAM[Items yielded\none by one\nasync]
+
+    style IQ fill:#2196F3,color:#fff
+    style IE fill:#FF9800,color:#fff
+    style IAE fill:#9C27B0,color:#fff
+    style SQL fill:#4CAF50,color:#fff
+```
+
+---
+
+## Q: Explain .NET memory management — stack vs heap, GC generations, and LOH
+
+```
+Stack                              Managed Heap
+─────────────────────────         ──────────────────────────────────────────
+Value types (int, bool, struct)   Reference types (class instances, strings)
+Method locals & params            Gen0 → Gen1 → Gen2 (promotion on survival)
+Fast: just move stack pointer     LOH: objects > 85 KB (infrequent collection)
+LIFO — auto freed on scope end    GC: mark-compact, background GC in .NET 6+
+```
+
+```csharp
+// ── Value types on stack ──────────────────────────────────────────────────
+void Process()
+{
+    int x = 42;           // stack
+    var pt = new Point(1, 2); // struct → stack (if local)
+}   // x and pt freed immediately when method returns
+
+// ── Reference types on heap ───────────────────────────────────────────────
+var order = new Order();  // Gen0 heap allocation; GC manages lifetime
+
+// ── LOH pitfall — large arrays repeatedly allocated ───────────────────────
+// ❌ Each call allocates >85KB → goes to LOH → rare collection → heap fragmentation
+public byte[] ProcessRequest(int size)
+{
+    var buffer = new byte[1024 * 1024]; // 1MB → LOH allocation every request
+    // ... use buffer ...
+    return buffer;
+}
+
+// ✅ ArrayPool<T> — rent from pool, return after use (no GC pressure)
+public void ProcessRequest()
+{
+    var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+    try
+    {
+        // ... use buffer ...
+    }
+    finally
+    {
+        ArrayPool<byte>.Shared.Return(buffer); // returned to pool, not GC'd
+    }
+}
+
+// ✅ Struct for small, frequently created value objects
+// ❌ class OrderId { public Guid Value; }   // heap alloc per instance
+public readonly record struct OrderId(Guid Value); // stack / inline in parent object
+
+// ── GC.Collect() — almost never call manually ────────────────────────────
+// GC knows better. Forcing collection disrupts background GC heuristics.
+```
+
+```mermaid
+flowchart TD
+    ALLOC([New object allocated]) --> SIZE{Size > 85 KB?}
+
+    SIZE -->|Yes| LOH[Large Object Heap\nRarely collected\nCan fragment\nUse ArrayPool instead]
+    SIZE -->|No| GEN0[Gen 0\nShort-lived objects\nCollected frequently\nmilliseconds]
+
+    GEN0 -->|Survived GC| GEN1[Gen 1\nMedium lifetime\nCollected occasionally]
+    GEN1 -->|Survived GC| GEN2[Gen 2\nLong-lived objects\nSingletons, caches\nFull GC — expensive]
+
+    GEN0 -->|Freed by GC| FREE[Memory reclaimed]
+    GEN1 -->|Freed by GC| FREE
+    GEN2 -->|Freed by GC| FREE
+    LOH  -->|Full GC only| FREE
+
+    NOTE1[/Gen 0 collection ~1ms\nGen 2 full GC ~100ms+/]
+
+    style GEN0 fill:#4CAF50,color:#fff
+    style GEN1 fill:#FF9800,color:#fff
+    style GEN2 fill:#f44336,color:#fff
+    style LOH fill:#9C27B0,color:#fff
+```
+
+---
+
+## Q: What is Span&lt;T&gt; and Memory&lt;T&gt; and when should you use them?
+
+`Span<T>` is a **stack-only** ref struct that represents a contiguous slice of memory without copying it. `Memory<T>` is the heap-safe, async-compatible version.
+
+```csharp
+// ── The problem with traditional string/array operations ──────────────────
+string csv = "Alice,30,Engineer";
+
+// ❌ Allocates 3 new strings — each Substring is a heap allocation
+string[] parts = csv.Split(',');
+string name = parts[0];
+
+// ✅ ReadOnlySpan<char> — zero allocation, slices original string
+ReadOnlySpan<char> span = csv.AsSpan();
+int first  = span.IndexOf(',');
+int second = span[(first + 1)..].IndexOf(',') + first + 1;
+
+ReadOnlySpan<char> namePart = span[..first];                  // no alloc
+ReadOnlySpan<char> agePart  = span[(first + 1)..second];      // no alloc
+// int.Parse can accept ReadOnlySpan<char> directly:
+int age = int.Parse(agePart);
+
+// ── Span over stack-allocated memory ─────────────────────────────────────
+Span<byte> buffer = stackalloc byte[256];   // on the stack, zero heap alloc
+FillData(buffer);
+
+// ── Memory<T> — for async code (Span can't be used across await) ──────────
+public async Task<int> ReadAsync(Memory<byte> buffer, CancellationToken ct)
+{
+    // Memory<T> is heap-safe — can be stored as a field, used across awaits
+    int bytesRead = await _stream.ReadAsync(buffer, ct);
+    return bytesRead;
+}
+
+// Convert between Span and Memory:
+Memory<byte> mem = new byte[1024];
+Span<byte> sp = mem.Span;   // Span from Memory (synchronous code only)
+```
+
+```mermaid
+flowchart LR
+    subgraph HEAP["Heap (traditional)"]
+        A[Original string\nor array] -->|Substring / ToArray| B[New allocation 1]
+        A -->|Substring / ToArray| C[New allocation 2]
+        A -->|Substring / ToArray| D[New allocation 3]
+    end
+
+    subgraph ZERO["Zero-copy (Span / Memory)"]
+        E[Original buffer\nor string] -->|AsSpan / Slice| F[Span slice 1\nno allocation\npoints into E]
+        E -->|AsSpan / Slice| G[Span slice 2\nno allocation\npoints into E]
+        E -->|AsSpan / Slice| H[Span slice 3\nno allocation\npoints into E]
+    end
+
+    style HEAP fill:#ffebee
+    style ZERO fill:#e8f5e9
+```
+
+---
+
+## Q: What is the Channel&lt;T&gt; class and how does it enable producer-consumer patterns?
+
+`System.Threading.Channels` provides a **high-performance async queue** purpose-built for producer-consumer workflows. It replaces patterns like `ConcurrentQueue<T>` + polling.
+
+```csharp
+// ── Create a channel ─────────────────────────────────────────────────────
+
+// Unbounded — unlimited capacity (careful: can grow unboundedly under load)
+var channel = Channel.CreateUnbounded<WorkItem>();
+
+// Bounded — backpressure: producers slow down when channel is full
+var channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(100)
+{
+    FullMode = BoundedChannelFullMode.Wait,           // producer awaits when full
+    SingleWriter = false,
+    SingleReader = false
+});
+
+// ── Producer ─────────────────────────────────────────────────────────────
+async Task ProduceAsync(CancellationToken ct)
+{
+    await foreach (var item in GetItemsAsync(ct))
+    {
+        await channel.Writer.WriteAsync(item, ct);    // async backpressure built in
+    }
+    channel.Writer.Complete();                         // signal: no more items
+}
+
+// ── Consumer ─────────────────────────────────────────────────────────────
+async Task ConsumeAsync(CancellationToken ct)
+{
+    // ReadAllAsync waits for items, respects completion + cancellation
+    await foreach (var item in channel.Reader.ReadAllAsync(ct))
+    {
+        await ProcessAsync(item, ct);
+    }
+}
+
+// ── Multiple producers + multiple consumers ───────────────────────────────
+var writers = Enumerable.Range(0, 3).Select(_ => ProduceAsync(ct));
+var readers = Enumerable.Range(0, 2).Select(_ => ConsumeAsync(ct));
+await Task.WhenAll(writers.Concat(readers));
+
+// ❌ Avoid: ConcurrentQueue + polling loop wastes CPU
+var queue = new ConcurrentQueue<WorkItem>();
+while (!ct.IsCancellationRequested)
+{
+    if (queue.TryDequeue(out var item))
+        Process(item);
+    else
+        await Task.Delay(10, ct);  // busy-wait: wastes CPU + adds latency
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant P1 as Producer 1
+    participant P2 as Producer 2
+    participant CH as Channel-of-T\n(bounded capacity)
+    participant C1 as Consumer 1
+    participant C2 as Consumer 2
+
+    P1->>CH: WriteAsync(item1)
+    P2->>CH: WriteAsync(item2)
+    CH->>C1: ReadAllAsync yields item1
+    CH->>C2: ReadAllAsync yields item2
+    P1->>CH: WriteAsync(item3)
+
+    Note over CH: Channel full (capacity reached)
+    P2->>CH: WriteAsync(item4) — awaits (backpressure)
+    C1->>CH: item3 consumed — slot freed
+    CH-->>P2: Write unblocked
+    P2->>CH: item4 written
+
+    P1->>CH: Writer.Complete()
+    P2->>CH: Writer.Complete()
+    Note over C1,C2: ReadAllAsync exits when\nchannel completed + drained
+```
+
+---
+
+## Q: What are Source Generators and how do they improve performance?
+
+Source Generators run at **compile time** and emit additional C# code into your compilation. The key benefit is eliminating runtime reflection — which is slow, AOT-incompatible, and trim-unfriendly.
+
+```csharp
+// ── System.Text.Json Source Generator ────────────────────────────────────
+
+// ❌ Reflection-based serialization (default before .NET 6 source gen)
+// At runtime, Json serializer reflects on Order's properties via reflection
+var json = JsonSerializer.Serialize(order);
+
+// ✅ Source Generator — serialization code generated at compile time
+[JsonSerializable(typeof(Order))]
+[JsonSerializable(typeof(List<Order>))]
+public partial class AppJsonContext : JsonSerializerContext { }  // ← compiler fills in the rest
+
+// Usage — zero reflection at runtime
+var json = JsonSerializer.Serialize(order, AppJsonContext.Default.Order);
+var obj  = JsonSerializer.Deserialize(json, AppJsonContext.Default.Order);
+
+// ── Regex Source Generator (.NET 7+) ──────────────────────────────────────
+
+// ❌ Interpreted regex — compiled at runtime
+private static readonly Regex _emailRegex = new(@"^[\w.-]+@[\w.-]+\.\w+$",
+    RegexOptions.Compiled);
+
+// ✅ Source-generated regex — compiled to IL at build time
+[GeneratedRegex(@"^[\w.-]+@[\w.-]+\.\w+$")]
+private static partial Regex EmailRegex();
+
+// ── DI Source Generator ───────────────────────────────────────────────────
+// Microsoft.Extensions.DependencyInjection source gen creates a compile-time
+// container, avoiding runtime reflection for service resolution
+
+// ── Benefits ─────────────────────────────────────────────────────────────
+// 1. Faster startup — no runtime type discovery
+// 2. Native AOT compatible — no reflection = trimmable
+// 3. Build-time errors — misconfiguration caught at compile, not runtime
+// 4. Better performance in hot paths — no reflection overhead per call
+```
+
+```mermaid
+flowchart LR
+    subgraph BUILD["Compile Time"]
+        SRC[Your C# source code] --> ROSLYN[Roslyn Compiler]
+        ROSLYN --> SG[Source Generator\nanalyzes your types]
+        SG --> GEN[Generated C# code\nserializers / regex / DI wiring]
+        GEN --> ROSLYN
+        ROSLYN --> IL[Final IL assembly\nno reflection needed at runtime]
+    end
+
+    subgraph RUNTIME["Runtime"]
+        IL --> EXEC[Execute generated code\ndirectly — no reflection]
+        EXEC --> FAST[⚡ Fast startup\n⚡ Trim-safe\n⚡ AOT compatible]
+    end
+
+    subgraph OLD["Old approach — Runtime Reflection"]
+        RCODE[Your code] --> REFL[Runtime reflection\nType.GetProperties\nActivator.CreateInstance]
+        REFL --> SLOW[🐢 Slower\n🐢 Not trim-safe\n🐢 AOT incompatible]
+    end
+
+    style BUILD fill:#e3f2fd
+    style RUNTIME fill:#e8f5e9
+    style OLD fill:#ffebee
+```
+
+---

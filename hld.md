@@ -2549,3 +2549,531 @@ flowchart TD
     style C fill:#FF9800,color:#fff
 ```
 
+
+
+---
+
+# 19. Redundancy & High Availability Patterns
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/framework/resiliency/redundancy
+> 📚 AWS Well-Architected: https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/redundancy.html
+
+---
+
+## 19.1 Redundancy Fundamentals
+
+### Q32. What is redundancy and why is it critical in distributed systems?
+
+**Answer:**
+Redundancy means duplicating critical components so that if one fails, another immediately takes over. Without redundancy, any single component becomes a Single Point of Failure (SPOF) — one crash takes the entire system down. High-availability systems target 99.9% (8.7 hrs/year downtime), 99.99% (52 min/year), or 99.999% (5 min/year) uptime, and redundancy is the primary mechanism to achieve those SLAs.
+
+**Key redundancy models:**
+
+| Model | Description | Failover Time | Cost |
+|-------|-------------|---------------|------|
+| **Active-Active** | All nodes serve live traffic simultaneously | Zero (already serving) | Highest (full capacity × N) |
+| **Active-Passive** | One node active; standby waits idle | Seconds–minutes (promotion needed) | Medium (standby unused) |
+| **Hot Standby** | Passive is fully running, in sync, ready instantly | < 30 seconds | High |
+| **Warm Standby** | Passive is running but not fully in sync | 1–5 minutes | Medium |
+| **Cold Standby** | Passive is off; must be booted and restored | 15–60 minutes | Low |
+| **N+1 Redundancy** | N nodes needed; 1 extra as spare | Automatic load redistribution | Low overhead |
+
+**N+1 example:** 3 web servers handle peak load (N=3), deploy 4 — if one fails, the other 3 still cover full capacity.
+
+❌ **Wrong — single node, no redundancy:**
+```
+Architecture:
+[Client] → [Single Web Server] → [Single DB]
+
+Problem:
+- Web server crash = 100% downtime
+- DB crash = 100% downtime
+- Maintenance window = planned downtime
+→ No SLA above 95% is achievable
+```
+
+✅ **Correct — Active-Active web tier + Active-Passive DB:**
+```
+Architecture:
+[Client]
+   ↓
+[Load Balancer]
+  ├── [Web Server 1]  ← Active, serving traffic
+  ├── [Web Server 2]  ← Active, serving traffic
+  └── [Web Server 3]  ← Active, serving traffic (N+1 spare capacity)
+         ↓
+[DB Primary] ──replication──> [DB Replica]  ← Hot Standby
+                                              (promoted in < 30s if primary fails)
+```
+
+```mermaid
+flowchart LR
+    subgraph ActiveActive["Active-Active (Both Serve Traffic)"]
+        direction TB
+        LB1[Load Balancer] --> N1[Node 1\nACTIVE]
+        LB1 --> N2[Node 2\nACTIVE]
+        N1 <-->|Sync State| N2
+    end
+
+    subgraph ActivePassive["Active-Passive (One Standby)"]
+        direction TB
+        LB2[Load Balancer] --> N3[Node A\nACTIVE]
+        LB2 -.->|failover only| N4[Node B\nSTANDBY]
+        N3 -->|replication| N4
+    end
+
+    style N1 fill:#2d6a4f,color:#fff
+    style N2 fill:#2d6a4f,color:#fff
+    style N3 fill:#2d6a4f,color:#fff
+    style N4 fill:#6c757d,color:#fff
+    style LB1 fill:#FF9800,color:#fff
+    style LB2 fill:#FF9800,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/health-endpoint-monitoring
+
+---
+
+## 19.2 Eliminating Single Points of Failure
+
+### Q33. What are the key strategies for eliminating single points of failure (SPOF)?
+
+**Answer:**
+A SPOF is any component whose failure causes total system failure. Systematic SPOF elimination requires auditing every layer — network, compute, load balancing, storage, DNS — and adding redundancy at each. The most common SPOFs and their fixes:
+
+| Layer | SPOF | Fix |
+|-------|------|-----|
+| Load Balancer | Single LB | VRRP / floating IP — two LBs share a virtual IP; if active LB dies, passive takes the VIP |
+| Web Tier | Single server | Multiple instances behind LB |
+| Database | Single primary | Primary + replicas; automatic failover (e.g., Always On AG) |
+| Storage | Single disk | RAID, distributed storage (Azure Blob, S3) |
+| Network | Single NIC / switch | Redundant NICs, redundant switches, dual uplinks |
+| DNS | Single DNS server | Multiple DNS servers; TTL-aware failover |
+| Availability Zone | Single AZ | Multi-AZ deployment |
+| Region | Single region | Multi-region with GeoDNS |
+
+❌ **Wrong — system with multiple SPOFs:**
+```
+Internet → [Single Load Balancer] → [Single App Server] → [Single DB]
+                ↑ SPOF #1              ↑ SPOF #2            ↑ SPOF #3
+```
+
+✅ **Correct — all SPOFs removed:**
+```
+Internet
+   ↓
+[GeoDNS] → routes to nearest healthy region
+   ↓
+[LB Pair: Active + Passive via VRRP/Floating IP]
+   ↓
+[App Server 1]  [App Server 2]  [App Server 3]   ← multiple instances
+   ↓                  ↓               ↓
+[DB Primary] ──Always On AG──> [DB Replica 1]
+                                [DB Replica 2]   ← automatic failover
+   ↓
+[Azure Blob Storage]  ← replicated, no single disk
+```
+
+```mermaid
+flowchart TD
+    subgraph SPOF["❌ System WITH SPOF"]
+        I1[Internet] --> LB_S[Single\nLoad Balancer\nSPOF]
+        LB_S --> APP_S[Single\nApp Server\nSPOF]
+        APP_S --> DB_S[(Single\nDatabase\nSPOF)]
+    end
+
+    subgraph NoSPOF["✅ System WITHOUT SPOF"]
+        I2[Internet] --> DNS[GeoDNS]
+        DNS --> LBPAIR[LB Pair\nVRRP Floating IP]
+        LBPAIR --> A1[App Server 1]
+        LBPAIR --> A2[App Server 2]
+        LBPAIR --> A3[App Server 3]
+        A1 & A2 & A3 --> DBP[(DB Primary)]
+        DBP -->|replication| DBR1[(DB Replica 1)]
+        DBP -->|replication| DBR2[(DB Replica 2)]
+    end
+
+    style LB_S fill:#d62828,color:#fff
+    style APP_S fill:#d62828,color:#fff
+    style DB_S fill:#d62828,color:#fff
+    style LBPAIR fill:#2d6a4f,color:#fff
+    style DNS fill:#2d6a4f,color:#fff
+    style DBP fill:#2d6a4f,color:#fff
+    style DBR1 fill:#40916c,color:#fff
+    style DBR2 fill:#40916c,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/load-balancer/load-balancer-ha-ports-overview
+
+---
+
+## 19.3 Replication Lag
+
+### Q34. What is replication lag and how do you handle it?
+
+**Answer:**
+Replication lag is the delay between a write committed on the primary database and that write becoming visible on a replica. With **synchronous replication** the primary waits for the replica to confirm before acknowledging the write — zero lag, but higher write latency. With **asynchronous replication** the primary acknowledges immediately and replicates in the background — lower write latency, but replicas may be seconds (or more) behind.
+
+**Problems caused by replication lag:**
+- User writes a record, immediately reads from a replica, sees old data ("I just created it — where is it?")
+- Load balancer sends a read to a lagging replica — user sees stale counts, stale balances
+
+**Strategies to handle lag:**
+
+| Strategy | How | Trade-off |
+|----------|-----|-----------|
+| **Read-your-own-writes** | After a write, route that user's reads to primary for a short window | Primary gets slightly more read load |
+| **Sticky sessions / session consistency** | Pin user to same replica for the session duration | Uneven replica load |
+| **Monotonic reads** | Once user has seen version N, always route to a replica that has at least version N | Requires version tracking |
+| **Synchronous replication** | Wait for replica ACK before confirming write | Higher write latency |
+| **Write to primary, read from primary for critical paths** | Use replica only for analytics / reporting reads | Replica underutilised for writes |
+
+❌ **Wrong — always reading from replica after write:**
+```csharp
+// User updates their profile, then reads it back
+await _db.ExecuteAsync("UPDATE Users SET Name = @name WHERE Id = @id", ...);
+// Routes to replica — may return old name for up to seconds
+var user = await _readReplicaDb.QueryFirstAsync<User>("SELECT * FROM Users WHERE Id = @id", ...);
+// User sees their old name → confused, thinks the save failed
+```
+
+✅ **Correct — read-your-own-writes: route to primary immediately after write:**
+```csharp
+await _primaryDb.ExecuteAsync("UPDATE Users SET Name = @name WHERE Id = @id", ...);
+
+// For THIS user's next read, use primary (or wait for replication + verify)
+// Option 1: always read from primary for profile page (critical path)
+var user = await _primaryDb.QueryFirstAsync<User>("SELECT * FROM Users WHERE Id = @id", ...);
+
+// Option 2: set a short-lived flag in Redis, route to primary while flag exists
+await _cache.SetAsync($"read-primary:{userId}", "1", TimeSpan.FromSeconds(10));
+// Middleware checks flag and routes accordingly
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as DB Primary
+    participant R as DB Replica
+    participant App as App Server
+
+    C->>App: POST /profile (update name)
+    App->>P: UPDATE Users SET Name='Alice'
+    P-->>App: OK (committed)
+    App-->>C: 200 OK
+
+    Note over P,R: Async replication in progress (lag ~500ms)
+
+    C->>App: GET /profile (reads back)
+    App->>R: SELECT * FROM Users WHERE Id=?
+    R-->>App: Name='Bob' (OLD — not yet replicated!)
+    App-->>C: Shows stale name → user confused
+
+    Note over App: Fix: read-your-own-writes
+    App->>P: SELECT * FROM Users WHERE Id=? (route to primary)
+    P-->>App: Name='Alice' (correct)
+    App-->>C: Shows correct name
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out
+
+---
+
+## 19.4 Failover & Automatic Failover
+
+### Q35. What is a failover and how does automatic failover work?
+
+**Answer:**
+A **failover** is the process of switching from a failed component to a healthy standby. **Automatic failover** removes human intervention from this process — the system detects failure and promotes a replica within seconds.
+
+**Key metrics:**
+- **RTO (Recovery Time Objective):** Maximum acceptable time the system can be down. Example: RTO = 30 seconds means failover must complete within 30 seconds.
+- **RPO (Recovery Point Objective):** Maximum acceptable data loss measured in time. Example: RPO = 5 seconds means you can lose at most 5 seconds of writes.
+
+| Replication Type | Typical RTO | Typical RPO | Notes |
+|-----------------|-------------|-------------|-------|
+| Synchronous (Always On AG sync) | < 30 sec | 0 (zero data loss) | Higher write latency |
+| Asynchronous | 30 sec – 2 min | Seconds–minutes of data | Lower write latency |
+| Log shipping | Minutes–hours | Minutes–hours | Simple, low cost |
+
+**Automatic failover sequence:**
+1. Health check fails (timeout / no heartbeat)
+2. Quorum/consensus reached among cluster nodes (avoids split-brain)
+3. Replica promoted to primary
+4. Virtual IP (VIP) or DNS record updated to point to new primary
+5. Application connections re-established
+
+❌ **Wrong — manual failover with no health checks:**
+```
+System relies on on-call engineer to:
+1. Notice alert at 3am
+2. SSH into server to confirm failure
+3. Manually run promotion script
+4. Update DNS record
+5. Notify team
+
+MTTR (Mean Time To Recover): 20–60 minutes
+Data loss: up to 60 minutes of writes
+```
+
+✅ **Correct — automated failover with SQL Server Always On AG:**
+```sql
+-- Always On Availability Group configured:
+-- Primary: SQL-01 (sync commit)
+-- Secondary: SQL-02 (sync commit, automatic failover partner)
+-- Witness: Azure Cloud Witness (quorum)
+
+-- Failover listener: app connects to AG Listener (virtual name)
+-- Connection string: Server=AGListener,1433;...
+-- On SQL-01 failure:
+--   1. SQL-02 detects missed heartbeats (< 10 sec)
+--   2. Quorum with Cloud Witness confirms failure
+--   3. SQL-02 promoted automatically (< 30 sec)
+--   4. AG Listener VIP moves to SQL-02
+--   5. App reconnects transparently via same connection string
+-- RTO: < 30 seconds | RPO: 0 (sync commit)
+```
+
+```mermaid
+flowchart TD
+    A([Health Check Fails]) --> B{Retry threshold\nexceeded?}
+    B -->|No| A
+    B -->|Yes| C[Declare node FAILED]
+    C --> D{Quorum\nreached?}
+    D -->|No — split-brain risk| E[❌ Halt: wait for\nmanual resolution]
+    D -->|Yes| F[Promote Replica\nto Primary]
+    F --> G[Update VIP /\nDNS record]
+    G --> H[Drain old connections]
+    H --> I[Applications reconnect\nvia Listener / VIP]
+    I --> J([✅ System Restored\nRTO met])
+
+    style A fill:#d62828,color:#fff
+    style E fill:#d62828,color:#fff
+    style J fill:#2d6a4f,color:#fff
+    style F fill:#FF9800,color:#fff
+    style G fill:#FF9800,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/automatic-failover-conditions
+
+---
+
+## 19.5 Geo-Redundancy & Multi-Region Architecture
+
+### Q36. What is geo-redundancy and how do you design a multi-region architecture?
+
+**Answer:**
+Geo-redundancy distributes your system across multiple geographic regions to survive regional outages (data-center fires, natural disasters, large-scale cloud provider incidents). It also reduces latency by serving users from the nearest region.
+
+**Two primary multi-region patterns:**
+
+| Pattern | Description | RTO | RPO | Cost |
+|---------|-------------|-----|-----|------|
+| **Active-Active** | All regions serve live traffic; data replicated bi-directionally | Near-zero | Near-zero (sync) or seconds (async) | Highest |
+| **Active-Passive (DR site)** | One region active; DR region is a warm/cold standby | Minutes | Minutes–hours | Lower |
+
+**Key components:**
+
+- **GeoDNS:** Routes users to nearest healthy region based on DNS resolution. Failover by updating DNS records (TTL matters — keep low for fast failover, e.g., 60 seconds).
+- **Anycast:** Single IP announced from multiple locations; BGP routes traffic to nearest PoP. Used by Cloudflare, Akamai, AWS Global Accelerator.
+- **Data sovereignty:** Laws (GDPR, local data residency) may prohibit replicating certain data outside specific regions. Requires per-region data isolation for regulated data.
+- **Conflict resolution:** Active-Active writes to two regions simultaneously can create conflicts. Strategies: last-write-wins (timestamp), CRDT, application-level merge.
+
+❌ **Wrong — single region, no DR plan:**
+```
+All traffic → Region: East US
+  - DB Primary: East US only
+  - No replication to another region
+  - No DNS failover configured
+
+East US outage (Azure incident, ~4 hrs) = 4 hours of downtime
+No data recovery path if East US data is lost
+```
+
+✅ **Correct — Active-Passive multi-region with GeoDNS:**
+```
+Normal operation:
+  GeoDNS → East US (primary region, 100% traffic)
+              ├── App Servers (3×)
+              ├── DB Primary
+              └── Async replication ──────────────────────────────►
+                                                          West Europe (DR)
+                                                            ├── App Servers (1× warm)
+                                                            └── DB Replica (hot standby)
+
+East US failure:
+  1. Health probe fails (GeoDNS / Azure Traffic Manager)
+  2. DNS TTL expires (60 sec) → traffic reroutes to West Europe
+  3. DB Replica promoted to Primary in West Europe
+  4. App scales out in West Europe
+  RTO: ~5 minutes | RPO: seconds (async lag)
+```
+
+```mermaid
+flowchart TD
+    U([🌐 Users]) --> GDNS[GeoDNS /\nAzure Traffic Manager]
+
+    GDNS -->|Normal: 100%| EUS
+
+    subgraph EUS["Region: East US (Primary)"]
+        LB_E[Load Balancer] --> APP_E1[App Server 1]
+        LB_E --> APP_E2[App Server 2]
+        APP_E1 & APP_E2 --> DBP[(DB Primary)]
+    end
+
+    subgraph WEU["Region: West Europe (DR / Passive)"]
+        LB_W[Load Balancer] --> APP_W[App Server\nWarm Standby]
+        APP_W --> DBR[(DB Replica\nHot Standby)]
+    end
+
+    DBP -->|Async Replication| DBR
+
+    GDNS -.->|Failover: East US down| WEU
+
+    style EUS fill:#1a1a2e,color:#fff
+    style WEU fill:#16213e,color:#fff
+    style DBP fill:#2d6a4f,color:#fff
+    style DBR fill:#40916c,color:#fff
+    style GDNS fill:#FF9800,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/geodes
+> 📚 Azure Traffic Manager: https://learn.microsoft.com/en-us/azure/traffic-manager/traffic-manager-overview
+
+---
+
+❌ **Wrong — manual failover with no health checks:**
+```
+System relies on on-call engineer to:
+1. Notice alert at 3am
+2. SSH into server to confirm failure
+3. Manually run promotion script
+4. Update DNS record
+5. Notify team
+
+MTTR (Mean Time To Recover): 20-60 minutes
+Data loss: up to 60 minutes of writes
+```
+
+✅ **Correct — automated failover with SQL Server Always On AG:**
+```sql
+-- Always On Availability Group configured:
+-- Primary: SQL-01 (sync commit)
+-- Secondary: SQL-02 (sync commit, automatic failover partner)
+-- Witness: Azure Cloud Witness (quorum)
+
+-- Failover listener: app connects to AG Listener (virtual name)
+-- Connection string: Server=AGListener,1433;...
+-- On SQL-01 failure:
+--   1. SQL-02 detects missed heartbeats (< 10 sec)
+--   2. Quorum with Cloud Witness confirms failure
+--   3. SQL-02 promoted automatically (< 30 sec)
+--   4. AG Listener VIP moves to SQL-02
+--   5. App reconnects transparently via same connection string
+-- RTO: < 30 seconds | RPO: 0 (sync commit)
+```
+
+```mermaid
+flowchart TD
+    A([Health Check Fails]) --> B{Retry threshold\nexceeded?}
+    B -->|No| A
+    B -->|Yes| C[Declare node FAILED]
+    C --> D{Quorum\nreached?}
+    D -->|No — split-brain risk| E[Halt: wait for\nmanual resolution]
+    D -->|Yes| F[Promote Replica\nto Primary]
+    F --> G[Update VIP /\nDNS record]
+    G --> H[Drain old connections]
+    H --> I[Applications reconnect\nvia Listener / VIP]
+    I --> J([System Restored\nRTO met])
+
+    style A fill:#d62828,color:#fff
+    style E fill:#d62828,color:#fff
+    style J fill:#2d6a4f,color:#fff
+    style F fill:#FF9800,color:#fff
+    style G fill:#FF9800,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/automatic-failover-conditions
+
+---
+
+## 19.5 Geo-Redundancy & Multi-Region Architecture
+
+### Q36. What is geo-redundancy and how do you design a multi-region architecture?
+
+**Answer:**
+Geo-redundancy distributes your system across multiple geographic regions to survive regional outages (data-center fires, natural disasters, large-scale cloud provider incidents). It also reduces latency by serving users from the nearest region.
+
+**Two primary multi-region patterns:**
+
+| Pattern | Description | RTO | RPO | Cost |
+|---------|-------------|-----|-----|------|
+| **Active-Active** | All regions serve live traffic; data replicated bi-directionally | Near-zero | Near-zero (sync) or seconds (async) | Highest |
+| **Active-Passive (DR site)** | One region active; DR region is a warm/cold standby | Minutes | Minutes-hours | Lower |
+
+**Key components:**
+
+- **GeoDNS:** Routes users to nearest healthy region based on DNS resolution. Failover by updating DNS records (keep TTL low, e.g., 60 seconds, for fast failover).
+- **Anycast:** Single IP announced from multiple PoPs; BGP routes traffic to nearest one. Used by Cloudflare, Akamai, AWS Global Accelerator.
+- **Data sovereignty:** Laws (GDPR, local data residency requirements) may prohibit replicating certain data outside specific regions. Requires per-region data isolation for regulated data.
+- **Conflict resolution:** Active-Active writes to two regions simultaneously can create conflicts. Strategies: last-write-wins (timestamp), CRDTs, application-level merge.
+
+❌ **Wrong — single region, no DR plan:**
+```
+All traffic -> Region: East US
+  - DB Primary: East US only
+  - No replication to another region
+  - No DNS failover configured
+
+East US outage = hours of downtime with no recovery path
+```
+
+✅ **Correct — Active-Passive multi-region with GeoDNS:**
+```
+Normal operation:
+  GeoDNS -> East US (primary region, 100% traffic)
+    - App Servers (3x)
+    - DB Primary
+    - Async replication ──────────────────────>
+                                    West Europe (DR)
+                                      - App Servers (1x warm)
+                                      - DB Replica (hot standby)
+
+East US failure:
+  1. Health probe fails (Azure Traffic Manager detects)
+  2. DNS TTL expires (60 sec) -> traffic reroutes to West Europe
+  3. DB Replica promoted to Primary in West Europe
+  4. App scales out in West Europe
+  RTO: ~5 minutes | RPO: seconds (async lag)
+```
+
+```mermaid
+flowchart TD
+    U([Users]) --> GDNS[GeoDNS /\nAzure Traffic Manager]
+
+    GDNS -->|Normal: 100%| EUS
+
+    subgraph EUS["Region: East US (Primary)"]
+        LB_E[Load Balancer] --> APP_E1[App Server 1]
+        LB_E --> APP_E2[App Server 2]
+        APP_E1 & APP_E2 --> DBP[(DB Primary)]
+    end
+
+    subgraph WEU["Region: West Europe (DR / Passive)"]
+        LB_W[Load Balancer] --> APP_W[App Server\nWarm Standby]
+        APP_W --> DBR[(DB Replica\nHot Standby)]
+    end
+
+    DBP -->|Async Replication| DBR
+
+    GDNS -.->|Failover: East US down| WEU
+
+    style DBP fill:#2d6a4f,color:#fff
+    style DBR fill:#40916c,color:#fff
+    style GDNS fill:#FF9800,color:#fff
+```
+
+> 📚 Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/geodes
+> 📚 Azure Traffic Manager: https://learn.microsoft.com/en-us/azure/traffic-manager/traffic-manager-overview
+
+---
