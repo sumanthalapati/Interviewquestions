@@ -2334,3 +2334,1081 @@ flowchart LR
     style O2N fill:#B71C1C,color:#fff
 ```
 
+---
+
+# 🏢 FAANG DSA Patterns & Problems
+
+> 10 core patterns used repeatedly at Google, Amazon, Meta, Apple, Netflix — with C# templates, complexity analysis, example problems, and Mermaid diagrams.
+
+---
+
+## Pattern 1: Sliding Window
+
+### Why this pattern?
+When you need to track a contiguous subarray or substring that satisfies a condition, sliding window avoids recomputing from scratch on each step. Both pointers only move forward → O(n) instead of O(n²).
+
+### Fixed vs Variable Window
+
+| | Fixed Window | Variable Window |
+|-|-------------|-----------------|
+| Window size | Constant K | Shrinks/expands based on condition |
+| Pointer movement | Right advances, left = right - K | Both advance independently |
+| Use for | Max sum of size K, moving average | Longest/shortest valid substring |
+
+### C# Template
+
+```csharp
+// Fixed window — max sum subarray of size K
+public int MaxSumSubarrayK(int[] nums, int k)
+{
+    int windowSum = nums[..k].Sum(); // initial window
+    int maxSum = windowSum;
+
+    for (int i = k; i < nums.Length; i++)
+    {
+        windowSum += nums[i] - nums[i - k]; // slide: add right, remove left
+        maxSum = Math.Max(maxSum, windowSum);
+    }
+    return maxSum;
+    // Time: O(n), Space: O(1)
+}
+
+// Variable window — longest substring without repeating chars
+public int LongestUniqueSubstring(string s)
+{
+    var seen = new HashSet<char>();
+    int left = 0, maxLen = 0;
+
+    for (int right = 0; right < s.Length; right++)
+    {
+        while (seen.Contains(s[right]))
+            seen.Remove(s[left++]); // shrink from left until valid
+
+        seen.Add(s[right]);
+        maxLen = Math.Max(maxLen, right - left + 1);
+    }
+    return maxLen;
+    // Time: O(n), Space: O(min(n, alphabet))
+}
+```
+
+### Example Problems
+
+| Problem | Window Type | Key Idea | Time |
+|---------|------------|----------|------|
+| Maximum sum subarray of size K | Fixed | Subtract left, add right | O(n) |
+| Longest substring without repeating chars | Variable | Shrink on duplicate | O(n) |
+| Minimum window substring | Variable | Shrink when all chars satisfied | O(n) |
+
+---
+
+## Pattern 2: Two Pointers
+
+### Why this pattern?
+Two pointers eliminate the need for nested loops when the array is sorted or when you need pairs/triplets satisfying a condition.
+
+### Same Direction vs Opposite Direction
+
+| | Same Direction | Opposite Direction |
+|-|---------------|-------------------|
+| Start positions | Both at left (or fast/slow) | One at each end |
+| Use for | Remove duplicates, Floyd's cycle | Pair sum, palindrome, 3Sum |
+| Example | Remove duplicates in-place | Two Sum (sorted array) |
+
+### C# Template
+
+```csharp
+// Opposite direction — Two Sum in sorted array
+public int[] TwoSumSorted(int[] nums, int target)
+{
+    int left = 0, right = nums.Length - 1;
+    while (left < right)
+    {
+        int sum = nums[left] + nums[right];
+        if (sum == target) return new[] { left, right };
+        if (sum < target) left++;   // need larger sum
+        else right--;               // need smaller sum
+    }
+    return Array.Empty<int>();
+    // Time: O(n), Space: O(1)
+}
+
+// 3Sum — fix one element, two-pointer for the rest
+public IList<IList<int>> ThreeSum(int[] nums)
+{
+    Array.Sort(nums);
+    var result = new List<IList<int>>();
+
+    for (int i = 0; i < nums.Length - 2; i++)
+    {
+        if (i > 0 && nums[i] == nums[i - 1]) continue; // skip duplicates
+
+        int left = i + 1, right = nums.Length - 1;
+        while (left < right)
+        {
+            int sum = nums[i] + nums[left] + nums[right];
+            if (sum == 0)
+            {
+                result.Add(new List<int> { nums[i], nums[left], nums[right] });
+                while (left < right && nums[left] == nums[left + 1]) left++;
+                while (left < right && nums[right] == nums[right - 1]) right--;
+                left++; right--;
+            }
+            else if (sum < 0) left++;
+            else right--;
+        }
+    }
+    return result;
+    // Time: O(n²), Space: O(1) excluding output
+}
+
+// Remove duplicates in-place (same direction)
+public int RemoveDuplicates(int[] nums)
+{
+    int slow = 0;
+    for (int fast = 1; fast < nums.Length; fast++)
+        if (nums[fast] != nums[slow]) nums[++slow] = nums[fast];
+    return slow + 1;
+    // Time: O(n), Space: O(1)
+}
+```
+
+### When to use Two Pointers vs Sliding Window
+```
+Two Pointers: pair/triplet problems, sorted arrays, palindrome check
+Sliding Window: contiguous subarray problems, substring conditions
+Both: O(n), avoid nested loops — but different pointer movement patterns
+```
+
+---
+
+## Pattern 3: Fast & Slow Pointers (Floyd's Cycle)
+
+### Why this pattern?
+Two pointers at different speeds — if there's a cycle, the fast pointer will lap the slow pointer. Works in O(1) space where a HashSet would use O(n).
+
+### C# Template
+
+```csharp
+// Cycle detection in linked list
+public bool HasCycle(ListNode head)
+{
+    var slow = head;
+    var fast = head;
+    while (fast?.next != null)
+    {
+        slow = slow!.next;
+        fast = fast.next.next;
+        if (slow == fast) return true; // cycle detected
+    }
+    return false;
+    // Time: O(n), Space: O(1)
+}
+
+// Find middle of linked list
+public ListNode FindMiddle(ListNode head)
+{
+    var slow = head;
+    var fast = head;
+    while (fast?.next != null)
+    {
+        slow = slow!.next;
+        fast = fast.next.next;
+    }
+    return slow!; // slow is at middle when fast reaches end
+    // Time: O(n), Space: O(1)
+}
+
+// Happy number (detect cycle in number sequence)
+public bool IsHappy(int n)
+{
+    int slow = n, fast = n;
+    do
+    {
+        slow = SumOfSquares(slow);
+        fast = SumOfSquares(SumOfSquares(fast));
+    } while (slow != fast);
+
+    return slow == 1; // cycle at 1 = happy; cycle elsewhere = not happy
+
+    static int SumOfSquares(int x)
+    {
+        int sum = 0;
+        while (x > 0) { int d = x % 10; sum += d * d; x /= 10; }
+        return sum;
+    }
+    // Time: O(log n), Space: O(1)
+}
+```
+
+---
+
+## Pattern 4: Merge Intervals
+
+### Why this pattern?
+After sorting by start time, overlapping intervals can be merged in a single linear pass. Used in calendar scheduling, resource allocation, and range-based queries.
+
+### Algorithm Flowchart
+
+```mermaid
+flowchart TD
+    START([Input: intervals]) --> SORT[Sort by start time]
+    SORT --> INIT[result = first interval]
+    INIT --> LOOP{More intervals?}
+    LOOP -->|NO| RETURN([Return result])
+    LOOP -->|YES| CHECK{current.start <= last.end?}
+    CHECK -->|YES — overlaps| EXTEND[Extend last.end = max of last.end and current.end]
+    CHECK -->|NO — no overlap| ADD[Add current interval to result]
+    EXTEND --> LOOP
+    ADD --> LOOP
+
+    style RETURN fill:#4CAF50,color:#fff
+    style SORT fill:#2196F3,color:#fff
+```
+
+### C# Template
+
+```csharp
+// Merge overlapping intervals
+public int[][] MergeIntervals(int[][] intervals)
+{
+    Array.Sort(intervals, (a, b) => a[0] - b[0]); // sort by start
+    var result = new List<int[]> { intervals[0] };
+
+    foreach (var interval in intervals.Skip(1))
+    {
+        var last = result[^1];
+        if (interval[0] <= last[1])
+            last[1] = Math.Max(last[1], interval[1]); // merge: extend end
+        else
+            result.Add(interval); // no overlap: add as new
+    }
+    return result.ToArray();
+    // Time: O(n log n), Space: O(n)
+}
+
+// Insert interval into sorted non-overlapping list
+public int[][] InsertInterval(int[][] intervals, int[] newInterval)
+{
+    var result = new List<int[]>();
+    int i = 0;
+
+    // Add all intervals that end before newInterval starts
+    while (i < intervals.Length && intervals[i][1] < newInterval[0])
+        result.Add(intervals[i++]);
+
+    // Merge all overlapping intervals
+    while (i < intervals.Length && intervals[i][0] <= newInterval[1])
+    {
+        newInterval[0] = Math.Min(newInterval[0], intervals[i][0]);
+        newInterval[1] = Math.Max(newInterval[1], intervals[i][1]);
+        i++;
+    }
+    result.Add(newInterval);
+
+    // Add remaining
+    while (i < intervals.Length) result.Add(intervals[i++]);
+    return result.ToArray();
+    // Time: O(n), Space: O(n)
+}
+```
+
+---
+
+## Pattern 5: Binary Search Variations
+
+### Why this pattern?
+Any time the search space is monotonic (sorted array, or answer space with a monotonic predicate), binary search halves it in O(log n).
+
+### C# Templates
+
+```csharp
+// Standard binary search
+public int BinarySearch(int[] nums, int target)
+{
+    int left = 0, right = nums.Length - 1;
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2;
+        if (nums[mid] == target) return mid;
+        if (nums[mid] < target) left = mid + 1;
+        else right = mid - 1;
+    }
+    return -1;
+    // Time: O(log n), Space: O(1)
+}
+
+// Find FIRST position of target (left boundary)
+public int FirstPosition(int[] nums, int target)
+{
+    int left = 0, right = nums.Length - 1, result = -1;
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2;
+        if (nums[mid] == target) { result = mid; right = mid - 1; } // keep searching left
+        else if (nums[mid] < target) left = mid + 1;
+        else right = mid - 1;
+    }
+    return result;
+}
+
+// Find LAST position (right boundary)
+public int LastPosition(int[] nums, int target)
+{
+    int left = 0, right = nums.Length - 1, result = -1;
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2;
+        if (nums[mid] == target) { result = mid; left = mid + 1; } // keep searching right
+        else if (nums[mid] < target) left = mid + 1;
+        else right = mid - 1;
+    }
+    return result;
+}
+
+// Search in rotated sorted array
+public int SearchRotated(int[] nums, int target)
+{
+    int left = 0, right = nums.Length - 1;
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2;
+        if (nums[mid] == target) return mid;
+        if (nums[left] <= nums[mid]) // left half sorted
+        {
+            if (target >= nums[left] && target < nums[mid]) right = mid - 1;
+            else left = mid + 1;
+        }
+        else // right half sorted
+        {
+            if (target > nums[mid] && target <= nums[right]) left = mid + 1;
+            else right = mid - 1;
+        }
+    }
+    return -1;
+    // Time: O(log n), Space: O(1)
+}
+
+// Binary search on ANSWER (not array) — find minimum speed to finish in H hours
+public int MinEatingSpeed(int[] piles, int h)
+{
+    int left = 1, right = piles.Max();
+    while (left < right)
+    {
+        int mid = left + (right - left) / 2;
+        int hours = piles.Sum(p => (int)Math.Ceiling((double)p / mid));
+        if (hours <= h) right = mid; // mid works, try smaller
+        else left = mid + 1;
+    }
+    return left;
+    // Time: O(n log maxPile), Space: O(1)
+}
+```
+
+---
+
+## Pattern 6: Tree BFS (Level Order)
+
+### Why this pattern?
+BFS with a queue processes a tree level by level. Essential for: level-order traversal, zigzag traversal, right-side view, minimum depth, and any problem where distance from root matters.
+
+### C# Generic Template
+
+```csharp
+// Generic level-order BFS template
+public IList<IList<int>> LevelOrder(TreeNode root)
+{
+    var result = new List<IList<int>>();
+    if (root == null) return result;
+
+    var queue = new Queue<TreeNode>();
+    queue.Enqueue(root);
+
+    while (queue.Count > 0)
+    {
+        int levelSize = queue.Count; // snapshot: process exactly this many nodes
+        var level = new List<int>();
+
+        for (int i = 0; i < levelSize; i++)
+        {
+            var node = queue.Dequeue();
+            level.Add(node.val);
+            if (node.left != null) queue.Enqueue(node.left);
+            if (node.right != null) queue.Enqueue(node.right);
+        }
+        result.Add(level);
+    }
+    return result;
+    // Time: O(n), Space: O(n) — max queue size = widest level
+}
+
+// Zigzag level order (alternate left-to-right and right-to-left)
+public IList<IList<int>> ZigzagLevelOrder(TreeNode root)
+{
+    var result = new List<IList<int>>();
+    if (root == null) return result;
+
+    var queue = new Queue<TreeNode>();
+    queue.Enqueue(root);
+    bool leftToRight = true;
+
+    while (queue.Count > 0)
+    {
+        int size = queue.Count;
+        var level = new int[size];
+        for (int i = 0; i < size; i++)
+        {
+            var node = queue.Dequeue();
+            int idx = leftToRight ? i : size - 1 - i; // direction determines index
+            level[idx] = node.val;
+            if (node.left != null) queue.Enqueue(node.left);
+            if (node.right != null) queue.Enqueue(node.right);
+        }
+        result.Add(level);
+        leftToRight = !leftToRight;
+    }
+    return result;
+}
+
+// Right side view — last node at each level
+public IList<int> RightSideView(TreeNode root)
+{
+    var result = new List<int>();
+    if (root == null) return result;
+
+    var queue = new Queue<TreeNode>();
+    queue.Enqueue(root);
+
+    while (queue.Count > 0)
+    {
+        int size = queue.Count;
+        for (int i = 0; i < size; i++)
+        {
+            var node = queue.Dequeue();
+            if (i == size - 1) result.Add(node.val); // last node = rightmost visible
+            if (node.left != null) queue.Enqueue(node.left);
+            if (node.right != null) queue.Enqueue(node.right);
+        }
+    }
+    return result;
+}
+```
+
+---
+
+## Pattern 7: Tree DFS Patterns
+
+### Why this pattern?
+DFS naturally follows the tree's recursive structure. Pre/in/post order determines when you process the current node relative to its children. Most tree problems (path sum, LCA, diameter) reduce to a single DFS pass.
+
+### C# Templates
+
+```csharp
+// Pre-order (Root → Left → Right) — serialise, copy tree
+void PreOrder(TreeNode node, List<int> result)
+{
+    if (node == null) return;
+    result.Add(node.val);       // process BEFORE children
+    PreOrder(node.left, result);
+    PreOrder(node.right, result);
+}
+
+// In-order (Left → Root → Right) — sorted output for BST
+void InOrder(TreeNode node, List<int> result)
+{
+    if (node == null) return;
+    InOrder(node.left, result);
+    result.Add(node.val);       // process BETWEEN children
+    InOrder(node.right, result);
+}
+
+// Post-order (Left → Right → Root) — delete tree, evaluate expression
+void PostOrder(TreeNode node, List<int> result)
+{
+    if (node == null) return;
+    PostOrder(node.left, result);
+    PostOrder(node.right, result);
+    result.Add(node.val);       // process AFTER children
+}
+
+// Path sum — does any root-to-leaf path sum to target?
+public bool HasPathSum(TreeNode root, int targetSum)
+{
+    if (root == null) return false;
+    if (root.left == null && root.right == null) return root.val == targetSum; // leaf
+    return HasPathSum(root.left, targetSum - root.val) ||
+           HasPathSum(root.right, targetSum - root.val);
+    // Time: O(n), Space: O(h)
+}
+
+// Diameter of binary tree — longest path between any two nodes
+public int DiameterOfBinaryTree(TreeNode root)
+{
+    int maxDiameter = 0;
+
+    int Depth(TreeNode node)
+    {
+        if (node == null) return 0;
+        int left = Depth(node.left);
+        int right = Depth(node.right);
+        maxDiameter = Math.Max(maxDiameter, left + right); // path through current node
+        return Math.Max(left, right) + 1;
+    }
+
+    Depth(root);
+    return maxDiameter;
+    // Time: O(n), Space: O(h)
+}
+
+// Lowest Common Ancestor (general binary tree, not BST)
+public TreeNode LCA(TreeNode root, TreeNode p, TreeNode q)
+{
+    if (root == null || root == p || root == q) return root;
+    var left = LCA(root.left, p, q);
+    var right = LCA(root.right, p, q);
+    if (left != null && right != null) return root; // p and q in different subtrees
+    return left ?? right; // both in same subtree
+    // Time: O(n), Space: O(h)
+}
+```
+
+---
+
+## Pattern 8: Dynamic Programming Patterns
+
+### Why this pattern?
+DP solves problems with overlapping subproblems and optimal substructure. Identify the state, transition, base case, and whether 1D or 2D table is needed.
+
+### 1D DP Templates
+
+```csharp
+// Climbing stairs — number of ways to reach step n (1 or 2 steps at a time)
+public int ClimbStairs(int n)
+{
+    if (n <= 2) return n;
+    int prev2 = 1, prev1 = 2;
+    for (int i = 3; i <= n; i++)
+    {
+        int curr = prev1 + prev2; // ways(n) = ways(n-1) + ways(n-2)
+        prev2 = prev1; prev1 = curr;
+    }
+    return prev1;
+    // Time: O(n), Space: O(1)
+}
+
+// House robber — max sum with no two adjacent elements
+public int Rob(int[] nums)
+{
+    int prev2 = 0, prev1 = 0;
+    foreach (int num in nums)
+    {
+        int curr = Math.Max(prev1, prev2 + num); // rob current or skip
+        prev2 = prev1; prev1 = curr;
+    }
+    return prev1;
+    // Time: O(n), Space: O(1)
+}
+
+// Coin change — minimum coins to make amount
+public int CoinChange(int[] coins, int amount)
+{
+    int[] dp = new int[amount + 1];
+    Array.Fill(dp, amount + 1); // ∞ sentinel
+    dp[0] = 0;
+    for (int i = 1; i <= amount; i++)
+        foreach (int coin in coins)
+            if (coin <= i) dp[i] = Math.Min(dp[i], dp[i - coin] + 1);
+    return dp[amount] > amount ? -1 : dp[amount];
+    // Time: O(amount × coins), Space: O(amount)
+}
+```
+
+### 2D DP Templates
+
+```csharp
+// Unique paths — grid navigation, only right/down moves
+public int UniquePaths(int m, int n)
+{
+    var dp = new int[m, n];
+    for (int i = 0; i < m; i++) dp[i, 0] = 1; // first column
+    for (int j = 0; j < n; j++) dp[0, j] = 1; // first row
+    for (int i = 1; i < m; i++)
+        for (int j = 1; j < n; j++)
+            dp[i, j] = dp[i - 1, j] + dp[i, j - 1]; // from above + from left
+    return dp[m - 1, n - 1];
+    // Time: O(m×n), Space: O(m×n) → can be optimised to O(n)
+}
+
+// Edit distance (Levenshtein) — min operations to transform word1 → word2
+public int EditDistance(string word1, string word2)
+{
+    int m = word1.Length, n = word2.Length;
+    var dp = new int[m + 1, n + 1];
+    for (int i = 0; i <= m; i++) dp[i, 0] = i; // delete all chars of word1
+    for (int j = 0; j <= n; j++) dp[0, j] = j; // insert all chars of word2
+
+    for (int i = 1; i <= m; i++)
+        for (int j = 1; j <= n; j++)
+            dp[i, j] = word1[i - 1] == word2[j - 1]
+                ? dp[i - 1, j - 1]                                // no operation needed
+                : 1 + Math.Min(dp[i - 1, j - 1],                  // replace
+                      Math.Min(dp[i - 1, j], dp[i, j - 1]));      // delete, insert
+    return dp[m, n];
+    // Time: O(m×n), Space: O(m×n)
+}
+
+// Longest Common Subsequence
+public int LCS(string text1, string text2)
+{
+    int m = text1.Length, n = text2.Length;
+    var dp = new int[m + 1, n + 1];
+    for (int i = 1; i <= m; i++)
+        for (int j = 1; j <= n; j++)
+            dp[i, j] = text1[i - 1] == text2[j - 1]
+                ? dp[i - 1, j - 1] + 1
+                : Math.Max(dp[i - 1, j], dp[i, j - 1]);
+    return dp[m, n];
+    // Time: O(m×n), Space: O(m×n)
+}
+```
+
+### 0/1 Knapsack Template
+
+```csharp
+// 0/1 Knapsack — each item used at most once
+public int Knapsack(int[] weights, int[] values, int capacity)
+{
+    int n = weights.Length;
+    int[] dp = new int[capacity + 1]; // 1D optimisation
+
+    for (int i = 0; i < n; i++)
+        for (int w = capacity; w >= weights[i]; w--) // REVERSE to enforce 0/1
+            dp[w] = Math.Max(dp[w], dp[w - weights[i]] + values[i]);
+
+    return dp[capacity];
+    // Time: O(n×capacity), Space: O(capacity)
+    // FORWARD inner loop = unbounded knapsack (items reused)
+    // REVERSE inner loop = 0/1 knapsack (each item once)
+}
+```
+
+---
+
+## Pattern 9: Graph Algorithms
+
+### Why this pattern?
+Graph problems appear as explicit graphs or disguised grids/matrices. Choose BFS for shortest path, DFS for connectivity/cycle detection, Union-Find for component counting, Dijkstra for weighted shortest path.
+
+### BFS / DFS Templates
+
+```csharp
+// Graph BFS — shortest path in unweighted graph
+public int[] BfsShortestPath(List<int>[] adj, int start, int n)
+{
+    int[] dist = Enumerable.Repeat(int.MaxValue, n).ToArray();
+    dist[start] = 0;
+    var queue = new Queue<int>();
+    queue.Enqueue(start);
+
+    while (queue.Count > 0)
+    {
+        int node = queue.Dequeue();
+        foreach (int neighbor in adj[node])
+        {
+            if (dist[neighbor] == int.MaxValue)
+            {
+                dist[neighbor] = dist[node] + 1;
+                queue.Enqueue(neighbor);
+            }
+        }
+    }
+    return dist;
+    // Time: O(V+E), Space: O(V)
+}
+
+// Topological sort — Kahn's algorithm (BFS-based)
+public int[] TopologicalSort(int n, int[][] edges)
+{
+    var adj = new List<int>[n].Select(_ => new List<int>()).ToArray();
+    int[] inDegree = new int[n];
+    foreach (var e in edges) { adj[e[0]].Add(e[1]); inDegree[e[1]]++; }
+
+    var queue = new Queue<int>();
+    for (int i = 0; i < n; i++) if (inDegree[i] == 0) queue.Enqueue(i);
+
+    var order = new List<int>();
+    while (queue.Count > 0)
+    {
+        int node = queue.Dequeue();
+        order.Add(node);
+        foreach (int nb in adj[node])
+            if (--inDegree[nb] == 0) queue.Enqueue(nb);
+    }
+    return order.Count == n ? order.ToArray() : Array.Empty<int>(); // empty = cycle
+    // Time: O(V+E), Space: O(V)
+}
+
+// Dijkstra's shortest path — weighted graph, non-negative weights
+public int[] Dijkstra(List<(int neighbor, int weight)>[] adj, int start, int n)
+{
+    int[] dist = Enumerable.Repeat(int.MaxValue, n).ToArray();
+    dist[start] = 0;
+
+    // (distance, node) min-heap
+    var pq = new PriorityQueue<int, int>();
+    pq.Enqueue(start, 0);
+
+    while (pq.Count > 0)
+    {
+        pq.TryDequeue(out int node, out int d);
+        if (d > dist[node]) continue; // stale entry
+
+        foreach (var (neighbor, weight) in adj[node])
+        {
+            int newDist = dist[node] + weight;
+            if (newDist < dist[neighbor])
+            {
+                dist[neighbor] = newDist;
+                pq.Enqueue(neighbor, newDist);
+            }
+        }
+    }
+    return dist;
+    // Time: O((V+E) log V), Space: O(V)
+}
+
+// Union-Find (covered in section 15, repeated here for pattern completeness)
+public class UnionFind
+{
+    private int[] _parent, _rank;
+    public UnionFind(int n) { _parent = Enumerable.Range(0, n).ToArray(); _rank = new int[n]; }
+    public int Find(int x) => _parent[x] == x ? x : (_parent[x] = Find(_parent[x]));
+    public bool Union(int x, int y)
+    {
+        int rx = Find(x), ry = Find(y);
+        if (rx == ry) return false;
+        if (_rank[rx] < _rank[ry]) (rx, ry) = (ry, rx);
+        _parent[ry] = rx;
+        if (_rank[rx] == _rank[ry]) _rank[rx]++;
+        return true;
+    }
+}
+```
+
+### Example Problems
+
+| Problem | Algorithm | Time |
+|---------|-----------|------|
+| Number of Islands | DFS/BFS flood fill | O(M×N) |
+| Course Schedule (cycle detection) | DFS 3-color or Kahn's | O(V+E) |
+| Network Delay Time | Dijkstra | O((V+E) log V) |
+| Word Ladder | BFS (treat as unweighted graph) | O(M² × N) |
+| Clone Graph | DFS + HashMap | O(V+E) |
+
+---
+
+## Pattern 10: Heap / Priority Queue Patterns
+
+### Why this pattern?
+When you need the K-th largest/smallest element, or need to process items in priority order without full sorting, a heap gives O(log n) insert/delete and O(1) peek at the min/max.
+
+### C# Templates
+
+```csharp
+// Top K elements — K largest using min-heap of size K
+public int[] TopKElements(int[] nums, int k)
+{
+    var minHeap = new PriorityQueue<int, int>(); // min-heap by default
+    foreach (int num in nums)
+    {
+        minHeap.Enqueue(num, num);
+        if (minHeap.Count > k) minHeap.Dequeue(); // evict smallest
+    }
+    return minHeap.UnorderedItems.Select(x => x.Element).ToArray();
+    // Time: O(n log k), Space: O(k)
+}
+
+// K-th largest element
+public int KthLargest(int[] nums, int k)
+{
+    var minHeap = new PriorityQueue<int, int>();
+    foreach (int num in nums)
+    {
+        minHeap.Enqueue(num, num);
+        if (minHeap.Count > k) minHeap.Dequeue();
+    }
+    minHeap.TryPeek(out int result, out _);
+    return result;
+    // Time: O(n log k), Space: O(k)
+}
+
+// Merge K sorted lists
+public ListNode MergeKLists(ListNode[] lists)
+{
+    var heap = new PriorityQueue<ListNode, int>();
+    foreach (var node in lists)
+        if (node != null) heap.Enqueue(node, node.val);
+
+    var dummy = new ListNode(0);
+    var cur = dummy;
+    while (heap.Count > 0)
+    {
+        var node = heap.Dequeue();
+        cur.next = node;
+        cur = cur.next;
+        if (node.next != null) heap.Enqueue(node.next, node.next.val);
+    }
+    return dummy.next;
+    // Time: O(N log K) where N = total nodes, K = number of lists
+}
+
+// Median from data stream — two heaps
+public class MedianFinder
+{
+    // maxHeap: lower half | minHeap: upper half
+    private readonly PriorityQueue<int, int> _maxHeap = new(); // negate priority for max
+    private readonly PriorityQueue<int, int> _minHeap = new();
+
+    public void AddNum(int num)
+    {
+        // Always add to maxHeap first
+        _maxHeap.Enqueue(num, -num); // negate = max-heap behaviour
+
+        // Balance: move maxHeap top to minHeap if needed
+        _minHeap.TryPeek(out _, out int minPrio);
+        _maxHeap.TryPeek(out _, out int maxNegPrio);
+
+        if (_maxHeap.Count > 0 && _minHeap.Count > 0 && -maxNegPrio > minPrio)
+        {
+            _maxHeap.TryDequeue(out int val, out _);
+            _minHeap.Enqueue(val, val);
+        }
+
+        // Keep sizes balanced (maxHeap can have 1 more)
+        if (_maxHeap.Count > _minHeap.Count + 1)
+        {
+            _maxHeap.TryDequeue(out int val, out _);
+            _minHeap.Enqueue(val, val);
+        }
+        else if (_minHeap.Count > _maxHeap.Count)
+        {
+            _minHeap.TryDequeue(out int val, out _);
+            _maxHeap.Enqueue(val, -val);
+        }
+    }
+
+    public double FindMedian()
+    {
+        if (_maxHeap.Count > _minHeap.Count)
+        {
+            _maxHeap.TryPeek(out int val, out _);
+            return val;
+        }
+        _maxHeap.TryPeek(out int maxVal, out _);
+        _minHeap.TryPeek(out int minVal, out _);
+        return (maxVal + minVal) / 2.0;
+    }
+    // AddNum: O(log n), FindMedian: O(1)
+}
+```
+
+---
+
+## FAANG Favorite Problems (Company-Tagged)
+
+### 🟠 Amazon
+| Problem | Pattern | Key Insight |
+|---------|---------|-------------|
+| Two Sum | HashMap | O(n) with complement lookup |
+| LRU Cache | HashMap + DoublyLinkedList | O(1) get and put |
+| Meeting Rooms II | Min-Heap or sort ends | Track min rooms needed |
+| Top K Frequent Elements | Bucket sort or Max-Heap | O(n) with bucket sort |
+| Number of Islands | DFS/BFS flood fill | Mark visited in-place |
+
+```csharp
+// Top K Frequent Elements — O(n) bucket sort approach
+public int[] TopKFrequent(int[] nums, int k)
+{
+    var freq = new Dictionary<int, int>();
+    foreach (int n in nums) freq[n] = freq.GetValueOrDefault(n) + 1;
+
+    // Bucket: index = frequency, value = list of numbers with that frequency
+    var buckets = new List<int>[nums.Length + 1];
+    foreach (var (num, count) in freq)
+    {
+        buckets[count] ??= new List<int>();
+        buckets[count].Add(num);
+    }
+
+    var result = new List<int>();
+    for (int i = buckets.Length - 1; i >= 1 && result.Count < k; i--)
+        if (buckets[i] != null) result.AddRange(buckets[i]);
+
+    return result.Take(k).ToArray();
+    // Time: O(n), Space: O(n)
+}
+```
+
+### 🟢 Google
+| Problem | Pattern | Key Insight |
+|---------|---------|-------------|
+| Word Ladder | BFS (shortest path) | Each word = graph node, edge if differ by 1 char |
+| Trapping Rain Water | Two pointers or stack | min(maxLeft, maxRight) - height[i] |
+| Serialize/Deserialize Binary Tree | DFS pre-order | Use sentinel for null nodes |
+
+```csharp
+// Trapping Rain Water — Two Pointer O(n) O(1)
+public int Trap(int[] height)
+{
+    int left = 0, right = height.Length - 1;
+    int maxLeft = 0, maxRight = 0, water = 0;
+
+    while (left < right)
+    {
+        if (height[left] <= height[right])
+        {
+            if (height[left] >= maxLeft) maxLeft = height[left];
+            else water += maxLeft - height[left];
+            left++;
+        }
+        else
+        {
+            if (height[right] >= maxRight) maxRight = height[right];
+            else water += maxRight - height[right];
+            right--;
+        }
+    }
+    return water;
+    // Time: O(n), Space: O(1)
+}
+```
+
+### 🔵 Meta
+| Problem | Pattern | Key Insight |
+|---------|---------|-------------|
+| Merge K Sorted Lists | Min-Heap | O(N log K) |
+| Valid Parentheses | Stack | Push open, match on close |
+| Clone Graph | DFS + HashMap (original→clone) | Avoid infinite loop with visited map |
+
+```csharp
+// Clone Graph — DFS with HashMap
+public Node CloneGraph(Node node)
+{
+    if (node == null) return null!;
+    var visited = new Dictionary<Node, Node>();
+
+    Node Clone(Node n)
+    {
+        if (visited.ContainsKey(n)) return visited[n]; // already cloned
+        var copy = new Node(n.val);
+        visited[n] = copy;
+        foreach (var neighbor in n.neighbors)
+            copy.neighbors.Add(Clone(neighbor));
+        return copy;
+    }
+    return Clone(node);
+    // Time: O(V+E), Space: O(V)
+}
+```
+
+### 🔴 Netflix (focus: data processing at scale)
+| Problem | Pattern | Key Insight |
+|---------|---------|-------------|
+| Top K Most Watched | Min-Heap | Streaming top-K without full sort |
+| Sliding Window Max | Monotonic Deque | O(n) with deque maintaining decreasing order |
+| Median of Data Stream | Two Heaps | O(log n) add, O(1) median |
+
+```csharp
+// Sliding Window Maximum — Monotonic Deque O(n)
+public int[] MaxSlidingWindow(int[] nums, int k)
+{
+    var deque = new LinkedList<int>(); // stores indices, front = max
+    int[] result = new int[nums.Length - k + 1];
+
+    for (int i = 0; i < nums.Length; i++)
+    {
+        // Remove indices outside window
+        while (deque.Count > 0 && deque.First!.Value < i - k + 1)
+            deque.RemoveFirst();
+
+        // Remove smaller elements from back (they'll never be the max)
+        while (deque.Count > 0 && nums[deque.Last!.Value] < nums[i])
+            deque.RemoveLast();
+
+        deque.AddLast(i);
+
+        if (i >= k - 1) result[i - k + 1] = nums[deque.First!.Value];
+    }
+    return result;
+    // Time: O(n), Space: O(k)
+}
+```
+
+### 🍎 Apple
+| Problem | Pattern | Key Insight |
+|---------|---------|-------------|
+| Spiral Matrix | Simulation with boundaries | Shrink boundaries after each direction |
+| Valid Sudoku | HashMap/HashSet per row/col/box | Check 9 rows + 9 cols + 9 boxes |
+| Number of Islands | DFS flood fill | Mark visited by overwriting |
+
+```csharp
+// Spiral Matrix — boundary shrink approach
+public IList<int> SpiralOrder(int[][] matrix)
+{
+    var result = new List<int>();
+    int top = 0, bottom = matrix.Length - 1;
+    int left = 0, right = matrix[0].Length - 1;
+
+    while (top <= bottom && left <= right)
+    {
+        for (int c = left; c <= right; c++) result.Add(matrix[top][c]); top++;
+        for (int r = top; r <= bottom; r++) result.Add(matrix[r][right]); right--;
+        if (top <= bottom) { for (int c = right; c >= left; c--) result.Add(matrix[bottom][c]); bottom--; }
+        if (left <= right) { for (int r = bottom; r >= top; r--) result.Add(matrix[r][left]); left++; }
+    }
+    return result;
+    // Time: O(M×N), Space: O(1) excluding output
+}
+```
+
+---
+
+## Pattern Quick Reference
+
+```mermaid
+flowchart TD
+    PROB([Problem Type]) --> Q1{Contiguous subarray\nor substring?}
+    Q1 -->|YES| SW[Sliding Window\nO n]
+    Q1 -->|NO| Q2{Sorted array\npairs or triplets?}
+    Q2 -->|YES| TP[Two Pointers\nO n or O n²]
+    Q2 -->|NO| Q3{Linked list\ncycle or middle?}
+    Q3 -->|YES| FS[Fast and Slow Pointers\nO n O 1]
+    Q3 -->|NO| Q4{Intervals\noverlap or merge?}
+    Q4 -->|YES| MI[Merge Intervals\nSort + linear pass]
+    Q4 -->|NO| Q5{Tree problem?}
+    Q5 -->|Level by level| BFS[Tree BFS\nQueue]
+    Q5 -->|Path or depth| DFS[Tree DFS\nRecursion]
+    Q5 -->|NO| Q6{Graph problem?}
+    Q6 -->|Shortest path unweighted| GBFS[Graph BFS]
+    Q6 -->|Components or union| UF[Union-Find]
+    Q6 -->|Shortest path weighted| DJ[Dijkstra]
+    Q6 -->|NO| Q7{Top K or priority?}
+    Q7 -->|YES| HEAP[Heap / Priority Queue\nO n log k]
+    Q7 -->|NO| Q8{Optimal substructure\noverlapping subproblems?}
+    Q8 -->|YES| DP[Dynamic Programming\n1D or 2D DP]
+    Q8 -->|NO| BS[Binary Search\nif monotonic condition]
+
+    style SW fill:#2196F3,color:#fff
+    style TP fill:#4CAF50,color:#fff
+    style FS fill:#FF9800,color:#fff
+    style MI fill:#9C27B0,color:#fff
+    style BFS fill:#00BCD4,color:#fff
+    style DFS fill:#009688,color:#fff
+    style GBFS fill:#3F51B5,color:#fff
+    style UF fill:#E91E63,color:#fff
+    style DJ fill:#795548,color:#fff
+    style HEAP fill:#FF5722,color:#fff
+    style DP fill:#607D8B,color:#fff
+    style BS fill:#8BC34A,color:#fff
+```
+

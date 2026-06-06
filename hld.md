@@ -3351,3 +3351,941 @@ Review for correctness, security, performance risk, and long-term maintainabilit
 A lightweight review checklist was introduced for API contracts, telemetry, and failure handling. Review quality improved, rework dropped, and newer engineers ramped faster because expectations were clearer.
 
 ---
+
+---
+
+## 🏢 FAANG / Big Tech — High Level Design
+
+> These questions are asked at Google, Amazon, Meta, Apple, Netflix, and Microsoft for Senior/Staff Engineer roles. Each requires a Requirements → Capacity → API → Data Model → Architecture → Trade-offs walkthrough.
+
+---
+
+### 🔵 Meta/Facebook: Design a News Feed System
+
+**Asked at:** Meta, Twitter/X, LinkedIn, Pinterest
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** Generate a ranked, personalized feed of posts from followed users. Support text, images, and video posts. Like, comment, and share. Infinite scroll / pagination.
+**Non-functional:** 500M DAU. Feed load p99 < 500ms. Post write SLA: visible to followers within 5 seconds for non-celebrities. Eventual consistency acceptable. 99.99% availability.
+
+#### Capacity Estimation
+```
+DAU: 500M users
+Feed reads:  500M × 10 feed loads/day = 5B reads/day → ~58,000 reads/sec
+Post writes: 500M × 0.1 posts/day    = 50M writes/day → ~580 writes/sec
+
+Fan-out writes (push model):
+  Average user has 200 followers → 580 × 200 = 116,000 fan-out writes/sec
+  Celebrity with 50M followers   → 1 post = 50M fan-out writes (spike!)
+
+Storage:
+  Post: ~1KB metadata + media references
+  50M posts/day × 1KB = 50GB/day metadata
+  Timeline per user:   store last 1000 post IDs → 1000 × 8 bytes = 8KB/user
+  500M users × 8KB = 4TB for all precomputed timelines
+```
+
+#### API Design
+```
+GET  /v1/feed?userId={id}&cursor={cursor}&limit=20
+     → { posts: [...], nextCursor: "...", hasMore: true }
+
+POST /v1/posts
+     Body: { text, mediaUrls[], visibility }
+     → { postId, createdAt }
+
+POST /v1/posts/{postId}/like
+POST /v1/posts/{postId}/comment
+     Body: { text }
+```
+
+#### Data Model
+```sql
+-- Post service
+CREATE TABLE posts (
+    post_id    BIGINT PRIMARY KEY,      -- Snowflake ID (timestamp + machineId + seq)
+    user_id    BIGINT NOT NULL,
+    content    TEXT,
+    media_urls JSONB,                   -- ["https://cdn.../img1.jpg"]
+    created_at TIMESTAMP NOT NULL,
+    like_count BIGINT DEFAULT 0,
+    comment_count BIGINT DEFAULT 0
+);
+
+-- Social graph (separate service)
+CREATE TABLE follows (
+    follower_id BIGINT,
+    followee_id BIGINT,
+    created_at  TIMESTAMP,
+    PRIMARY KEY (follower_id, followee_id)
+);
+
+-- Timeline (Redis or Cassandra)
+-- Key: user:{userId}:timeline
+-- Value: sorted set of post_ids ordered by score = timestamp
+-- Each user's precomputed feed: top 1000 post_ids
+
+-- Sharding: partition posts by post_id % N_shards
+-- Partition follows by follower_id
+```
+
+#### Architecture & Key Design Decisions
+
+**Hybrid Fanout Strategy (the core interview answer):**
+
+| Approach | How it works | Problem |
+|----------|-------------|---------|
+| **Fanout on Write (Push)** | On post creation, write post_id to all followers' timeline caches | Celebrity with 50M followers = 50M cache writes per post |
+| **Fanout on Read (Pull)** | On feed request, fetch posts from all followees, merge and rank | 500 followees × DB read = latency too high |
+| **Hybrid** | Push to regular users (<10K followers); Pull + merge for celebrities | Best of both — used by Meta, Twitter |
+
+```
+Post Write Flow (Hybrid):
+  1. User posts → Post Service → persist to Posts DB → publish PostCreated event
+  2. FanOut Service consumes event
+     a. If author.followerCount < 10K:
+          → Write post_id to all followers' Redis timeline (push)
+     b. If author is celebrity (>10K followers):
+          → Skip push; mark post in Celebrity Post Store
+  3. Feed is precomputed for non-celebrity followees instantly
+
+Feed Read Flow:
+  1. GET /feed → FeedService
+  2. Fetch user's precomputed timeline from Redis (post_ids)
+  3. For each celebrity the user follows:
+       → Fetch latest posts from Celebrity Post Store (pull)
+  4. Merge and deduplicate post_id lists
+  5. Batch-fetch post details from Posts DB (or post cache)
+  6. Run ranking model (recency + engagement + affinity)
+  7. Return paginated results
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| Push vs pull | Push = fast reads, expensive writes for celebrities; Pull = slow reads, cheap writes |
+| Redis timeline TTL | Keep last 1000 posts in cache; cold start for inactive users (>30 days) falls back to DB |
+| Ranking placement | Do ranking at read time (fresh scores) vs pre-rank at write time (stale but faster) |
+| Eventual consistency | A post may take 5s to appear in follower feeds — acceptable vs strong consistency overhead |
+
+**Follow-up questions interviewers ask:**
+- "What happens when a celebrity posts and 50M writes need to fan out?" → Hybrid model, background job queue
+- "User A follows 5000 people — how do you keep feed fresh?" → TTL + lazy refresh on read
+- "How do you handle inactive users?" → Don't precompute feeds for users inactive >30 days; compute on-demand on login
+- "How do you rank posts?" → ML ranking service, features: recency, like velocity, user affinity score
+
+```mermaid
+flowchart TD
+    USER([User]) -->|POST /posts| PS[Post Service]
+    PS --> PDB[(Posts DB\nCassandra/MySQL)]
+    PS --> MQ[Message Queue\nKafka]
+
+    MQ --> FS[FanOut Service]
+    FS --> CHECK{"Celebrity?\n> 10K followers"}
+
+    CHECK -->|No — regular user| PUSH["Push to followers'\nRedis timelines"]
+    CHECK -->|Yes — celebrity| CELEB["Write to\nCelebrity Post Store"]
+
+    USER2([Feed Reader]) -->|GET /feed| FEED[Feed Service]
+    FEED --> REDIS[(Redis\nPrecomputed Timeline)]
+    FEED --> CELEB
+    FEED --> MERGE[Merge + Deduplicate\npost_ids]
+    MERGE --> RANK[Ranking Service\nML model]
+    RANK --> POSTDB[(Posts DB\nbatch fetch details)]
+    POSTDB --> RESP([Ranked Feed Response])
+
+    style CHECK fill:#FF9800,color:#fff
+    style PUSH fill:#4CAF50,color:#fff
+    style CELEB fill:#9C27B0,color:#fff
+    style RANK fill:#2196F3,color:#fff
+    style REDIS fill:#f44336,color:#fff
+```
+
+---
+
+### 🔴 Netflix: Design a Video Streaming Platform
+
+**Asked at:** Netflix, YouTube, Twitch, Disney+, Hulu
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** Upload video content (admin). Users browse catalog, search, play video. Resume playback. Adaptive quality based on bandwidth. Subtitles and audio tracks. Recommendation feed.
+**Non-functional:** 250M subscribers. 100M hours of video watched/day. Upload pipeline SLA: available for streaming within 30 minutes of upload. Stream start latency < 2 seconds. CDN cache hit rate > 95%.
+
+#### Capacity Estimation
+```
+Streaming:
+  100M hours/day = 4.2M hours/hour = 70,000 hours/sec
+  Average bitrate: 5 Mbps (HD)
+  Bandwidth: 70,000 × 5 Mbps = 350 Gbps peak egress
+
+Content Storage:
+  1 hour raw video ≈ 10 GB
+  Transcoded to 10 resolutions/formats ≈ 40 GB per hour of content
+  Netflix library: ~50,000 titles × ~2 hrs avg × 40 GB = 4 PB
+
+CDN:
+  Popular content cached at edge — top 1000 titles = 80% of traffic
+  Open Connect Appliances (OCA) at ISPs serve majority of bytes
+```
+
+#### API Design
+```
+GET  /v1/catalog?genre=drama&page=1
+     → { titles: [{ id, title, thumbnailUrl, matchScore }] }
+
+GET  /v1/titles/{titleId}
+     → { title, description, genres, cast, availableQualities, subtitleTracks }
+
+POST /v1/playback/start
+     Body: { titleId, profileId, deviceType }
+     → { sessionId, manifestUrl, licenseServerUrl }
+     (manifestUrl = HLS/DASH manifest listing available quality segments)
+
+POST /v1/playback/progress
+     Body: { sessionId, positionSeconds, quality, bandwidth }
+     → { nextSegmentUrl, recommendedQuality }
+
+GET  /v1/recommendations?userId={id}
+     → { titles: [...] }
+```
+
+#### Data Model
+```sql
+-- Content metadata
+CREATE TABLE titles (
+    title_id    UUID PRIMARY KEY,
+    name        VARCHAR(500),
+    description TEXT,
+    genres      TEXT[],
+    release_year INT,
+    rating      VARCHAR(10)     -- "PG-13"
+);
+
+-- Video assets (one title → many encodings)
+CREATE TABLE video_assets (
+    asset_id    UUID PRIMARY KEY,
+    title_id    UUID REFERENCES titles(title_id),
+    resolution  VARCHAR(20),    -- "1080p", "720p", "480p", "4K"
+    codec       VARCHAR(20),    -- "H.264", "H.265", "AV1"
+    bitrate_kbps INT,
+    storage_path TEXT,          -- s3://netflix-content/title_id/1080p/...
+    duration_sec INT,
+    created_at  TIMESTAMP
+);
+
+-- Viewing history (Cassandra — write-heavy, time-series)
+-- Partition key: user_id, Clustering key: watched_at DESC
+CREATE TABLE viewing_history (
+    user_id      BIGINT,
+    title_id     UUID,
+    profile_id   UUID,
+    watched_at   TIMESTAMP,
+    position_sec INT,           -- resume position
+    completed    BOOLEAN,
+    PRIMARY KEY ((user_id), watched_at, title_id)
+) WITH CLUSTERING ORDER BY (watched_at DESC);
+```
+
+#### Architecture & Key Design Decisions
+
+**Content Ingestion Pipeline:**
+```
+Studio Upload
+  → Raw Storage (S3/GCS — original master file)
+  → Transcoding Workers (FFmpeg clusters, GPU-accelerated)
+      ├── 4K  HDR  HEVC  ~20 Mbps
+      ├── 1080p SDR H.264  ~8 Mbps
+      ├── 720p  SDR H.264  ~5 Mbps
+      ├── 480p  SDR H.264  ~2 Mbps
+      └── 240p  SDR H.264  ~0.5 Mbps
+  → Each resolution split into 4-second segments (HLS/DASH chunks)
+  → Segments pushed to Origin Storage
+  → CDN prefetch for new releases (cache warming)
+  → Metadata updated → title marked "available"
+```
+
+**Adaptive Bitrate Streaming (ABR):**
+```
+Client holds HLS/DASH manifest listing all quality variants.
+Every ~4s, client measures download speed of last segment.
+ABR algorithm (e.g., Netflix BOLA) selects next segment quality:
+  - Bandwidth estimate > 8 Mbps → fetch 1080p segment
+  - Bandwidth drops to 3 Mbps → switch to 480p seamlessly
+  - Buffer runs low (<10s) → drop quality immediately to prevent rebuffering
+```
+
+**Netflix Open Connect (CDN):**
+```
+Netflix ships physical appliances (OCA servers, 100+ TB SSD) to ISPs.
+ISP installs OCA in their data center.
+During off-peak hours: Netflix pushes popular content to OCAs.
+Playback: user's ISP resolves CDN hostname → routed to local OCA.
+Cache hit → no internet transit cost, lowest latency.
+Cache miss → OCA fetches from Netflix origin, caches for future.
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| Segment length (4s) | Shorter = faster quality switches, more HTTP overhead; Longer = better compression, slower adaptation |
+| H.264 vs AV1 | AV1 = 30% better compression, slower encode; H.264 = universal device support |
+| Push CDN vs pull CDN | Push (Open Connect) = predictable, works for top 1000 titles; Pull CDN for long-tail content |
+| Recommendation: offline vs online | Offline ML (hours stale) + online feature layer (real-time signals like current session) |
+
+**Follow-up questions interviewers ask:**
+- "What if a CDN node goes down?" → Client retries with fallback CDN URL in manifest; health checks reroute DNS
+- "How do you handle 4K streams in regions with poor bandwidth?" → ABR drops to lowest quality; offline download feature for mobile
+- "How does the recommendation system work?" → Collaborative filtering + content embeddings, trained daily offline, served by feature store online
+
+```mermaid
+flowchart TD
+    STUDIO([Studio Upload]) --> RAW[(Raw Storage\nS3/GCS)]
+    RAW --> TC[Transcoding Farm\nFFmpeg + GPU]
+    TC --> SEG["Segmented Assets\n4K / 1080p / 720p / 480p\n4-second chunks"]
+    SEG --> ORIGIN[(Origin Storage\nS3)]
+    ORIGIN --> CDN[CDN Layer\nCloudfront + Open Connect]
+
+    USER([User]) -->|Start playback| API[API Gateway]
+    API --> PS[Playback Service]
+    PS --> DRM[DRM License\nWidevine / FairPlay]
+    PS --> MANIFEST["HLS/DASH Manifest\n(quality variant URLs)"]
+    MANIFEST --> USER
+
+    USER -->|Fetch segment| CDN
+    CDN -->|Cache HIT| USER
+    CDN -->|Cache MISS| ORIGIN
+    ORIGIN --> CDN
+
+    USER --> ABR[Client ABR Algorithm\nadapts quality every 4s]
+
+    style TC fill:#f44336,color:#fff
+    style CDN fill:#FF9800,color:#fff
+    style ABR fill:#4CAF50,color:#fff
+    style DRM fill:#9C27B0,color:#fff
+```
+
+---
+
+### 🟠 Amazon: Design a Product Recommendation System
+
+**Asked at:** Amazon, Spotify, Netflix, Airbnb, Etsy
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** "Customers who bought X also bought Y". Personalized homepage recommendations. Similar items on product detail page. Recently viewed. Trending items by category.
+**Non-functional:** 300M active customers. Recommendations served in < 100ms. Model updated at least daily. A/B testing support. Handle cold-start (new user, new item).
+
+#### Capacity Estimation
+```
+Recommendation requests:
+  300M users × 20 page views/day = 6B requests/day → 70,000 req/sec
+
+Event ingestion (clicks, purchases, views):
+  300M users × 50 events/day = 15B events/day → 174,000 events/sec
+
+Model storage:
+  Item embedding vectors: 500M items × 128 dimensions × 4 bytes = 256 GB
+  User embedding vectors: 300M users × 128 dimensions × 4 bytes = 154 GB
+  Item-to-item similarity matrix (top-K only): 500M items × 20 similar × 8 bytes = 80 GB
+```
+
+#### API Design
+```
+GET  /v1/recommendations/homepage?userId={id}&limit=20
+     → { items: [{ itemId, title, price, score, reason: "because you bought..." }] }
+
+GET  /v1/recommendations/similar?itemId={id}&limit=10
+     → { items: [...] }
+
+GET  /v1/recommendations/trending?categoryId={id}&limit=20
+     → { items: [...] }
+
+POST /v1/events
+     Body: { userId, itemId, eventType: "view|click|add_to_cart|purchase", timestamp }
+     → 204 No Content
+```
+
+#### Data Model
+```
+-- Feature Store (offline, updated daily)
+item_features:
+  item_id (string PK)
+  category, price, brand, avg_rating, review_count
+  embedding_vector (float[128])    ← from product2vec model
+  updated_at
+
+user_features:
+  user_id (string PK)
+  preferred_categories[], price_sensitivity
+  embedding_vector (float[128])    ← from user behavior model
+  last_active_at
+
+-- Pre-computed recommendations (Redis / DynamoDB)
+item_similarity:
+  item_id → [top-20 similar item_ids with scores]
+  TTL: 24 hours
+
+user_recommendations:
+  user_id → [top-100 recommended item_ids with scores]
+  TTL: 1 hour
+```
+
+#### Architecture & Key Design Decisions
+
+**Two-Stage Architecture (Recall → Rank):**
+```
+Stage 1 — RECALL (fast, coarse-grained, millions → hundreds):
+  Candidate generators run in parallel:
+    a. Item-to-item CF:    similar to items user bought (precomputed)
+    b. User CF:            items liked by similar users (ANN search on embeddings)
+    c. Trending:           top items in user's favorite categories
+    d. Recently viewed:    last 20 items viewed
+  Union candidates → ~500 items
+
+Stage 2 — RANK (slower, fine-grained, hundreds → 20):
+  Features: user embedding, item embedding, context (device, time of day)
+  Model: LightGBM or small neural net
+  Scores each of 500 candidates → top 20
+  Latency: ~50ms for 500 candidates
+
+Total pipeline latency: < 100ms
+```
+
+**Pre-computation Pipeline:**
+```
+Daily Batch (Spark / EMR):
+  Raw events (clicks, purchases) → compute item co-occurrence matrix
+  → Item-to-item similarity (cosine similarity of embeddings)
+  → Write top-20 similar items per item to Redis
+
+  User purchase history → train matrix factorization model
+  → User and item embedding vectors
+  → Write to Feature Store
+
+Real-time layer:
+  User events stream into Kafka
+  Flink job updates "recently viewed" list (hot cache)
+  Session-level signals feed online ranking features
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| Item-to-item CF vs User CF | Item-CF: stable, explainable ("bought together"); User-CF: personalized but sparsity problem for new users |
+| Batch vs real-time | Batch: accurate, stale (24h lag); Real-time: fresh signals, harder to train |
+| Two-stage (recall+rank) vs end-to-end | Two-stage: scalable; end-to-end neural ranking: better quality, 10× more expensive |
+| Cold start (new user) | Use popularity-based recommendations + category preference from signup flow |
+| Cold start (new item) | Use content-based features (category, description embeddings) until enough interaction data |
+
+**Follow-up questions interviewers ask:**
+- "How do you run A/B tests on recommendation models?" → Randomize user_id % 100 to bucket, log impressions and conversions, measure CTR and conversion lift
+- "Item has 0 purchases — how do you recommend it?" → Content-based: embed description + category, find items with similar embeddings
+- "How do you prevent filter bubbles?" → Inject exploration items (ε-greedy), diversity constraints in ranker
+
+```mermaid
+flowchart LR
+    EVENTS([User Events\nclicks/purchases]) --> KAFKA[Kafka\nEvent Stream]
+    KAFKA --> FLINK[Flink\nReal-time processing]
+    FLINK --> RECENT[(Recently Viewed\nRedis)]
+
+    KAFKA --> BATCH[Daily Spark\nBatch Job]
+    BATCH --> EMBED[Item + User\nEmbeddings]
+    BATCH --> SIMSTORE[(Item Similarity\nStore Redis/DDB)]
+    EMBED --> FEATSTORE[(Feature Store\nDynamoDB)]
+
+    REQ([User Request]) --> RECALL[Recall Service\nCandidate Generation]
+    RECALL --> SIMSTORE
+    RECALL --> RECENT
+    RECALL --> TREND[(Trending Items\nby Category)]
+    RECALL -->|~500 candidates| RANK[Ranking Service\nLightGBM model]
+    RANK --> FEATSTORE
+    RANK -->|top 20| RESP([Recommendation Response])
+
+    style RECALL fill:#FF9800,color:#fff
+    style RANK fill:#4CAF50,color:#fff
+    style BATCH fill:#2196F3,color:#fff
+    style KAFKA fill:#9C27B0,color:#fff
+```
+
+---
+
+### 🟢 Google: Design Search Autocomplete (Typeahead)
+
+**Asked at:** Google, Amazon, Twitter, LinkedIn, DoorDash
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** As user types a query prefix, return top-5 suggestions ranked by search frequency. Suggestions update within 50ms of each keystroke. Support multiple languages. Trending queries updated within 1 hour.
+**Non-functional:** 5B searches/day on Google. Autocomplete requests: 5B × avg 5 keystrokes = 25B requests/day → ~290,000 req/sec. p99 latency < 100ms. High availability — users don't notice degradation.
+
+#### Capacity Estimation
+```
+Requests: 290,000 req/sec peak
+Query space: ~1 billion unique prefix strings (English alone)
+
+Trie size estimate:
+  Average prefix: 10 chars
+  1B unique prefixes × 10 chars × ~50 bytes/node = ~500 GB
+  → Cannot fit in single machine; must distribute
+
+Top-K storage (pre-aggregated):
+  Store top-5 suggestions per prefix node
+  1B prefixes × 5 suggestions × 30 bytes = 150 GB
+  → Fits in a distributed cache (Redis cluster / in-memory shards)
+```
+
+#### API Design
+```
+GET /v1/autocomplete?q=searc&lang=en&limit=5
+    Headers: X-User-Location: US
+    → {
+        query: "searc",
+        suggestions: [
+          { text: "search engine", score: 9823410 },
+          { text: "search console", score: 4120300 },
+          { text: "searching for you", score: 1209400 },
+          ...
+        ]
+      }
+```
+
+#### Data Model
+```
+Trie Node (in-memory, distributed):
+  char:        'a'-'z', '0'-'9', space, special chars
+  children:    Map<char, TrieNode>
+  is_terminal: bool
+  top_k:       [(query_string, frequency)]  ← pre-aggregated at build time
+
+Redis representation (alternative to in-memory trie):
+  Key:   "ac:en:searc"      (lang + prefix)
+  Value: sorted set of (query, score)
+  e.g.: ZADD ac:en:searc 9823410 "search engine"
+        ZADD ac:en:searc 4120300 "search console"
+  Lookup: ZREVRANGE ac:en:searc 0 4 WITHSCORES → O(log N)
+
+Sharding:
+  Shard by hash(first 2 chars of prefix)
+  "se" → shard 3,  "go" → shard 7
+  Each shard owns all prefixes starting with its assigned bigrams
+```
+
+#### Architecture & Key Design Decisions
+
+**Trie Update Pipeline:**
+```
+1. Raw search logs → Kafka topic (290K events/sec)
+2. Flink streaming job:
+     - 1-minute tumbling window
+     - Aggregate query frequencies
+     - Emit (query, count) pairs
+3. Frequency Aggregation Service:
+     - Maintain running totals (last 7 days, exponential decay for recency)
+     - Threshold filter: only queries with >1000 searches/day qualify
+4. Trie Builder (hourly batch):
+     - For each prefix of each qualifying query:
+         update top-K list at that prefix node
+     - Serialize new trie snapshot
+5. Atomic swap:
+     - Load new trie into standby shard
+     - Health-check standby
+     - Swap active ↔ standby (zero downtime)
+
+Latency breakdown for p99 < 100ms:
+  Network (client → server): ~10ms
+  Cache lookup (Redis ZREVRANGE): ~1ms
+  Trie traversal (in-memory): ~0.5ms
+  Serialization + response: ~5ms
+  Total: ~17ms → well within budget
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| Trie vs Redis sorted sets | Trie: memory-efficient for prefix matching; Redis sorted sets: operationally simpler, slightly higher memory |
+| Real-time vs batch updates | Real-time: always fresh; Batch (hourly): simpler, prevents gaming/spam injection |
+| Top-K at each node vs compute on-the-fly | Pre-store top-K: O(1) lookup; compute on-the-fly: always accurate but O(subtree) traversal |
+| Frequency decay | Pure count: old viral queries dominate; Exponential decay: recent queries weighted higher |
+
+**Follow-up questions interviewers ask:**
+- "How do you prevent malicious queries (profanity, hate speech) from appearing?" → Blocklist filter applied before storing in trie; human review queue for trending queries
+- "What if one prefix shard gets 10× more traffic?" → Consistent hashing with virtual nodes; replicate hot shards; local L1 cache in each app server
+- "How do you support 100+ languages?" → Separate trie per language; language detection from user profile + request headers; ~150 GB × 50 languages = 7.5 TB total
+
+```mermaid
+flowchart TD
+    LOGS([Search Logs\n290K events/sec]) --> KAFKA[Kafka\nRaw Query Stream]
+    KAFKA --> FLINK[Flink\n1-min aggregation windows]
+    FLINK --> FREQ[Frequency Store\nquery → rolling count]
+    FREQ --> BUILDER[Trie Builder\nhourly batch job]
+    BUILDER --> TRIE_NEW[(New Trie Snapshot\nstandby shards)]
+    TRIE_NEW -->|Health check + atomic swap| TRIE_ACTIVE[(Active Trie\nin-memory shards)]
+
+    USER([User Keystroke]) --> AG[API Gateway]
+    AG --> AC[Autocomplete Service]
+    AC --> L1[L1 Cache\nlocal per server]
+    L1 -->|Miss| REDIS[(Redis Cluster\nac:en:prefix → sorted set)]
+    REDIS -->|Miss| TRIE_ACTIVE
+    TRIE_ACTIVE --> TOP5[Top-5 suggestions]
+    TOP5 --> USER
+
+    style FLINK fill:#FF9800,color:#fff
+    style BUILDER fill:#2196F3,color:#fff
+    style TRIE_ACTIVE fill:#4CAF50,color:#fff
+    style L1 fill:#9C27B0,color:#fff
+```
+
+---
+
+### 🔵 Meta: Design Instagram / Photo Sharing
+
+**Asked at:** Meta/Instagram, Pinterest, Snapchat, TikTok
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** Upload photos/videos. Follow users. View feed of followed users' posts. Like and comment. Explore/discover trending content. Stories (24h expiry). Profile page.
+**Non-functional:** 2B MAU, 500M DAU. 100M photos/videos uploaded per day. Feed load < 300ms. Upload complete (processing done) within 30s. Like counters eventually consistent (±1% error acceptable).
+
+#### Capacity Estimation
+```
+Uploads:
+  100M uploads/day → ~1,160 uploads/sec
+  Average photo: 3 MB compressed → 100M × 3MB = 300 TB/day raw
+  Stored in multiple resolutions: thumbnail (50KB), medium (500KB), full (3MB)
+  Total with resolutions: ~350 TB/day → ~128 PB/year (must use tiered storage)
+
+Feed reads:
+  500M DAU × 15 feed loads/day = 7.5B reads/day → 87,000 reads/sec
+
+Social graph:
+  500M active users, average 200 followers = 100B follow edges
+  Sharded graph DB (TAO at Meta) or Neo4j cluster
+```
+
+#### API Design
+```
+POST /v1/media/upload
+     Body: multipart/form-data { file, caption, location, tags[] }
+     → { mediaId, status: "processing" }
+
+GET  /v1/media/{mediaId}/status
+     → { status: "ready|processing|failed", urls: { thumbnail, medium, full } }
+
+GET  /v1/feed?userId={id}&cursor={cursor}
+     → { posts: [...], nextCursor }
+
+POST /v1/posts/{postId}/like
+     → { likeCount }     (approximate — sharded counter)
+
+GET  /v1/users/{userId}/profile
+     → { username, bio, followerCount, followingCount, posts: [...] }
+```
+
+#### Data Model
+```sql
+-- Media metadata (sharded by media_id)
+CREATE TABLE media (
+    media_id    BIGINT PRIMARY KEY,     -- Snowflake ID
+    user_id     BIGINT NOT NULL,
+    media_type  VARCHAR(10),            -- "photo" | "video"
+    caption     TEXT,
+    location    POINT,
+    cdn_urls    JSONB,                  -- { thumbnail, medium, full, video_hls }
+    created_at  TIMESTAMP,
+    is_deleted  BOOLEAN DEFAULT FALSE
+);
+
+-- Like counters — sharded to avoid hot row
+-- Do NOT store count in media row; use separate counter shards
+CREATE TABLE like_counters (
+    media_id    BIGINT,
+    shard_id    INT,                    -- 0..99
+    count       BIGINT DEFAULT 0,
+    PRIMARY KEY (media_id, shard_id)
+);
+-- Total likes = SUM(count) WHERE media_id = X
+-- Write: UPDATE like_counters SET count = count+1
+--        WHERE media_id=X AND shard_id = hash(userId) % 100
+
+-- Social graph (TAO / separate graph service)
+CREATE TABLE follows (
+    follower_id BIGINT,
+    followee_id BIGINT,
+    created_at  TIMESTAMP,
+    PRIMARY KEY (follower_id, followee_id)
+);
+```
+
+#### Architecture & Key Design Decisions
+
+**Photo Upload Flow:**
+```
+1. Client → POST /upload → Upload Service (returns pre-signed S3 URL)
+2. Client uploads directly to S3 (bypasses app servers, no bandwidth bottleneck)
+3. S3 triggers Lambda → publishes "MediaUploaded" event to Kafka
+4. Media Processing Workers consume event:
+     a. Validate (NSFW check via ML model)
+     b. Resize to thumbnail/medium/full resolutions
+     c. Transcode video to HLS (multiple bitrates)
+     d. Push all variants to CDN origin
+5. Update media.status = "ready", populate cdn_urls
+6. Push notification to user: "Your photo is ready"
+```
+
+**Celebrity Problem / Thundering Herd:**
+```
+Problem: Kylie Jenner posts → 400M followers → 400M feed cache invalidations simultaneously
+Solution:
+  1. Hybrid fanout (same as Facebook News Feed — see above)
+  2. For celebrities: do NOT fan out on write
+  3. On feed read: merge celebrity posts at read time
+  4. CDN protects media assets regardless of post volume
+  5. Rate-limit fan-out workers per second to smooth the spike
+```
+
+**Sharded Like Counters:**
+```
+Naive: UPDATE media SET like_count = like_count + 1 WHERE media_id = X
+Problem: Single row → hot spot → DB bottleneck at 10K likes/sec on viral photo
+
+Solution — sharded counter:
+  Write: pick shard_id = hash(user_id) % 100
+         UPDATE like_counters SET count=count+1
+         WHERE media_id=X AND shard_id=shard_id
+  Read:  SELECT SUM(count) FROM like_counters WHERE media_id=X
+  Cost:  100 reads for exact count (acceptable) OR
+         cache SUM with 30s TTL (approximate but fast)
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| Client-direct S3 upload | Pros: no bandwidth on app servers; Cons: harder to validate before storage (validate after via async worker) |
+| Sharded counters | Pros: no hot row; Cons: eventual consistency, SUM query cost |
+| Fanout for celebrities | Pros: no 400M writes; Cons: slightly higher feed latency for followers of celebrities |
+| Story 24h TTL | Implement as soft delete (expires_at column + cron cleanup) vs hard TTL in cache |
+
+**Follow-up questions interviewers ask:**
+- "Viral photo gets 1M likes in 1 minute — how does your counter handle it?" → Sharded counters + Redis for hot items with write batching
+- "How do you serve photos to users in Brazil with low latency?" → CDN PoPs in South America; S3 replication to sa-east-1 region
+- "How does Stories work differently from regular posts?" → TTL-based expiry; stored separately; no fan-out needed (users pull on Stories open)
+
+```mermaid
+flowchart TD
+    CLIENT([Mobile Client]) -->|1. Request upload URL| US[Upload Service]
+    US -->|2. Pre-signed S3 URL| CLIENT
+    CLIENT -->|3. Direct upload| S3[(S3 Raw Storage)]
+    S3 -->|4. S3 Event trigger| KAFKA[Kafka\nMediaUploaded event]
+    KAFKA --> PROC[Media Processing Workers]
+    PROC --> NSFW[NSFW Classifier\nML Service]
+    PROC --> RESIZE[Image Resizer\nthumbnail/medium/full]
+    PROC --> TRANSCODE[Video Transcoder\nHLS bitrates]
+    RESIZE --> CDN[CDN Origin\nCloudFront / Fastly]
+    TRANSCODE --> CDN
+    PROC --> META[(Media Metadata\nDB update: status=ready)]
+
+    CLIENT2([Feed Reader]) -->|GET /feed| FEED[Feed Service]
+    FEED --> TIMELINE[(Redis Timeline\npre-computed post_ids)]
+    FEED --> CELEB[(Celebrity\nPost Store)]
+    FEED --> META
+    FEED --> CDN
+
+    style PROC fill:#FF9800,color:#fff
+    style CDN fill:#4CAF50,color:#fff
+    style KAFKA fill:#9C27B0,color:#fff
+    style NSFW fill:#f44336,color:#fff
+```
+
+---
+
+### 🟡 Uber: Design a Ride Matching System
+
+**Asked at:** Uber, Lyft, DoorDash, Instacart, Grab
+**Difficulty:** Senior / Staff
+
+#### Requirements
+**Functional:** Rider requests ride → match to nearest available driver → track driver location in real-time → calculate fare (including surge pricing) → manage trip state machine (requested → accepted → en-route → arrived → in-trip → completed).
+**Non-functional:** 5M rides/day globally. 3M active drivers at peak. Driver location update every 4 seconds. Match latency: rider sees driver assignment < 3 seconds. 99.9% uptime.
+
+#### Capacity Estimation
+```
+Location updates:
+  3M drivers × 1 update/4sec = 750,000 location writes/sec
+
+Ride requests:
+  5M rides/day ÷ 86400s = ~58 ride requests/sec (peak 10× = 580/sec)
+
+Geospatial reads (find nearby drivers):
+  580 match requests/sec × search radius query = 580 queries/sec
+
+Storage (location — keep only latest per driver):
+  3M drivers × ~100 bytes = 300 MB (fits in Redis easily)
+
+Trip history:
+  5M trips/day × 1KB per trip = 5 GB/day → ~1.8 TB/year
+```
+
+#### API Design
+```
+-- Driver side
+POST /v1/driver/location
+     Body: { driverId, lat, lng, heading, speed, timestamp }
+     → 204 No Content
+
+PUT  /v1/driver/status
+     Body: { driverId, status: "available|busy|offline" }
+
+-- Rider side
+POST /v1/rides/request
+     Body: { riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, rideType }
+     → { rideId, status: "searching", estimatedWait: 4 }
+
+GET  /v1/rides/{rideId}
+     → { rideId, status, driver: { name, photo, rating, currentLat, currentLng }, eta }
+
+POST /v1/rides/{rideId}/cancel
+```
+
+#### Data Model
+```sql
+-- Driver live location (Redis — not DB, updated every 4s)
+-- Key: driver:{driverId}:location
+-- Value: HASH { lat, lng, heading, updated_at, status }
+-- Geo index: GEOADD drivers:available lng lat driverId
+-- Query:     GEORADIUS drivers:available lng lat 5 km ASC COUNT 20
+
+-- Geospatial: Uber uses H3 hexagonal grid (open-sourced)
+-- Each hex has a unique ID at multiple resolutions
+-- Resolution 9 hex ≈ 0.1 km² (city block level)
+-- Driver stored in their current hex: SET driver_hex:{hexId} → [driverIds]
+-- On request: find rider's hex → expand outward until N drivers found
+
+-- Trip table (PostgreSQL, sharded by city/region)
+CREATE TABLE trips (
+    trip_id      UUID PRIMARY KEY,
+    rider_id     BIGINT,
+    driver_id    BIGINT,
+    status       VARCHAR(20),          -- requested|accepted|en_route|in_trip|completed|cancelled
+    pickup_lat   DECIMAL(9,6),
+    pickup_lng   DECIMAL(9,6),
+    dropoff_lat  DECIMAL(9,6),
+    dropoff_lng  DECIMAL(9,6),
+    fare_cents   INT,
+    surge_multiplier DECIMAL(4,2),
+    requested_at TIMESTAMP,
+    accepted_at  TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE surge_pricing (
+    hex_id       VARCHAR(20),          -- H3 hex ID
+    multiplier   DECIMAL(4,2),         -- 1.0 = normal, 2.5 = 2.5x surge
+    demand_count INT,                  -- active requests in hex
+    supply_count INT,                  -- available drivers in hex
+    updated_at   TIMESTAMP,
+    PRIMARY KEY (hex_id)
+);
+```
+
+#### Architecture & Key Design Decisions
+
+**Driver Location Update Flow:**
+```
+Driver app → WebSocket connection → Location Service
+  → GEOADD to Redis geo index (lng lat driverId)
+  → SET driver:{id}:location (for individual lookups)
+  → Publish to Kafka (for analytics / trip tracking)
+  WebSocket preferred over polling:
+    Polling 3M drivers every 4s = 750K HTTP requests/sec
+    WebSocket: persistent connection, minimal overhead
+```
+
+**Matching Algorithm:**
+```
+Rider requests ride:
+  1. MatchingService receives request
+  2. Get rider location (lat, lng)
+  3. GEORADIUS search in Redis: find available drivers within 5km, ordered by distance
+  4. Apply ranking:
+       score = f(distance, driver_rating, acceptance_rate, vehicle_type)
+  5. Send "trip offer" to top-3 drivers simultaneously (first-accept wins)
+  6. If no driver accepts within 15s: expand radius to 10km, retry
+  7. If still no match: notify rider "no drivers available"
+  8. On driver accept: lock trip_id to driver, update status → accepted
+```
+
+**Surge Pricing:**
+```
+Every 60 seconds, Surge Calculation Service:
+  For each H3 hex at resolution 9:
+    demand = active_ride_requests in hex (last 5min)
+    supply = available_drivers in hex
+    ratio  = demand / supply
+    multiplier = surge_curve(ratio):
+      ratio < 0.5 → 1.0x
+      ratio 0.5–1 → 1.0x–1.5x
+      ratio 1–2   → 1.5x–2.5x
+      ratio > 2   → 2.5x (capped)
+  Write multiplier to surge_pricing table
+  Push to Redis for fast lookup at request time
+```
+
+**Trip State Machine:**
+```
+requested → [driver accepts] → accepted
+accepted  → [driver starts driving to pickup] → en_route
+en_route  → [driver arrives at pickup] → arrived
+arrived   → [rider boards, driver starts trip] → in_trip
+in_trip   → [driver ends trip] → completed
+                                         OR
+Any state → [rider/driver cancels] → cancelled
+```
+
+#### Trade-offs & Follow-up Questions
+
+| Decision | Trade-off |
+|----------|-----------|
+| H3 hexagonal grid | Uniform cell sizes; no edge distortion near poles; easy hierarchical aggregation for surge |
+| Redis for live locations | Ultra-fast GEORADIUS queries; volatile (if Redis crashes, location state lost for seconds — acceptable) |
+| WebSocket vs polling | WebSocket: efficient for high-frequency updates; harder to scale (sticky connections); polling: simpler, higher overhead |
+| First-accept vs best-match | First-accept: lower latency; best-match: better driver utilization and ratings but adds latency |
+
+**Follow-up questions interviewers ask:**
+- "What if the matching service goes down?" → Stateless service; restart quickly; rider request is in DB, can be re-matched by another instance
+- "How do you handle surge pricing fairly?" → Cap at 2.5x; show surge to rider before they confirm; notification when surge ends
+- "Driver is assigned but their GPS signal is lost — what happens?" → Trip status stays in DB; grace period before auto-cancel; driver can reconnect via new WebSocket and resume
+
+```mermaid
+flowchart TD
+    DRIVER([Driver App]) -->|WebSocket\nlocation update every 4s| LS[Location Service]
+    LS --> REDIS_GEO[(Redis Geo Index\nGEOADD drivers:available)]
+    LS --> KAFKA[Kafka\nLocation Events]
+
+    RIDER([Rider App]) -->|POST /rides/request| RS[Ride Request Service]
+    RS --> REDIS_GEO
+    REDIS_GEO -->|GEORADIUS 5km| CANDIDATES[Nearest Drivers\nordered by distance]
+    CANDIDATES --> MATCH[Matching Service\nrank + score drivers]
+    MATCH --> OFFER[Send Offer\nto top-3 drivers]
+    OFFER -->|First accept| ASSIGN[Assign Trip\nupdate status=accepted]
+    ASSIGN --> TRIPDB[(Trips DB\nPostgreSQL)]
+
+    SURGE[Surge Service\nevery 60s] --> HEX[H3 Hex\ndemand/supply ratio]
+    HEX --> SURGEDB[(Surge Table\nmultiplier per hex)]
+    SURGEDB --> RS
+
+    ASSIGN --> NOTIFY[Push Notification\n"Driver is on the way"]
+    NOTIFY --> RIDER
+
+    style LS fill:#FF9800,color:#fff
+    style MATCH fill:#4CAF50,color:#fff
+    style SURGE fill:#f44336,color:#fff
+    style REDIS_GEO fill:#9C27B0,color:#fff
+```
+

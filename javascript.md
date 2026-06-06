@@ -6870,3 +6870,458 @@ console.log("2");
 // Output: 1, 2, 2.5, 3, 4
 ```
 
+
+---
+
+# 🏢 FAANG JavaScript / Frontend Interview Questions
+
+> These questions have been asked at Google, Meta, Amazon, Apple, Netflix, and Microsoft. They test deep engine knowledge, performance intuition, and the ability to reason about large-scale frontend systems.
+
+---
+
+## FAANG-JS-1 — How does V8 (Google Chrome's JS engine) compile and optimize JavaScript? (Google)
+
+**Answer:**
+V8 uses a multi-tier compilation pipeline to balance startup speed with peak throughput:
+
+1. **Ignition (interpreter)** — parses source into bytecode and executes immediately. Fast startup, low memory.
+2. **Sparkplug (fast baseline JIT)** — compiles bytecode to machine code with minimal optimization. Bridges the gap between Ignition and TurboFan.
+3. **Maglev (mid-tier JIT, V8 v12+)** — SSA-based compiler that handles the middle tier, giving significant speedups for moderately hot code without the full cost of TurboFan.
+4. **TurboFan (optimizing JIT)** — speculative, type-feedback-driven optimizing compiler. Only applied to "hot" functions (called many times).
+
+**Hidden classes & inline caches:**
+V8 assigns a "hidden class" (also called a Shape or Map) to every object based on its property layout. If you always add properties in the same order, all instances share the same hidden class — property lookups become a fixed offset (an inline cache hit). Mixing property order creates separate hidden classes and degrades lookups to polymorphic/megamorphic.
+
+**Deoptimization (bailout):**
+TurboFan makes speculative assumptions (e.g., "this function always receives a number"). If the assumption is violated at runtime, V8 **deoptimizes** — throws away the optimized code and falls back to Ignition. Common causes:
+- Changing the type of a variable after optimization
+- Adding properties to an object after its hidden class is established
+- `arguments` object access or `eval` inside a hot function
+
+**Call site morphism:**
+| Type | Description | Performance |
+|------|-------------|-------------|
+| Monomorphic | Always same type at call site | Fastest — single IC hit |
+| Polymorphic | 2–4 different types | Slower — IC checks each type |
+| Megamorphic | 5+ types | Slowest — IC lookup table / generic path |
+
+❌ **Hurts performance — megamorphic array:**
+```javascript
+// Mixing types prevents V8 from using a typed array optimization
+const arr = [1, 'two', true, null, { x: 5 }]; // SMI → HeapNumber → String → ... ❌
+arr.forEach(x => x * 2); // type check at every iteration
+```
+
+✅ **V8-friendly — monomorphic typed array:**
+```javascript
+// All SMI (small integers) — V8 uses a compact PACKED_SMI_ELEMENTS array
+const arr = [1, 2, 3, 4, 5]; // ✅ single hidden class, no type switching
+arr.forEach(x => x * 2);     // no per-element type guard needed
+```
+
+```mermaid
+flowchart TD
+    SRC["JavaScript Source"] --> IGN["Ignition\n(Interpreter → Bytecode)"]
+    IGN --> SP["Sparkplug\n(Fast Baseline JIT)"]
+    SP --> MAG["Maglev\n(Mid-tier JIT)"]
+    MAG --> TF["TurboFan\n(Optimizing JIT)"]
+    TF -->|"Assumption violated"| DEOPT["Deoptimization\n(bailout → back to Ignition)"]
+    DEOPT --> IGN
+
+    style SRC fill:#1565c0,color:#fff
+    style IGN fill:#2e7d32,color:#fff
+    style SP fill:#f57f17,color:#fff
+    style MAG fill:#6a1b9a,color:#fff
+    style TF fill:#c62828,color:#fff
+    style DEOPT fill:#4e342e,color:#fff
+```
+
+---
+
+## FAANG-JS-2 — Explain JavaScript's memory model and common memory leaks (Google/Meta)
+
+**Answer:**
+JavaScript manages memory automatically via garbage collection (GC), but certain patterns prevent the GC from reclaiming objects — causing heap growth over time.
+
+**Memory model:**
+- **Stack** — primitive values, function call frames (fixed size, fast, automatically freed on return)
+- **Heap** — all objects, arrays, closures (dynamically sized, GC-managed)
+- **GC roots** — global variables, current call stack, active event listeners. Anything reachable from a root is kept alive.
+
+**Common leak patterns:**
+
+| Pattern | Why it leaks | Fix |
+|---------|-------------|-----|
+| Forgotten event listeners | Listener holds a reference to a closure/object | `removeEventListener` in cleanup |
+| Closures capturing large objects | Inner function keeps outer scope alive | Nullify or restructure scope |
+| Detached DOM nodes | Removed from DOM but still referenced in JS | Set variable to `null` after removal |
+| Global variable accumulation | Accidentally global (`x = 5` without `let`) | `'use strict'` + linting |
+| Timer callbacks | `setInterval` keeps callback + closure alive | `clearInterval` on cleanup |
+
+❌ **Leak — detached DOM node:**
+```javascript
+let detachedNode;
+function createLeak() {
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  detachedNode = el; // keep a JS reference
+  document.body.removeChild(el); // removed from DOM, but el is still reachable via detachedNode ❌
+}
+```
+
+✅ **Fix — release reference:**
+```javascript
+function noLeak() {
+  let el = document.createElement('div');
+  document.body.appendChild(el);
+  document.body.removeChild(el);
+  el = null; // now GC can collect it ✅
+}
+```
+
+❌ **Leak — forgotten event listener:**
+```javascript
+class DataPanel {
+  constructor() {
+    window.addEventListener('resize', this.handleResize); // ❌ never removed
+  }
+  handleResize = () => { /* heavy computation */ };
+}
+```
+
+✅ **Fix — cleanup in destroy/disconnectedCallback:**
+```javascript
+class DataPanel {
+  constructor() {
+    this._onResize = this.handleResize.bind(this);
+    window.addEventListener('resize', this._onResize);
+  }
+  handleResize() { /* ... */ }
+  destroy() {
+    window.removeEventListener('resize', this._onResize); // ✅
+  }
+}
+```
+
+**WeakMap vs Map for caches:**
+```javascript
+// Map — strong reference, prevents GC of key
+const cache = new Map();
+cache.set(domNode, computedData); // domNode stays alive as long as cache exists ❌
+
+// WeakMap — weak reference, GC can collect key when no other reference exists
+const weakCache = new WeakMap();
+weakCache.set(domNode, computedData); // domNode collected when removed from DOM ✅
+```
+
+**Profiling:** Chrome DevTools → Memory tab → Take Heap Snapshot. Compare two snapshots to find objects accumulating between actions. The "Detached DOM trees" filter is the fastest way to find detached node leaks.
+
+---
+
+## FAANG-JS-3 — How would you implement a virtual DOM diffing algorithm? (Meta — React internals)
+
+**Answer:**
+A naive tree diff is O(n³) (compare every node, find minimum edit distance). React uses a set of heuristics to achieve O(n):
+
+**Heuristic rules:**
+1. **Different element types** → tear down old tree, build new tree from scratch (no reuse across types)
+2. **Same element type** → update in-place (patch attributes, recurse into children)
+3. **Same level only** — cross-level moves are not tracked (assume rare)
+4. **Keys** — stable identity for list items; without keys, React diffs by position (causes bugs with reordering)
+
+**Fiber architecture (React 16+):**
+React Fiber represents each component as a "fiber" node in a linked list. Work is split into units that can be paused, prioritized, and resumed — enabling concurrent rendering. Priority lanes (Concurrent Mode) allow user interactions (high priority) to interrupt slow background renders.
+
+```javascript
+// Simplified virtual DOM diff
+function diff(oldNode, newNode, parent) {
+  // 1. New node added
+  if (!oldNode) return parent.appendChild(createElement(newNode));
+  // 2. Node removed
+  if (!newNode) return parent.removeChild(parent.childNodes[0]);
+  // 3. Node changed type — full replace
+  if (oldNode.type !== newNode.type) {
+    return parent.replaceChild(createElement(newNode), parent.childNodes[0]);
+  }
+  // 4. Same type — patch attributes
+  patchAttributes(parent.childNodes[0], oldNode.props, newNode.props);
+  // 5. Recurse into children (keyed diff in real React)
+  const maxLen = Math.max(oldNode.children.length, newNode.children.length);
+  for (let i = 0; i < maxLen; i++) {
+    diff(oldNode.children[i], newNode.children[i], parent.childNodes[0]);
+  }
+}
+```
+
+**Why keys matter:**
+```jsx
+// ❌ Without keys — React diffs by index; reorder = O(n) DOM mutations
+{items.map(item => <ListItem value={item.value} />)}
+
+// ✅ With stable keys — React moves existing DOM nodes, O(1) per reorder
+{items.map(item => <ListItem key={item.id} value={item.value} />)}
+```
+
+```mermaid
+flowchart TD
+    RENDER["New render produces\nvirtual DOM tree"] --> DIFF["Diffing / Reconciliation\n(O(n) heuristic)"]
+    DIFF --> SAME["Same type?\nPatch attributes + recurse"]
+    DIFF --> DIFF_TYPE["Different type?\nUnmount old + mount new"]
+    DIFF --> LIST["List with keys?\nMatch by key → minimal moves"]
+    SAME --> COMMIT["Commit phase\n(batch DOM mutations)"]
+    DIFF_TYPE --> COMMIT
+    LIST --> COMMIT
+    COMMIT --> PAINT["Browser paint"]
+
+    style RENDER fill:#1565c0,color:#fff
+    style DIFF fill:#2e7d32,color:#fff
+    style COMMIT fill:#e65100,color:#fff
+    style PAINT fill:#4a148c,color:#fff
+```
+
+---
+
+## FAANG-JS-4 — Implement debounce and throttle from scratch (Google, Meta, Amazon)
+
+**Answer:**
+Both limit how often a function runs, but with different semantics:
+- **Debounce** — wait until N ms have passed *since the last call*. Best for "settle" scenarios (search input, resize end).
+- **Throttle** — execute at most once per N ms window. Best for "rate limit" scenarios (scroll, mousemove).
+
+```javascript
+// ─── DEBOUNCE ────────────────────────────────────────────────────────
+/**
+ * @param {Function} fn - function to debounce
+ * @param {number} delay - ms to wait after last call
+ * @param {{ leading?: boolean, trailing?: boolean }} options
+ */
+function debounce(fn, delay, { leading = false, trailing = true } = {}) {
+  let timerId = null;
+  let lastArgs = null;
+
+  function debounced(...args) {
+    lastArgs = args;
+    const isFirstCall = leading && timerId === null;
+
+    clearTimeout(timerId);
+    timerId = setTimeout(() => {
+      timerId = null;
+      if (trailing && lastArgs) {
+        fn.apply(this, lastArgs);
+        lastArgs = null;
+      }
+    }, delay);
+
+    if (isFirstCall) fn.apply(this, args); // leading edge
+  }
+
+  debounced.cancel = () => { clearTimeout(timerId); timerId = null; };
+  return debounced;
+}
+
+// ─── THROTTLE ────────────────────────────────────────────────────────
+/**
+ * @param {Function} fn
+ * @param {number} limit - ms per window
+ * @param {{ leading?: boolean, trailing?: boolean }} options
+ */
+function throttle(fn, limit, { leading = true, trailing = true } = {}) {
+  let lastRun = 0;
+  let timerId = null;
+
+  return function throttled(...args) {
+    const now = Date.now();
+    const remaining = limit - (now - lastRun);
+
+    if (remaining <= 0 || (leading && lastRun === 0)) {
+      if (timerId) { clearTimeout(timerId); timerId = null; }
+      lastRun = now;
+      fn.apply(this, args);
+    } else if (trailing) {
+      clearTimeout(timerId);
+      timerId = setTimeout(() => {
+        lastRun = leading ? Date.now() : 0;
+        timerId = null;
+        fn.apply(this, args);
+      }, remaining);
+    }
+  };
+}
+```
+
+**Usage:**
+```javascript
+// Debounce: fire after user stops typing for 300ms
+const handleSearch = debounce((query) => fetchResults(query), 300);
+searchInput.addEventListener('input', e => handleSearch(e.target.value));
+
+// Throttle: scroll handler fires at most every 100ms
+const handleScroll = throttle(() => updateProgressBar(), 100);
+window.addEventListener('scroll', handleScroll);
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Debounce
+    participant API
+
+    User->>Debounce: keypress (t=0)
+    User->>Debounce: keypress (t=100ms)
+    User->>Debounce: keypress (t=200ms)
+    Note over Debounce: Reset timer each call
+    User->>Debounce: keypress (t=300ms) — last call
+    Note over Debounce: Timer starts (300ms)
+    Debounce->>API: fetch('query') at t=600ms ✅
+```
+
+---
+
+## FAANG-JS-5 — How does the JavaScript event loop handle microtasks vs macrotasks? (Google)
+
+**Answer:**
+The event loop processes tasks in a strict priority order:
+
+1. **Synchronous code** (call stack) runs to completion first
+2. **Microtask queue** is fully drained after each task: `Promise.then/catch/finally`, `queueMicrotask()`, `MutationObserver`
+3. **Rendering** (if browser): layout → paint → composite (between macrotask batches)
+4. **Macrotask queue** processes one task at a time: `setTimeout`, `setInterval`, `MessageChannel`, I/O callbacks, `requestAnimationFrame` (browser-specific placement — before paint)
+
+**Key rule:** After every macrotask completes, the entire microtask queue is drained before the next macrotask runs. Microtasks can enqueue more microtasks — they all run before control returns to the event loop.
+
+```javascript
+// ── Classic interview question: predict the output ──
+console.log('1');                              // sync
+setTimeout(() => console.log('5'), 0);        // macrotask
+Promise.resolve()
+  .then(() => console.log('3'))               // microtask
+  .then(() => console.log('4'));              // microtask (chained)
+queueMicrotask(() => console.log('2.5'));     // microtask
+console.log('2');                              // sync
+
+// Output: 1, 2, 2.5, 3, 4, 5
+```
+
+**Node.js ordering (additional nuance):**
+```javascript
+// Node.js event loop has extra phases:
+// process.nextTick queue drains BEFORE Promise microtasks
+process.nextTick(() => console.log('nextTick'));   // runs first
+Promise.resolve().then(() => console.log('promise')); // runs second
+setTimeout(() => console.log('timeout'), 0);       // runs third
+// Output: nextTick, promise, timeout
+```
+
+| Queue | Examples | Runs when |
+|-------|---------|-----------|
+| Microtask | `Promise.then`, `queueMicrotask`, `MutationObserver` | After every task, before next macrotask |
+| Macrotask | `setTimeout`, `setInterval`, I/O, `requestAnimationFrame` | One per event loop tick |
+| process.nextTick (Node) | `process.nextTick()` | Before Promise microtasks (Node only) |
+
+```mermaid
+flowchart TD
+    SYNC["Call Stack\n(sync code runs to completion)"]
+    SYNC --> MICRO["Drain Microtask Queue\n(Promise.then, queueMicrotask)\nRepeat until empty"]
+    MICRO --> RENDER["Browser: Render if needed\n(layout → paint → composite)"]
+    RENDER --> MACRO["Pick 1 Macrotask\n(setTimeout / setInterval / I/O)"]
+    MACRO --> SYNC
+
+    style SYNC fill:#1565c0,color:#fff
+    style MICRO fill:#2e7d32,color:#fff
+    style RENDER fill:#6a1b9a,color:#fff
+    style MACRO fill:#e65100,color:#fff
+```
+
+---
+
+## FAANG-JS-6 — How would you optimize a React application suffering from excessive re-renders? (Meta)
+
+**Answer:**
+Re-render optimization follows a diagnostic-first approach — measure with the React Profiler before applying any optimization.
+
+**Step 1 — Diagnose with React Profiler:**
+```jsx
+import { Profiler } from 'react';
+
+<Profiler id="ProductList" onRender={(id, phase, duration) => {
+  if (duration > 16) console.warn(`${id} slow render: ${duration.toFixed(2)}ms`);
+}}>
+  <ProductList />
+</Profiler>
+```
+
+**Step 2 — Apply targeted fixes:**
+
+```jsx
+// ── React.memo — skip re-render if props unchanged ──
+const ProductCard = React.memo(({ product, onSelect }) => {
+  return <div onClick={() => onSelect(product.id)}>{product.name}</div>;
+});
+// ⚠️ Only helps if parent re-renders with same prop values
+
+// ── useCallback — stable function reference ──
+function ProductList({ products }) {
+  // Without useCallback: new function reference every render → ProductCard always re-renders
+  const handleSelect = useCallback((id) => {
+    setSelectedId(id);
+  }, []); // ✅ stable reference
+
+  return products.map(p => <ProductCard key={p.id} product={p} onSelect={handleSelect} />);
+}
+
+// ── useMemo — expensive computation ──
+function Dashboard({ data }) {
+  const stats = useMemo(() => computeExpensiveStats(data), [data]); // ✅ cached
+  return <StatsPanel stats={stats} />;
+}
+
+// ── State colocation — move state DOWN to minimize blast radius ──
+// ❌ State at top level causes entire tree to re-render
+function App() {
+  const [count, setCount] = useState(0); // every child re-renders on count change ❌
+  return <><Counter count={count} onChange={setCount} /><HeavyComponent /></>;
+}
+
+// ✅ State lives in Counter — HeavyComponent never re-renders
+function App() {
+  return <><Counter /><HeavyComponent /></>;
+}
+function Counter() {
+  const [count, setCount] = useState(0); // isolated ✅
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}
+
+// ── Context performance — split contexts by update frequency ──
+// ❌ One big context: any field change re-renders ALL consumers
+const AppContext = createContext({ user, theme, cart }); // ❌
+
+// ✅ Split: consumers only subscribe to what they need
+const UserContext  = createContext(user);
+const ThemeContext = createContext(theme);
+const CartContext  = createContext(cart);
+```
+
+**Code splitting:**
+```jsx
+const HeavyRoute = React.lazy(() => import('./HeavyRoute'));
+
+function App() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Routes>
+        <Route path="/heavy" element={<HeavyRoute />} /> {/* loaded on demand ✅ */}
+      </Routes>
+    </Suspense>
+  );
+}
+```
+
+| Technique | Use when | Cost |
+|-----------|---------|------|
+| `React.memo` | Pure component with stable prop values | Low |
+| `useCallback` | Passing callbacks to memoized children | Low |
+| `useMemo` | Expensive derived values | Low |
+| State colocation | State not needed at parent level | Refactoring |
+| Context splitting | Context updates too broadly | Refactoring |
+| `React.lazy` | Large route/component bundles | Medium |
+

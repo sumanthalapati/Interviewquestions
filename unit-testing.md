@@ -2358,3 +2358,330 @@ mock.Setup(r => r.SaveAsync(It.IsAny<Order>()))
 mock.Setup(r => r.GetAsync(It.IsAny<Guid>())).ThrowsAsync(new TimeoutException());
 ```
 
+
+---
+
+## 🏢 FAANG Testing & Quality Engineering Questions
+
+---
+
+### Q: How does Google test at scale? (Google Testing Blog)
+
+**Google's test size taxonomy (not unit/integration/e2e):**
+
+| Size | Resources allowed | Max duration | Equivalent to |
+|---|---|---|---|
+| **Small** | No network, no disk, no external services | 1 minute | Unit test |
+| **Medium** | localhost network, localhost DB, no external services | 5 minutes | Integration test |
+| **Large** | Real network, real external services | 15 minutes | End-to-end test |
+
+**The 70/20/10 pyramid (Google's actual ratio):**
+- 70% Small (fast, hermetic, run on every commit)
+- 20% Medium (run on every PR merge)
+- 10% Large (run pre-release, nightly)
+
+**Hermetic tests:**
+- Zero external dependencies at runtime
+- Use test doubles, in-process fakes, or local docker containers
+- Outcome is deterministic regardless of environment or time
+- Prerequisite for reliable CI — flaky tests block everyone
+
+**Flaky test handling:**
+- Google tracks flakiness rate per test (% of runs where test outcome differs without code change)
+- Tests above a flakiness threshold are automatically quarantined (removed from blocking CI)
+- Teams must fix or delete quarantined tests within a fixed window
+- Flakiness is treated as a P1 bug — it erodes trust in the entire test suite
+
+**Mutation testing over coverage:**
+- Coverage measures which lines are executed — not whether assertions are meaningful
+- Mutation testing modifies the source code (flip `>` to `>=`, change a return value) and checks whether tests catch it
+- A test suite with 80% coverage but poor assertions will have high mutation survival rate
+- Tools: Stryker (C#/JS), PITest (Java), mutmut (Python)
+
+```csharp
+// Stryker mutation testing — C#
+// Original code
+public bool IsAdult(int age) => age >= 18;
+
+// Mutant 1: >= changed to > (boundary mutation)
+public bool IsAdult(int age) => age > 18;   // ← your test MUST catch this
+
+// Mutant 2: return value negated
+public bool IsAdult(int age) => !(age >= 18);  // ← your test MUST catch this
+
+// Test that kills both mutants:
+[Fact]
+public void IsAdult_At18_ReturnsTrue()       // kills mutant 1 (boundary)
+    => Assert.True(sut.IsAdult(18));
+
+[Fact]
+public void IsAdult_At17_ReturnsFalse()      // combined with above, kills mutant 2
+    => Assert.False(sut.IsAdult(17));
+```
+
+> **Why this matters:** Coverage is a vanity metric if tests don't assert meaningful behavior. Google's emphasis on hermetic, small tests and mutation testing explains why they can confidently run thousands of tests per second in CI without flakiness halting their monorepo builds.
+
+**💡 Production Example:**
+A team with 85% test coverage shipped a regression where a pricing calculation silently returned 0 for edge-case inputs. Running Stryker revealed 40% mutation survival — tests were executing the code but not asserting the computed value. Adding value-based assertions and boundary tests brought mutation survival below 10% and caught the regression in subsequent PRs.
+
+---
+
+### Q: How does Netflix ensure confidence in deploys without QA gates? (Netflix)
+
+**Netflix's testing philosophy: "No QA department, no manual testing"**
+- Every team owns the quality of their own service
+- Quality is enforced through automation, not human gatekeeping
+
+**The "Confidence Pipeline":**
+
+```
+Unit tests → Contract tests → Integration tests → Chaos tests → Canary analysis
+```
+
+| Stage | What it checks | Gate type |
+|---|---|---|
+| **Unit** | Business logic in isolation | Blocking (fail = no merge) |
+| **Contract** | API shape matches consumer expectations | Blocking |
+| **Integration** | Service behavior with real dependencies | Blocking |
+| **Chaos** | Resilience under failure conditions | Blocking for critical paths |
+| **Canary** | Real production traffic behavior | Automated rollback trigger |
+
+**Automated canary with production traffic sampling:**
+- 1–5% of real traffic routed to new version
+- Kayenta compares key metrics: p99 latency, error rate, business KPIs (stream starts, play failures)
+- Statistical comparison: Mann-Whitney U test for latency distributions
+- Score < threshold → automatic rollback, no human needed
+
+**"Confidence" not "coverage":**
+- Netflix explicitly does not enforce code coverage thresholds
+- Instead, measures: canary pass rate, mean time between rollbacks, error budget consumption
+
+> **Why this matters:** Manual QA gates become bottlenecks at Netflix's velocity (hundreds of deploys/day). The insight is that production is the most accurate test environment — canary analysis with real traffic is more reliable than any synthetic test suite.
+
+**💡 Production Example:**
+A Netflix team deploying a new video encoding pipeline skipped manual QA and went straight through the confidence pipeline. The canary stage detected a 2% increase in buffering ratio on a specific device type — not caught in integration tests because the test environment didn't have representative device distribution. The canary rolled back automatically, and the issue was fixed before any user-facing impact.
+
+---
+
+### Q: How does Amazon use A/B testing as a quality gate? (Amazon)
+
+**A/B testing as a deployment quality gate:**
+- New feature is deployed behind a flag, exposed to X% of users (treatment group)
+- Remaining users see old behavior (control group)
+- Statistical significance threshold must be met before full rollout
+- This is not just a UX experiment — it's a correctness and performance verification gate
+
+**Guardrail metrics vs primary metrics:**
+
+| Metric type | Definition | Example | Rule |
+|---|---|---|---|
+| **Primary** | The metric the feature is intended to improve | Checkout conversion rate | Must improve by X% |
+| **Guardrail** | Must not regress regardless of primary metric gains | Page load time, error rate, revenue per session | Hard stop if regressed |
+
+**Statistical significance:**
+- Minimum detectable effect (MDE): the smallest improvement worth detecting
+- Required sample size = function of MDE, variance, α (false positive rate, typically 0.05), power (1-β, typically 0.8)
+- Amazon uses sequential testing (SPRT — Sequential Probability Ratio Test) for faster results — allows peeking at results without inflating false positive rate
+
+**Integration with deployment pipeline:**
+```
+Deploy to 1% → Run A/B test → 
+  guardrail metrics OK? → 
+    primary metric positive? → Ramp to 10% → 50% → 100%
+    primary metric neutral → Hold; analyze
+    primary metric negative → Rollback
+  guardrail metrics regressed → Immediate rollback regardless of primary
+```
+
+> **Why this matters:** A feature can improve the primary metric while silently harming an unrelated guardrail. A/B testing with guardrail metrics is the only way to detect this. A checkout flow improvement that increased conversions 5% but doubled page load time would be caught by guardrail metrics and blocked.
+
+**💡 Production Example:**
+An Amazon team tested a new product recommendation algorithm. Primary metric (click-through rate) improved 8% — but the guardrail metric for page render time regressed 12% due to the algorithm's higher inference latency. The guardrail automatically blocked the rollout. After optimizing the inference path (model quantization + caching), both metrics were positive and the rollout proceeded.
+
+---
+
+### Q: Property-based testing — how does it differ from example-based? (used at Amazon/Google)
+
+**Example-based testing:**
+- You write specific inputs and expected outputs
+- Limited to cases the developer thought of
+- Misses boundary conditions and unexpected input combinations
+
+**Property-based testing:**
+- You define properties (invariants) that must hold for ALL inputs
+- The framework generates hundreds of random inputs from a specified domain
+- On failure, the framework "shrinks" the input to the minimal failing case
+
+**Good candidates for property-based tests:**
+- Parsers and serializers (roundtrip: `deserialize(serialize(x)) == x`)
+- Domain invariants (`total = sum(lineItems)` always holds)
+- Sorting and ordering (output is sorted, same elements as input)
+- Mathematical properties (commutativity, associativity)
+- Encoding/decoding (base64, JSON, protobuf)
+
+**C# with FsCheck:**
+```csharp
+using FsCheck;
+using FsCheck.Xunit;
+
+public class MoneyCalculatorProperties
+{
+    // Property: adding two non-negative amounts never produces a negative total
+    [Property]
+    public Property AddingNonNegativeAmounts_NeverProducesNegativeTotal(
+        decimal a, decimal b)
+    {
+        return (a >= 0 && b >= 0)
+            .Implies(() => MoneyCalculator.Add(a, b) >= 0);
+    }
+
+    // Property: serialization roundtrip
+    [Property]
+    public Property OrderSerializationRoundtrip(Order order)
+    {
+        var json = JsonSerializer.Serialize(order);
+        var deserialized = JsonSerializer.Deserialize<Order>(json);
+        return (deserialized == order).ToProperty();
+    }
+
+    // Property: discount can never make total negative
+    [Property]
+    public Property DiscountNeverMakesTotalNegative(
+        PositiveInt basePrice, PositiveInt discountPercent)
+    {
+        var pct = discountPercent.Get % 101; // 0–100%
+        var result = PricingService.ApplyDiscount(basePrice.Get, pct);
+        return (result >= 0).ToProperty();
+    }
+}
+```
+
+**Shrinking example:**
+```
+FsCheck finds failing input: a=-1.23456789, b=0.00000001
+Shrinks to minimal case:    a=-1, b=0
+→ Reveals the bug: negative inputs were not guarded against
+```
+
+> **Why this matters:** Property-based tests find edge cases developers didn't think to test. A serialization bug that only appears with Unicode surrogate pairs or null characters in string values will be found by a property-based test running 1,000 random strings, but never by example-based tests with `"hello"` and `"world"`.
+
+**💡 Production Example:**
+A team at Amazon used FsCheck to test an order total calculation. After running 10,000 random inputs, FsCheck found a case where applying two sequential discounts (each individually valid) produced a total of -$0.01 due to floating-point rounding. The fix was to clamp the result to zero — a boundary condition that would never have been written as a manual example test.
+
+---
+
+### Q: How do you test microservices in isolation at FAANG? (Consumer-Driven Contract Testing)
+
+**The microservice testing problem:**
+- Integration tests against a real upstream service are slow, brittle, and require both services to be running
+- Mocking the upstream service risks mocks drifting from reality
+- Consumer-driven contract testing solves this: the consumer defines what it needs; the provider verifies it can deliver
+
+**Pact framework:**
+1. **Consumer test:** consumer writes a test that records expected interactions (request shape + expected response shape) → produces a "pact" (contract) JSON file
+2. **Publish:** pact file published to Pact Broker (or PactFlow)
+3. **Provider verification:** provider CI pulls the pact and verifies its actual API satisfies the consumer's expectations — no consumer code needed
+4. **Can-I-Deploy:** before deploying either side, query the Pact Broker: "are all contracts satisfied for this version?" → block deploy if not
+
+**Bi-directional contract testing (PactFlow):**
+- Consumer uploads OpenAPI spec + tests
+- Provider uploads its OpenAPI spec
+- PactFlow cross-checks compatibility — no code execution needed
+- Faster but less specific than Pact's recorded interactions
+
+```csharp
+// Consumer side — C# Pact test
+[Fact]
+public async Task GetOrder_WhenOrderExists_ReturnsOrder()
+{
+    // Arrange — define the contract (what we expect from the provider)
+    pact.UponReceiving("a request for order 42")
+        .WithRequest(HttpMethod.Get, "/orders/42")
+        .WillRespondWith(status: 200, body: new
+        {
+            id = 42,
+            status = "Pending",
+            total = 99.99m
+        });
+
+    await pact.VerifyAsync(async ctx =>
+    {
+        // Act — call the mock provider (Pact spins up a local server)
+        var client = new OrderClient(ctx.MockServerUri);
+        var order = await client.GetOrderAsync(42);
+
+        // Assert — consumer-side behavior
+        Assert.Equal("Pending", order.Status);
+    });
+    // Pact writes contract JSON → publish to Pact Broker
+}
+```
+
+```mermaid
+flowchart LR
+    subgraph Consumer["Consumer Service (Order UI)"]
+        CT[Consumer Pact Test] -->|records interaction| PACT[pact.json\ncontract file]
+    end
+
+    PACT -->|publish| BROKER[(Pact Broker\n/ PactFlow)]
+
+    subgraph Provider["Provider Service (Order API)"]
+        BROKER -->|pull pact| PV[Provider Verification\nruns against real API]
+        PV -->|pass/fail| BROKER
+    end
+
+    BROKER --> CID{Can-I-Deploy?\nall contracts satisfied?}
+    CID -->|Yes| DEPLOY[✅ Deploy allowed]
+    CID -->|No| BLOCK[🚨 Deploy blocked\ncontract broken]
+
+    style DEPLOY fill:#4CAF50,color:#fff
+    style BLOCK fill:#f44336,color:#fff
+    style BROKER fill:#2196F3,color:#fff
+```
+
+> **Why this matters:** Without contract testing, a provider team changing a field name or response shape silently breaks consumers — discovered only when both are deployed to a shared environment. Contract testing catches this before any deployment, enabling independent team deployments without coordinated testing cycles.
+
+**💡 Production Example:**
+A team at a FAANG company had 12 consumer services depending on a shared Orders API. When the Orders team renamed `order_total` to `total_amount`, contract tests in the Pact Broker immediately flagged 3 consumer services with broken contracts before any deployment. All 3 were updated in the same sprint, and the rename shipped with zero consumer breakage.
+
+---
+
+### Q: How does Google's monorepo affect testing strategy? (Google)
+
+**Google's monorepo at scale:**
+- 2 billion lines of code, 86 TB of source, ~40,000 commits/day
+- A single `google3` repository; every Google project lives in it
+- CI must determine which tests to run for any given change — running all tests is impossible
+
+**Affected test detection:**
+- Every build target declares its dependencies in `BUILD` files (Bazel)
+- On a commit, Bazel computes the reverse dependency graph: "which targets depend on the changed files?"
+- Only those targets (and their tests) are rebuilt and retested
+- A change to a shared library triggers tests in every service that depends on it — cross-team impact is visible immediately
+
+**Hermetic builds with Bazel:**
+- Each build rule declares exact inputs and outputs — no implicit dependencies
+- Same inputs always produce same outputs (deterministic)
+- Cached outputs are reused if inputs haven't changed (build caching)
+- Remote execution: build steps farmed out to a cluster of machines
+
+**Test caching:**
+- If a test's inputs (source files + transitive dependencies) haven't changed, the cached result is returned without re-running
+- A test that passed yesterday with the same inputs will "pass" again from cache in milliseconds
+- This is only safe because builds are hermetic (no hidden env vars, timestamps, or network calls)
+
+**Comparison to repo-per-service:**
+
+| Concern | Monorepo (Google/Meta/Twitter) | Repo-per-service |
+|---|---|---|
+| Dependency visibility | Full graph — see all consumers of a change | Hidden — consumers in other repos discover breakage at integration time |
+| Cross-team refactoring | One PR updates all call sites atomically | Coordinated multi-repo PRs — error-prone |
+| Test scope | Affected test detection = minimal but complete | Run all tests in one repo — fast; miss cross-service breakage |
+| CI scale | Needs Bazel/Buck/Nix for build graph | Simpler; standard GitHub Actions sufficient |
+| Onboarding | Easier (all code in one place) | Harder (need to clone N repos) |
+
+> **Why this matters:** In a distributed repo model, a shared library change silently breaks downstream consumers until they pull the update. In a monorepo with a build graph, that breakage is surfaced immediately and atomically — the commit either fixes all consumers or is blocked.
+
+**💡 Production Example:**
+Google engineers can safely refactor a base authentication library used by 10,000 services. The BUILD graph identifies all affected test targets; Bazel runs only the necessary subset. The refactor either passes all 40,000 affected tests or is blocked — no "we'll fix the consumers later" escape hatch. This discipline is only feasible because affected test detection keeps the CI time manageable despite the enormous dependency fan-out.
+

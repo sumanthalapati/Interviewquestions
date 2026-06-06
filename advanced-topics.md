@@ -1663,3 +1663,671 @@ flowchart LR
     style CONS fill:#2196F3,color:#fff
 ```
 
+---
+
+# 🏢 FAANG Distributed Systems & Architecture Questions
+
+> Questions asked at Google, Amazon, Meta, and Netflix for senior/staff-level distributed systems and backend engineers.
+
+---
+
+## FAANG-1. How does Google Spanner achieve global consistency? (Google)
+
+> **Why this matters:** Spanner violates the conventional "you can't have both consistency and partition tolerance" narrative. Google interviewers want you to explain TrueTime, external consistency, and why it matters for global transactions.
+
+```
+TrueTime API:
+  Returns [earliest, latest] — a time interval, not a point
+  Backed by atomic clocks + GPS receivers in every datacenter
+  Uncertainty epsilon: typically 1–7 ms
+
+  TT.now() = [TT.earliest, TT.latest]
+  TT.after(t)  = true if t has definitely passed
+  TT.before(t) = true if t has definitely not occurred
+
+External Consistency (stronger than linearizability):
+  If transaction T1 commits before T2 starts (wall-clock time)
+  → T2's timestamp is guaranteed to be AFTER T1's timestamp
+  → T2 will always see T1's writes
+  → Global ordering without global coordination
+
+Commit Wait:
+  After choosing commit timestamp s:
+  Server waits until TT.after(s) is true (epsilon passes)
+  This ensures no future transaction can get a timestamp ≤ s
+  Cost: ~7ms wait per write transaction — the price of global consistency
+```
+
+```
+2-Phase Locking + TrueTime Commit:
+  ┌──────────────────────────────────────────────────────┐
+  │  1. Acquire locks on all rows being written          │
+  │  2. Choose commit timestamp s = TT.now().latest      │
+  │  3. Run Paxos across replicas — log commit with s    │
+  │  4. Commit Wait: sleep until TT.after(s) == true    │  ← key step
+  │  5. Release locks, apply writes                      │
+  │  6. Return to client                                 │
+  └──────────────────────────────────────────────────────┘
+
+Why Paxos?
+  Each "tablet" (data shard) has a Paxos group of 5 replicas
+  Leader coordinates writes → replicates to majority (3/5)
+  Leader failure → Paxos election → new leader continues
+  Reads can be served from any replica (with timestamp validation)
+```
+
+```mermaid
+flowchart TD
+    CLIENT[Client\nGlobal Transaction] --> LEADER[Spanner Leader\nfor shard]
+
+    LEADER --> LOCKS[Acquire row locks\n2-Phase Locking]
+    LOCKS --> TRUETIME[TrueTime.now\nget interval earliest,latest]
+    TRUETIME --> TIMESTAMP[Choose commit timestamp\ns = TT.now.latest]
+    TIMESTAMP --> PAXOS[Paxos replication\nlog to majority of replicas]
+    PAXOS --> WAIT[Commit Wait\nsleep until TT.after s == true\n~7ms]
+    WAIT --> APPLY[Apply writes\nRelease locks]
+    APPLY --> RESP[Return to client\nglobally ordered commit]
+
+    TRUETIME -.->|atomic clock + GPS| ATOMIC[(Atomic Clock\n+ GPS Receiver\nevery datacenter)]
+
+    style WAIT fill:#f44336,color:#fff
+    style TRUETIME fill:#FF9800,color:#fff
+    style PAXOS fill:#4CAF50,color:#fff
+    style ATOMIC fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- TrueTime gives a bounded uncertainty interval — Spanner waits until the uncertainty window closes before committing
+- External consistency = if T1 commits before T2 begins (real time), T2 will observe T1's writes — this is stronger than serializable
+- Commit wait (~7ms) is the performance cost of global consistency — Spanner trades latency for correctness
+- Paxos per shard provides fault tolerance — a shard can lose 2/5 replicas and continue
+- Compare to DynamoDB: eventual consistency (AP) vs Spanner (CP with global ordering)
+
+---
+
+## FAANG-2. How does Amazon DynamoDB handle hot partitions? (Amazon)
+
+> **Why this matters:** Hot partitions are the most common DynamoDB production failure. Amazon interviewers expect you to know partition key design, adaptive capacity, write sharding, and DAX — not just "use a better key."
+
+```
+DynamoDB Partitioning:
+  Data split across partitions by hash(partition_key)
+  Each partition: max 3,000 RCU + 1,000 WCU + 10 GB
+
+  Hot partition: one partition key receives disproportionate traffic
+  Example: product_id = "iphone-15" on launch day
+           → millions of reads/writes hit ONE partition
+           → ProvisionedThroughputExceededException
+
+Write Sharding (hot key mitigation):
+  Append random suffix: "iphone-15#3" (shard 0..9)
+  Spread writes across 10 partitions
+  Read: query all 10 shards in parallel, merge results
+  Cost: 10x read amplification — acceptable for write-heavy hot keys
+
+Adaptive Capacity (automatic mitigation):
+  DynamoDB detects imbalanced partitions
+  Automatically boosts throughput of hot partition
+  Up to 2x burst capacity sustained for minutes
+  Eventual rebalancing: moves data to reduce hot spots
+```
+
+```
+DAX (DynamoDB Accelerator):
+  In-memory write-through cache in front of DynamoDB
+  Item cache: single item by PK/SK → microsecond reads
+  Query cache: result set of query/scan → reused across requests
+  Write-through: writes go to DAX + DynamoDB atomically
+
+  When to use DAX:
+  ✅ Read-heavy, same items repeatedly (product catalog, config)
+  ❌ Write-heavy, strongly consistent reads (financial records)
+  ❌ Large items (DAX has 400KB item limit, same as DynamoDB)
+```
+
+```csharp
+// ── Write sharding for hot keys ───────────────────────────────────────────
+public async Task WriteProductViewAsync(string productId)
+{
+    // Shard 0..9 — distribute writes across partitions
+    var shardSuffix = Random.Shared.Next(0, 10);
+    var shardedKey  = $"{productId}#{shardSuffix}";
+
+    await _dynamoDb.PutItemAsync(new PutItemRequest
+    {
+        TableName = "ProductViews",
+        Item = new Dictionary<string, AttributeValue>
+        {
+            ["PK"]        = new AttributeValue { S = shardedKey },
+            ["ViewCount"] = new AttributeValue { N = "1" },
+            ["Timestamp"] = new AttributeValue { S = DateTimeOffset.UtcNow.ToString("O") }
+        }
+    });
+}
+
+public async Task<long> GetTotalViewsAsync(string productId)
+{
+    // Read all 10 shards in parallel — merge results
+    var tasks = Enumerable.Range(0, 10).Select(i =>
+        _dynamoDb.GetItemAsync(new GetItemRequest
+        {
+            TableName = "ProductViews",
+            Key = new Dictionary<string, AttributeValue>
+            {
+                ["PK"] = new AttributeValue { S = $"{productId}#{i}" }
+            }
+        }));
+
+    var results = await Task.WhenAll(tasks);
+    return results.Sum(r =>
+        r.Item.TryGetValue("ViewCount", out var v) ? long.Parse(v.N) : 0);
+}
+
+// ── Partition key design rules ────────────────────────────────────────────
+// ❌ Low cardinality — all orders hit same partition
+// PK = "ORDER", SK = orderId  → single partition for all orders
+
+// ✅ High cardinality — orders distributed across partitions
+// PK = customerId, SK = orderId  → 1 partition per customer, evenly distributed
+
+// ✅ Composite for time-series (avoid partition per day pattern)
+// PK = "metrics#" + instanceId, SK = timestamp  → per-instance partitions
+```
+
+```mermaid
+flowchart TD
+    REQ[High Traffic\ne.g. product launch] --> ROUTE{Hash\npartition key}
+    ROUTE -->|low cardinality| HOT[Hot Partition\nthrottled ⚠️]
+    ROUTE -->|high cardinality\nor write sharding| DIST[Distributed\nacross partitions]
+
+    HOT --> AC[Adaptive Capacity\nauto-boost throughput\ntemporary relief]
+    HOT --> DAX_C[DAX Cache\nread offload]
+    HOT --> SHARD[Write Sharding\nadd random suffix\n0..N partitions]
+
+    DIST --> OK[Healthy Throughput\nno throttling]
+
+    DAX_C --> MICRO[Microsecond reads\nfor repeated items]
+    SHARD -->|parallel read| MERGE[Merge N shards\nread amplification]
+
+    style HOT fill:#f44336,color:#fff
+    style AC fill:#FF9800,color:#fff
+    style SHARD fill:#4CAF50,color:#fff
+    style DAX_C fill:#2196F3,color:#fff
+```
+
+**Key talking points:**
+- Partition key design is the most impactful DynamoDB decision — you can't change it without rebuilding the table
+- Adaptive capacity is automatic but temporary — it masks bad key design; fix the root cause
+- Write sharding trades read amplification for write distribution — acceptable when writes are the bottleneck
+- DAX is write-through but doesn't help write-hot keys; it helps read-hot keys
+- On-demand capacity removes WCU/RCU management but costs ~2x provisioned at steady load — use for unpredictable spikes
+
+---
+
+## FAANG-3. Explain the Raft consensus algorithm used in distributed systems (Google/Amazon/Meta)
+
+> **Why this matters:** Raft powers etcd (Kubernetes), CockroachDB, TiKV, and Consul. Interviewers at Google/Amazon ask this to test understanding of leader election, log replication, and how distributed consensus works in practice.
+
+```
+Raft Node States:
+  FOLLOWER  → default state, receives entries from leader
+  CANDIDATE → starts election when leader heartbeat times out
+  LEADER    → handles all writes, replicates to followers
+
+Leader Election:
+  1. Follower election timeout fires (150–300ms random)
+  2. Becomes CANDIDATE, increments term, votes for self
+  3. Sends RequestVote RPC to all nodes
+  4. Nodes grant vote if: term >= their term AND
+                          log is at least as up-to-date as theirs
+  5. Majority votes → becomes LEADER
+  6. Sends empty AppendEntries (heartbeat) to all → suppress elections
+
+Log Replication:
+  1. Client sends write to LEADER
+  2. Leader appends entry to its log (uncommitted)
+  3. Leader sends AppendEntries RPC to all followers
+  4. Followers append to their logs, respond with success
+  5. Leader receives majority acknowledgment → commits entry
+  6. Leader applies to state machine, responds to client
+  7. Next AppendEntries informs followers of commit → they apply too
+
+Safety Guarantee:
+  Committed entries NEVER lost
+  Leader always has all committed entries (vote grant rule)
+  At most one leader per term
+```
+
+```mermaid
+flowchart TD
+    subgraph ELECT["Leader Election"]
+        F1[Follower\nelection timeout] -->|increment term\nvote for self| CAND[Candidate]
+        CAND -->|RequestVote RPC| F2[Follower 2]
+        CAND -->|RequestVote RPC| F3[Follower 3]
+        F2 -->|grant vote| CAND
+        F3 -->|grant vote| CAND
+        CAND -->|majority votes| LEAD[Leader]
+        LEAD -->|heartbeat AppendEntries| F2
+        LEAD -->|heartbeat AppendEntries| F3
+    end
+
+    subgraph REPL["Log Replication"]
+        CLIENT([Client\nwrite request]) --> L[Leader]
+        L -->|AppendEntries| R1[Replica 1]
+        L -->|AppendEntries| R2[Replica 2]
+        R1 -->|ack| L
+        R2 -->|ack| L
+        L -->|majority ack\ncommit| L
+        L -->|notify commit| R1
+        L -->|notify commit| R2
+        L -->|response| CLIENT
+    end
+
+    style LEAD fill:#4CAF50,color:#fff
+    style L fill:#4CAF50,color:#fff
+    style CAND fill:#FF9800,color:#fff
+    style CLIENT fill:#2196F3,color:#fff
+```
+
+**Key talking points:**
+- Random election timeout (150–300ms) prevents split votes — nodes start elections at different times
+- A node grants a vote only if the candidate's log is at least as up-to-date — ensures the new leader has all committed entries
+- Raft requires majority (N/2 + 1) acknowledgment before committing — a 5-node cluster tolerates 2 failures
+- Kubernetes etcd uses Raft — this is why you run 3 or 5 etcd nodes, never 2 or 4
+- Raft vs Paxos: Raft decomposes the problem (leader election separate from log replication), making it easier to implement and reason about
+
+---
+
+## FAANG-4. How does Netflix implement resilience with Hystrix/Resilience4j patterns? (Netflix)
+
+> **Why this matters:** Netflix open-sourced Hystrix because cascading failures had taken down their platform multiple times. Interviewers want the full picture: circuit breaker, bulkhead, fallback, and metrics.
+
+```
+Hystrix Command Wrapping:
+  Every call to a downstream service is wrapped in a HystrixCommand
+  The command runs in an isolated thread pool (bulkhead)
+  If the command times out or throws → fallback is called
+  Circuit breaker tracks success/failure rates across commands
+
+Thread Pool Isolation (Bulkhead):
+  Each downstream service gets its own thread pool
+  PaymentService pool:    10 threads
+  InventoryService pool:  10 threads
+  NotificationService:     5 threads
+
+  If PaymentService hangs:
+  → PaymentService pool fills up → new calls rejected (shed load)
+  → InventoryService pool UNAFFECTED → continues to serve
+  → Without bulkhead: one slow service consumes all threads → total outage
+
+Semaphore Isolation:
+  Lightweight alternative to thread pools for fast, low-latency calls
+  Limits concurrent calls without thread context switching
+  Use for in-process caches, lightweight transformations
+```
+
+```csharp
+// ── Polly (C# equivalent of Hystrix) ─────────────────────────────────────
+var paymentPipeline = new ResiliencePipelineBuilder<PaymentResult>()
+    // 1. Retry — transient faults (network blip, 503)
+    .AddRetry(new RetryStrategyOptions<PaymentResult>
+    {
+        MaxRetryAttempts = 3,
+        Delay            = TimeSpan.FromMilliseconds(200),
+        BackoffType      = DelayBackoffType.Exponential,
+        UseJitter        = true,                          // avoid thundering herd
+        ShouldHandle     = new PredicateBuilder<PaymentResult>()
+            .Handle<HttpRequestException>()
+            .HandleResult(r => r.StatusCode == 503)
+    })
+    // 2. Circuit breaker — stop calling a failing service
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions<PaymentResult>
+    {
+        FailureRatio      = 0.5,                          // 50% failure rate
+        MinimumThroughput = 10,
+        SamplingDuration  = TimeSpan.FromSeconds(10),
+        BreakDuration     = TimeSpan.FromSeconds(30),
+        OnOpened  = args => { _metrics.RecordCircuitOpen("payment"); return default; },
+        OnClosed  = args => { _metrics.RecordCircuitClose("payment"); return default; }
+    })
+    // 3. Timeout — fail fast rather than waiting indefinitely
+    .AddTimeout(TimeSpan.FromSeconds(3))
+    // 4. Bulkhead — limit concurrent calls (semaphore isolation)
+    .AddConcurrencyLimiter(maxConcurrentExecutions: 20, queueCapacity: 10)
+    .Build();
+
+// Fallback is handled at the call site
+try
+{
+    var result = await paymentPipeline.ExecuteAsync(ct =>
+        _paymentClient.ChargeAsync(orderId, amount, ct), cancellationToken);
+}
+catch (BrokenCircuitException)
+{
+    // Circuit is OPEN — return graceful degraded response
+    return new PaymentResult { Status = "Pending", Message = "Payment queued for retry" };
+}
+catch (TimeoutRejectedException)
+{
+    return new PaymentResult { Status = "Failed", Message = "Payment service timeout" };
+}
+
+// ── Metrics instrumentation ────────────────────────────────────────────────
+// Track: success rate, failure rate, timeout rate, rejection rate, circuit state
+// Dashboard: Grafana + Prometheus — alert when circuit opens
+```
+
+```mermaid
+flowchart TD
+    REQ[Request] --> BULK{Bulkhead\nconcurrency limit\nmax 20}
+    BULK -->|limit exceeded| REJ[Reject\nqueue full]
+    BULK -->|slot available| CB{Circuit\nBreaker}
+    CB -->|OPEN| FALLBACK[Fallback Response\ndegrade gracefully]
+    CB -->|CLOSED or HALF-OPEN| TO{Timeout\n3 seconds}
+    TO -->|exceeded| TOUT[TimeoutException\n→ failure counted]
+    TO -->|within limit| RETRY[Retry Policy\n3x exp backoff + jitter]
+    RETRY -->|all attempts failed| FALLBACK
+    RETRY -->|success| RESP[Response\n✓]
+
+    TOUT -->|failure count| CB
+    FALLBACK -->|recorded| METRICS[(Metrics\nPrometheus / Grafana)]
+    RESP -->|success count| CB
+
+    style CB fill:#FF9800,color:#fff
+    style FALLBACK fill:#4CAF50,color:#fff
+    style REJ fill:#f44336,color:#fff
+    style TOUT fill:#f44336,color:#fff
+```
+
+**Key talking points:**
+- Bulkhead isolation prevents one slow downstream from exhausting all threads — it's the most important pattern at Netflix scale
+- Circuit breaker uses a sampling window (not raw counts) — prevents a single spike from tripping the circuit
+- Fallback must be meaningful — "degrade gracefully" means serve cached data, a default, or a queued response; not just an error
+- Layer order matters: Retry → CircuitBreaker → Timeout → Bulkhead (outer to inner in Polly pipeline)
+- Hystrix is in maintenance mode; Resilience4j (Java) and Polly (C#) are the modern equivalents
+
+---
+
+## FAANG-5. How does Meta's TAO (The Associations and Objects) work? (Meta)
+
+> **Why this matters:** TAO serves billions of reads/second for Facebook's social graph. Meta interviewers ask this to test knowledge of purpose-built systems, tiered caching, and the tradeoffs of eventually-consistent social data.
+
+```
+TAO Architecture:
+  Purpose: serve Facebook's social graph at scale
+  Object store:      nodes (users, posts, pages, photos)
+  Association store: edges (friend, like, comment, tag)
+
+  Three-tier architecture:
+  ┌─────────────────────────────────────────────────────────┐
+  │  TAO Leaders (cache + write path)                       │
+  │  One leader per data center region                      │
+  └─────────────────────────────────────────────────────────┘
+              │ on miss / write
+  ┌─────────────────────────────────────────────────────────┐
+  │  TAO Followers (read-through cache)                     │
+  │  Many per datacenter — absorb read traffic              │
+  └─────────────────────────────────────────────────────────┘
+              │ on miss
+  ┌─────────────────────────────────────────────────────────┐
+  │  MySQL (persistent storage)                             │
+  │  Source of truth — sharded by object/association ID    │
+  └─────────────────────────────────────────────────────────┘
+
+Why not use a general-purpose database or cache?
+  - Redis: no native graph traversal API, no association semantics
+  - Neo4j: not designed for Facebook-scale write throughput
+  - MySQL alone: cannot serve billions of graph reads/second
+  - TAO: read-through cache with graph-native API + MySQL durability
+    perfect fit for social graph access patterns (80% reads)
+```
+
+```
+TAO Consistency Model:
+  Writes go to Leader → replicated to MySQL → followers cache-invalidated
+  Followers serve reads from cache; miss → read from Leader
+  Eventual consistency between regions (~100ms lag)
+  Read-your-own-writes within a datacenter (sticky routing)
+  Why acceptable: seeing a friend's post 100ms later is fine
+  Why NOT acceptable: bank balance, inventory (use strong consistency)
+```
+
+```mermaid
+flowchart TD
+    APP[Facebook App Server] -->|read| FOLLOWER[TAO Follower\nread-through cache\n1 per rack]
+
+    FOLLOWER -->|cache hit| APP
+    FOLLOWER -->|cache miss| LEADER[TAO Leader\nwrite path\n1 per datacenter]
+
+    LEADER -->|cache hit| FOLLOWER
+    LEADER -->|cache miss| MYSQL[(MySQL\nSharded persistent\nstorage)]
+    MYSQL --> LEADER
+
+    WRITE[Write Request\nassociation add/delete] --> LEADER2[TAO Leader]
+    LEADER2 -->|write| MYSQL2[(MySQL)]
+    MYSQL2 -->|replication| MYSQL_REP[(MySQL Replica\nother region)]
+    MYSQL_REP -->|invalidate| LEADER3[TAO Leader\nother region]
+
+    style FOLLOWER fill:#4CAF50,color:#fff
+    style LEADER fill:#FF9800,color:#fff
+    style MYSQL fill:#9C27B0,color:#fff
+    style LEADER3 fill:#2196F3,color:#fff
+```
+
+**Key talking points:**
+- TAO is a read-through cache over MySQL — it does NOT replace MySQL, it sits in front of it
+- Leader/follower hierarchy mirrors data-center topology — followers absorb local reads; leaders handle cross-datacenter consistency
+- Graph-native API (get associations, count associations, get object) maps directly to social graph access patterns
+- Eventual consistency is acceptable for social data — "your friend's new post is visible 100ms later" is not a problem
+- The lesson: build purpose-specific systems when access patterns are known and general-purpose tools don't scale
+
+---
+
+## FAANG-6. How does Amazon SQS guarantee message delivery? (Amazon)
+
+> **Why this matters:** Amazon interviewers test SQS deeply because it underpins a huge portion of AWS workloads. They want you to know visibility timeout, deduplication, dead letter queues, and exactly-once semantics (or lack thereof).
+
+```
+SQS At-Least-Once Delivery:
+  Producer sends message → stored in SQS (replicated across 3 AZs)
+  Consumer calls ReceiveMessage → message becomes INVISIBLE
+  Visibility Timeout: 30s default — message hidden from other consumers
+  Consumer processes + calls DeleteMessage → message permanently removed
+  Consumer crashes / timeout expires → message becomes VISIBLE again
+  Another consumer re-receives it → at-least-once delivery
+
+  Why not exactly-once?
+  "Delete succeeded" from consumer can be lost if consumer crashes after
+  processing but before DeleteMessage call → redelivered → processed twice
+  Solution: idempotent consumers (see FAANG-6 in dotnet-code-flow.md)
+
+FIFO Queue — exactly-once processing:
+  Message deduplication ID: SQS deduplicates same ID within 5-minute window
+  Message group ID: ordering within a group (like partition key in Kafka)
+  Throughput: 300 msg/s (3,000 with batching) — lower than standard queue
+  Use when: financial transactions, state machines, ordered processing
+
+Dead Letter Queue (DLQ):
+  After maxReceiveCount (e.g. 5) failed deliveries → moved to DLQ
+  DLQ preserves the message for analysis / manual replay
+  Always set up a DLQ consumer with alerting
+```
+
+```csharp
+// ── Standard queue consumer with visibility timeout management ────────────
+public class SqsMessageProcessor : BackgroundService
+{
+    private readonly IAmazonSQS _sqs;
+    private readonly string _queueUrl;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            // Long polling — waits up to 20s for messages (reduces empty responses + cost)
+            var response = await _sqs.ReceiveMessageAsync(new ReceiveMessageRequest
+            {
+                QueueUrl            = _queueUrl,
+                MaxNumberOfMessages = 10,              // batch up to 10
+                WaitTimeSeconds     = 20,              // long polling
+                VisibilityTimeout   = 60,              // 60s to process + delete
+                AttributeNames      = new List<string> { "ApproximateReceiveCount" }
+            }, stoppingToken);
+
+            var tasks = response.Messages.Select(msg => ProcessMessageAsync(msg, stoppingToken));
+            await Task.WhenAll(tasks);
+        }
+    }
+
+    private async Task ProcessMessageAsync(Message msg, CancellationToken ct)
+    {
+        var receiveCount = int.Parse(msg.Attributes["ApproximateReceiveCount"]);
+
+        try
+        {
+            // Extend visibility timeout for long-running processing
+            if (WillTakeMoreThan30Seconds())
+            {
+                await _sqs.ChangeMessageVisibilityAsync(new ChangeMessageVisibilityRequest
+                {
+                    QueueUrl          = _queueUrl,
+                    ReceiptHandle     = msg.ReceiptHandle,
+                    VisibilityTimeout = 120   // extend by 2 minutes
+                }, ct);
+            }
+
+            await ProcessAsync(msg.Body, ct);
+
+            // Delete ONLY after successful processing
+            await _sqs.DeleteMessageAsync(_queueUrl, msg.ReceiptHandle, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process message. ReceiveCount: {Count}", receiveCount);
+            // DO NOT delete — message becomes visible again after VisibilityTimeout
+            // After maxReceiveCount failures → automatically moved to DLQ
+        }
+    }
+}
+
+// ── FIFO queue with deduplication ─────────────────────────────────────────
+await _sqs.SendMessageAsync(new SendMessageRequest
+{
+    QueueUrl               = _fifoQueueUrl,
+    MessageBody            = JsonSerializer.Serialize(orderEvent),
+    MessageGroupId         = orderEvent.CustomerId.ToString(),    // ordering per customer
+    MessageDeduplicationId = orderEvent.EventId.ToString()        // idempotent within 5 min
+});
+```
+
+```mermaid
+flowchart TD
+    PROD[Producer] -->|SendMessage| SQS[(SQS Queue\n3 AZ replicated)]
+
+    SQS -->|ReceiveMessage| CONS[Consumer\nvisibility timeout starts]
+    CONS -->|processing OK| DEL[DeleteMessage\nmessage permanently removed]
+    CONS -->|crash / timeout| VIS[Visibility timeout expires\nmessage becomes visible again]
+
+    VIS -->|re-delivered| CONS2[Another Consumer\nor same consumer retry]
+    CONS2 -->|max receive count exceeded| DLQ[(Dead Letter Queue\nfor analysis + alerting)]
+
+    DLQ -->|alert| OPS[On-call Engineer\nor DLQ processor]
+    OPS -->|fix + replay| SQS
+
+    FIFO[FIFO Queue] -->|deduplication ID| DEDUP{Seen in\nlast 5 minutes?}
+    DEDUP -->|yes| DROP[Drop duplicate]
+    DEDUP -->|no| FIFO
+
+    style DLQ fill:#f44336,color:#fff
+    style VIS fill:#FF9800,color:#fff
+    style DEL fill:#4CAF50,color:#fff
+    style DEDUP fill:#2196F3,color:#fff
+```
+
+**Key talking points:**
+- Visibility timeout is the heart of at-least-once delivery — size it to slightly exceed your processing SLA
+- Delete the message ONLY after successful processing — deleting before processing means a crash loses the message
+- Long polling (WaitTimeSeconds=20) reduces empty ReceiveMessage responses and cost — always use it
+- FIFO queues trade throughput (300/s vs unlimited) for ordering and exactly-once within 5-minute deduplication window
+- DLQ is not optional — without it, poison messages loop forever consuming processor capacity
+
+---
+
+## FAANG-7. What is the difference between strong consistency, eventual consistency, and causal consistency? (Google/Amazon)
+
+> **Why this matters:** Consistency models are at the heart of every distributed system design question. Interviewers at Google and Amazon want precision — not vague "trade consistency for availability" hand-waving.
+
+```
+Consistency Model Spectrum (strongest → weakest):
+
+  Linearizability (strong consistency):
+    Every read returns the most recent committed write
+    Operations appear instantaneous and globally ordered
+    Any read after a write sees that write — everywhere
+    Cost: requires coordination (quorum reads/writes) → higher latency
+    Examples: Spanner, ZooKeeper, etcd, DynamoDB strongly-consistent reads
+
+  Serializability:
+    Concurrent transactions appear to execute in some serial order
+    No guarantee about real-time ordering (unlike linearizability)
+    Standard in RDBMS (SERIALIZABLE isolation level)
+    Spanner = "external consistency" = linearizable + serializable
+
+  Causal Consistency:
+    If operation A causally precedes B, all nodes see A before B
+    "You see the reply after you see the question"
+    Monotonic reads: once you read a value, you never read older values
+    Read-your-own-writes: you always see your own writes
+    Examples: MongoDB (causal sessions), Cosmos DB (session consistency)
+
+  Eventual Consistency:
+    All replicas converge to the same value — given no new writes
+    No ordering guarantee; a read may return stale data
+    Highest availability, lowest latency
+    Examples: DynamoDB (default), Cassandra, S3
+
+  Real-world hybrid:
+    DynamoDB: default = eventual, opt-in = strongly consistent (2x cost)
+    Cassandra: tunable per query (ONE, QUORUM, ALL)
+    Cosmos DB: 5 levels — Strong, Bounded Staleness, Session, Consistent Prefix, Eventual
+```
+
+```
+Monotonic Reads guarantee:
+  Once client reads value X, subsequent reads return X or newer
+  Without it: client sees value flip back and forth (different replicas)
+
+Read-Your-Own-Writes guarantee:
+  After you write X, you always read X (or newer) — even if others see stale
+  Critical for UX: "I just posted a photo but it's not showing!"
+  Implementation: route reads for a user to the replica they wrote to
+```
+
+```mermaid
+flowchart LR
+    subgraph SPECTRUM["Consistency Model Spectrum"]
+        direction LR
+        STRONG["Linearizable\nStrong Consistency\n\nEvery read sees latest write\nCoordination required\nHigher latency\n\nSpanner, etcd, ZooKeeper"]
+        CAUSAL["Causal Consistency\n\nCausally related writes\nordered everywhere\nRead-your-own-writes\n\nMongoDB sessions\nCosmos DB session"]
+        EVENTUAL["Eventual Consistency\n\nAll replicas converge\nNo ordering guarantee\nMay read stale data\n\nDynamoDB default\nCassandra ONE\nS3"]
+
+        STRONG -->|"weaker guarantee\nlower latency\nhigher availability"| CAUSAL
+        CAUSAL -->|"weaker guarantee\nlower latency\nhigher availability"| EVENTUAL
+    end
+
+    AVAIL["Higher Availability\nLower Latency"] -.->|CAP tradeoff| EVENTUAL
+    CORRECT["Higher Correctness\nGlobal Ordering"] -.->|CAP tradeoff| STRONG
+
+    style STRONG fill:#f44336,color:#fff
+    style CAUSAL fill:#FF9800,color:#fff
+    style EVENTUAL fill:#4CAF50,color:#fff
+    style AVAIL fill:#2196F3,color:#fff
+    style CORRECT fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- Linearizability and serializability are often confused: linearizability = real-time ordering; serializability = transaction isolation
+- Causal consistency is the sweet spot for many social apps — causally related operations stay ordered, but globally unrelated operations can be concurrent
+- Eventual consistency requires idempotent writes and conflict resolution — last-write-wins (Cassandra) or application-level merge
+- DynamoDB strongly-consistent reads cost 2x RCU — use them only when staleness is unacceptable (financial totals, inventory levels)
+- Cosmos DB's 5 consistency levels show the full spectrum in a single product — useful reference for interviews

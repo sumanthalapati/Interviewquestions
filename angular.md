@@ -3276,3 +3276,305 @@ export class OrderFormComponent {
 // <input [(ngModel)]="order.customer" required minlength="3">
 ```
 
+
+---
+
+# 🏢 FAANG Angular & Frontend Architecture Questions
+
+> These questions probe system-level thinking, large-scale architecture decisions, and deep Angular internals — commonly asked at Google, Amazon, and top-tier product companies.
+
+---
+
+## FAANG-NG-1 — How would you architect a micro-frontend system for a large-scale Angular app? (Google/Amazon)
+
+**Answer:**
+Micro-frontends extend microservices thinking to the UI layer — each team owns an independently deployable slice of the UI. For large Angular codebases, the two most practical approaches are **Module Federation** and **Single-SPA**.
+
+**Module Federation (Webpack 5):**
+Each micro-frontend (MFE) exposes Angular modules as remote entries. The shell app dynamically loads them at runtime without a full redeployment of the host.
+
+```javascript
+// webpack.config.js — Remote (Team B's MFE)
+new ModuleFederationPlugin({
+  name: 'productsMfe',
+  filename: 'remoteEntry.js',
+  exposes: {
+    './ProductsModule': './src/app/products/products.module.ts',
+  },
+  shared: { '@angular/core': { singleton: true, strictVersion: true } }
+});
+
+// webpack.config.js — Shell (Host)
+new ModuleFederationPlugin({
+  remotes: {
+    productsMfe: 'productsMfe@https://products.example.com/remoteEntry.js',
+  },
+  shared: { '@angular/core': { singleton: true } }
+});
+```
+
+```typescript
+// Shell routing — lazy-load a remote MFE module
+const routes: Routes = [
+  {
+    path: 'products',
+    loadChildren: () =>
+      loadRemoteModule({ remoteEntry: 'https://products.example.com/remoteEntry.js',
+                         remoteName: 'productsMfe',
+                         exposedModule: './ProductsModule' })
+        .then(m => m.ProductsModule)
+  }
+];
+```
+
+**Shared state between MFEs:**
+- **Custom events** (`CustomEvent` / `window.dispatchEvent`) — decoupled, no shared library required
+- **Shared state library** — a singleton service published as an npm package (both shell and MFEs depend on it)
+- **URL state** — store global state in URL params/hash (survives page refresh, shareable)
+- **BroadcastChannel API** — cross-tab, cross-MFE messaging
+
+**Independent deployment checklist:**
+- Each MFE has its own CI/CD pipeline
+- Semantic versioning on shared contracts
+- Feature flags to gate incomplete features at the shell level
+- Health check endpoint per MFE
+
+```mermaid
+flowchart TD
+    SHELL["Shell App\n(Angular host, routing, auth)"]
+    SHELL -->|"Module Federation\nremoteEntry.js"| MFE_A["Products MFE\n(Team A — independent deploy)"]
+    SHELL -->|"Module Federation\nremoteEntry.js"| MFE_B["Checkout MFE\n(Team B — independent deploy)"]
+    SHELL -->|"Module Federation\nremoteEntry.js"| MFE_C["Profile MFE\n(Team C — independent deploy)"]
+    SHARED["Shared Library\n(Design System, Auth Service,\nState Contracts)"]
+    MFE_A --> SHARED
+    MFE_B --> SHARED
+    MFE_C --> SHARED
+    SHELL --> SHARED
+
+    style SHELL fill:#1565c0,color:#fff
+    style MFE_A fill:#2e7d32,color:#fff
+    style MFE_B fill:#6a1b9a,color:#fff
+    style MFE_C fill:#e65100,color:#fff
+    style SHARED fill:#4e342e,color:#fff
+```
+
+---
+
+## FAANG-NG-2 — How do you optimize Angular bundle size for a FAANG-scale application?
+
+**Answer:**
+Bundle size directly impacts Time-to-Interactive (TTI). At FAANG scale, even a 10KB reduction multiplied across millions of users per day has measurable impact on Core Web Vitals and revenue.
+
+**Audit first — webpack-bundle-analyzer:**
+```bash
+ng build --stats-json
+npx webpack-bundle-analyzer dist/my-app/stats.json
+```
+
+**Key optimizations:**
+
+| Technique | Impact | How |
+|-----------|--------|-----|
+| Lazy-load every feature module | High | `loadChildren` in routes |
+| Tree-shake unused library code | High | Mark libraries as `sideEffects: false` in `package.json` |
+| Differential loading | Medium | ES2015+ bundle for modern browsers, ES5 fallback |
+| `OnPush` + standalone components | Medium | Reduces zone.js overhead |
+| Preloading strategy | UX | `PreloadAllModules` vs custom `QuicklinkStrategy` |
+| SVG sprite vs inline SVG | Medium | Single HTTP request for icon set |
+| `@angular/build` (esbuild) | High | Angular 17+ — 2–4× faster builds, smaller output |
+
+```typescript
+// ── Route-level lazy loading (must for every feature) ──
+const routes: Routes = [
+  { path: '',         loadComponent: () => import('./home/home.component').then(m => m.HomeComponent) },
+  { path: 'products', loadChildren: () => import('./products/products.routes').then(m => m.PRODUCTS_ROUTES) },
+  { path: 'admin',    loadChildren: () => import('./admin/admin.routes').then(m => m.ADMIN_ROUTES),
+    canMatch: [adminGuard] } // admin bundle only loads if user is admin
+];
+
+// ── Custom preloading — preload only priority routes ──
+@Injectable({ providedIn: 'root' })
+export class SelectivePreloadingStrategy implements PreloadingStrategy {
+  preload(route: Route, load: () => Observable<unknown>): Observable<unknown> {
+    return route.data?.['preload'] === true ? load() : EMPTY;
+  }
+}
+// Usage in route: { path: 'products', data: { preload: true }, loadChildren: ... }
+```
+
+```mermaid
+flowchart LR
+    SOURCE["Source Code"] --> BUILD["Angular Build\n(esbuild / Webpack)"]
+    BUILD --> TREESHAKE["Tree Shaking\n(remove dead code)"]
+    TREESHAKE --> SPLIT["Code Splitting\n(route lazy chunks)"]
+    SPLIT --> COMPRESS["Compression\n(Brotli / gzip)"]
+    COMPRESS --> CDN["CDN Edge Cache"]
+    CDN -->|"HTML + critical chunk"| USER["User Browser"]
+    CDN -->|"Lazy chunks on demand"| USER
+
+    style BUILD fill:#1565c0,color:#fff
+    style TREESHAKE fill:#2e7d32,color:#fff
+    style SPLIT fill:#6a1b9a,color:#fff
+    style CDN fill:#e65100,color:#fff
+```
+
+---
+
+## FAANG-NG-3 — How does Angular's Signals reactivity model compare to Zone.js? (Google)
+
+**Answer:**
+Zone.js has been Angular's change detection mechanism since v2 — but it comes with significant performance and developer experience costs. Angular Signals (v16+ developer preview, v17+ stable) introduce fine-grained reactivity as a replacement path.
+
+**Zone.js approach:**
+Zone.js monkey-patches all async browser APIs (`setTimeout`, `Promise`, `fetch`, `addEventListener`, etc.). When any async operation completes, Angular's `ApplicationRef.tick()` runs change detection on the **entire component tree** (unless `OnPush` is used). This is powerful but imprecise — a single `setTimeout` somewhere triggers checks on every component.
+
+**Signals approach:**
+A `signal` is a reactive value holder. `computed()` creates a derived signal. `effect()` runs a side effect when its tracked signals change. Angular's renderer tracks which template reads which signals and only marks that specific component dirty — no zone, no tree traversal.
+
+```typescript
+// ─── Zone.js (traditional) ───────────────────────────────────────
+@Component({
+  selector: 'app-counter',
+  template: `Count: {{ count }}`,
+  changeDetection: ChangeDetectionStrategy.OnPush // manual optimization needed
+})
+export class CounterComponent {
+  count = 0; // plain property — CD triggered by zone events or markForCheck()
+
+  increment() { this.count++; } // triggers zone → full CD cycle
+}
+
+// ─── Signals (Angular 17+) ────────────────────────────────────────
+@Component({
+  selector: 'app-counter',
+  template: `Count: {{ count() }}`, // signals are functions
+  // No zone needed — signal graph knows exactly which templates to update
+})
+export class CounterComponent {
+  count = signal(0);                           // writable signal
+  doubled = computed(() => this.count() * 2); // auto-derived
+
+  constructor() {
+    effect(() => console.log('count changed:', this.count())); // reactive side-effect
+  }
+
+  increment() { this.count.update(c => c + 1); } // only THIS component re-renders ✅
+}
+```
+
+**computed() and effect() rules:**
+- `computed()` is lazy and memoized — only re-evaluates when a tracked dependency changes
+- `effect()` always runs once on creation, then again whenever any read signal changes
+- Both automatically track dependencies at runtime (no dependency array like React's `useEffect`)
+
+**Migration path:**
+```typescript
+// Gradual migration — Signals and Zone.js coexist
+// Step 1: Replace @Input() with input() signal (Angular 17.1+)
+@Component({ ... })
+export class ProductCard {
+  product = input.required<Product>(); // signal-based input
+  price = computed(() => this.product().price * 1.1); // derived from input signal
+}
+
+// Step 2: Replace @Output() with output() (Angular 17.3+)
+addToCart = output<Product>();
+
+// Step 3: provideExperimentalZonelessChangeDetection() — remove zone.js entirely
+// bootstrapApplication(AppComponent, { providers: [provideExperimentalZonelessChangeDetection()] })
+```
+
+| Aspect | Zone.js | Signals |
+|--------|---------|---------|
+| CD trigger | Any async operation | Only when tracked signal changes |
+| Granularity | Component tree (optimized with OnPush) | Single component / expression |
+| Debugging | `NgZone.runOutsideAngular()` needed to escape | No zone — no escape needed |
+| Bundle size | ~35KB (zone.js) | ~0KB extra — built into Angular |
+| Mental model | Implicit, automatic | Explicit reactive graph |
+
+---
+
+## FAANG-NG-4 — How would you implement server-side rendering for an Angular app at Google scale?
+
+**Answer:**
+Angular Universal enables SSR. At FAANG scale, SSR decisions involve CDN caching strategies, hydration approaches, and balancing dynamic vs static rendering per route.
+
+**Angular Universal + TransferState:**
+```typescript
+// app.config.server.ts
+import { provideServerRendering } from '@angular/platform-server';
+
+export const serverConfig: ApplicationConfig = {
+  providers: [
+    provideServerRendering(),
+    provideRouter(routes, withEnabledBlockingInitialNavigation()), // wait for data before rendering
+  ]
+};
+
+// In a service — avoid double data fetch (server fetches, then client refetches)
+@Injectable({ providedIn: 'root' })
+export class ProductService {
+  private transferState = inject(TransferState);
+  private http = inject(HttpClient);
+  private PRODUCTS_KEY = makeStateKey<Product[]>('products');
+
+  getProducts(): Observable<Product[]> {
+    if (this.transferState.hasKey(this.PRODUCTS_KEY)) {
+      const cached = this.transferState.get(this.PRODUCTS_KEY, []);
+      this.transferState.remove(this.PRODUCTS_KEY);
+      return of(cached); // ✅ hydrate from server-rendered state, no HTTP call
+    }
+    return this.http.get<Product[]>('/api/products').pipe(
+      tap(products => {
+        if (isPlatformServer(inject(PLATFORM_ID))) {
+          this.transferState.set(this.PRODUCTS_KEY, products); // ✅ embed in HTML
+        }
+      })
+    );
+  }
+}
+```
+
+**Rendering decision per route:**
+
+| Route type | Strategy | Reason |
+|-----------|---------|--------|
+| Homepage, landing pages | SSG (pre-rendered) | Static, CDN-cacheable, best TTI |
+| Product pages (stable data) | ISR / SSG + revalidate | Cache for hours, regenerate on change |
+| User dashboard | CSR or SSR (no CDN cache) | User-specific, can't be shared |
+| Search results | SSR + short CDN TTL | SEO + freshness |
+
+**CDN caching of SSR responses:**
+```typescript
+// server.ts (Express) — set cache headers per route
+app.get('/products/:id', (req, res) => {
+  // Public CDN cache: 1 hour. Browser cache: 5 min.
+  res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400');
+  // ... render with Angular Universal
+});
+
+app.get('/dashboard', (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store'); // user-specific, never cache
+});
+```
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant CDN
+    participant NodeServer as Node.js (Angular Universal)
+    participant API
+
+    Browser->>CDN: GET /products/123
+    alt Cache HIT (within s-maxage)
+        CDN-->>Browser: Cached HTML (instant ⚡)
+    else Cache MISS
+        CDN->>NodeServer: Forward request
+        NodeServer->>API: Fetch product data
+        API-->>NodeServer: Product JSON
+        NodeServer-->>CDN: Rendered HTML + TransferState
+        CDN-->>Browser: HTML (with embedded state)
+        Note over Browser: Hydration — Angular boots,\nno second API call (TransferState)
+    end
+```
+

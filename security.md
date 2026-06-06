@@ -2163,3 +2163,593 @@ flowchart LR
 
 **💡 Production Example:**
 When decomposing a monolith, internal HTTP calls initially used shared API keys. After migrating to managed identity with explicit audience claims per service, an audit showed one service had previously had access to all internal APIs. After scoping, it was limited to the two services it actually called. When that service later had a vulnerability discovered in a dependency, the blast radius was contained to those two downstream services instead of the entire internal API surface.
+
+---
+
+---
+
+# 🏢 FAANG Security Interview Questions
+
+> How the world's largest engineering organisations think about security at scale — Zero Trust, IAM, secrets management, end-to-end encryption, and threat modelling at billions of users.
+
+---
+
+## Security at Scale — How FAANG Companies Think
+
+### Google — BeyondCorp: Zero Trust from the Inside
+
+Google pioneered the move away from perimeter-based security after the Aurora attacks in 2010. BeyondCorp's core insight: **the network is not trustworthy**. An employee on the corporate network should have no more implicit trust than one connecting from a coffee shop.
+
+Key tenets:
+- **Device trust verification** before any access is granted
+- **No implicit trust** based on network location (VPN is not a security control)
+- **Identity-aware proxies** sit in front of every internal application
+- **Continuous authorization** — not just at login time, but re-evaluated per request
+- Access decisions based on: who you are + what device you're on + what you're accessing + current risk signals
+
+### Amazon — Shared Responsibility Model + IAM at Scale
+
+AWS operates on the **Shared Responsibility Model**: AWS secures the cloud infrastructure; customers secure what they build on top of it. At Amazon's scale, IAM is a foundational control plane — every API call, every S3 access, every Lambda invocation is authorized through IAM.
+
+Internal Amazon principles:
+- **Least privilege by default** — no permissions unless explicitly granted
+- **Credential vending machines** — services assume roles, not long-lived credentials
+- **Audit everything** — CloudTrail logs every API call across all accounts
+
+### Meta — Bug Bounty + Internal Red Team
+
+Meta runs one of the most active bug bounty programs in the industry (millions paid out). Internally, they maintain a dedicated red team that continuously attacks their own infrastructure. Key insight: at Meta's scale, **you will be attacked by sophisticated nation-state actors**. Assume breach and design for detection and containment.
+
+### Netflix — "Full Cycle Developers" Own Their Security
+
+Netflix's security model distributes ownership to feature teams — the team that builds a service owns its security. The Security Engineering team provides **tools and automation**, not gatekeeping. Key principle: **paved roads** — make the secure path the easy path. If security requires extra steps, engineers will skip it; if the default scaffold is secure, they won't have to think about it.
+
+---
+
+## Q: How does Google implement Zero Trust security? (Google BeyondCorp model)
+
+**The core problem BeyondCorp solves:**
+Traditional perimeter security assumed: inside the network = trusted. Once an attacker gets inside (phishing, insider threat, VPN credential theft), they move laterally with no friction. BeyondCorp eliminates this assumption entirely.
+
+**BeyondCorp Components:**
+
+**1. Device Inventory Service**
+Every corporate device is registered and continuously monitored. Unregistered devices cannot access any internal resource regardless of identity.
+
+```
+Device attributes evaluated:
+- Is it a known/registered device?
+- Is the OS patched and up to date?
+- Is disk encryption enabled?
+- Are endpoint protection tools running?
+- Has it recently failed a security check?
+```
+
+**2. User and Group Database**
+Identity is verified via SSO/SAML with strong MFA. Group memberships determine what resources are accessible.
+
+**3. Access Control Engine**
+For every request, the engine evaluates:
+```
+Access = f(identity, device_trust_level, resource_sensitivity, context)
+
+Example rules:
+- Engineering laptop (high trust) + authenticated user → access to prod read-only
+- Personal device (low trust) + authenticated user → access to low-sensitivity apps only
+- Unregistered device → deny all, redirect to device enrollment
+```
+
+**4. Identity-Aware Proxy (IAP)**
+All traffic to internal applications routes through an IAP. The proxy verifies identity and device trust on every request — not just at session start.
+
+**5. Continuous Authorization**
+Trust is not granted for a session — it's re-evaluated continuously. If a device fails a security check mid-session (e.g., endpoint protection is disabled), access is revoked immediately without requiring re-authentication.
+
+```mermaid
+sequenceDiagram
+    participant U as User / Device
+    participant IAP as Identity-Aware Proxy
+    participant ACE as Access Control Engine
+    participant DI as Device Inventory
+    participant APP as Internal Application
+
+    U->>IAP: HTTPS request to internal-app.corp.google.com
+    IAP->>ACE: Evaluate access: who? what device? what resource?
+    ACE->>DI: Is device registered? Trust level? Security posture?
+    DI-->>ACE: Device: registered, OS patched, disk encrypted — trust: HIGH
+    ACE->>ACE: User: authenticated, group: engineering\nDevice: HIGH trust\nResource: sensitivity: MEDIUM\nDecision: ALLOW
+    ACE-->>IAP: ALLOW with read access
+    IAP->>APP: Forward request with identity headers
+    APP-->>IAP: Response
+    IAP-->>U: Response
+    Note over U,APP: If device trust drops mid-session, ACE returns DENY on next request
+```
+
+**Why this matters in an interview:**
+This architecture means a compromised VPN credential gives an attacker nothing. A stolen laptop that isn't compliant gives an attacker nothing. The attack surface becomes: valid identity + compliant device simultaneously — a much harder bar to meet.
+
+---
+
+## Q: Design an authentication system for 1 billion users (Meta/Google scale)
+
+**The challenge at 1B users:**
+At this scale, a single auth server is a single point of failure and a performance bottleneck. Token validation must be fast (< 5ms), available globally (99.99%+ uptime), and resistant to credential stuffing and account takeover at scale.
+
+**Architecture decisions:**
+
+**1. Token Issuance — Distributed and Regional**
+```
+❌ Single auth server → single point of failure, cross-region latency
+✅ Regional auth clusters — users in EU authenticate against EU auth cluster
+   Tokens issued with: sub, iat, exp, jti (JWT ID for revocation), region
+   Short-lived access tokens: 15 minutes
+   Long-lived refresh tokens: 30 days (stored server-side with device binding)
+```
+
+**2. Token Validation — No Central Call Required**
+```
+✅ JWT with asymmetric signing (RS256 or ES256)
+   Public keys distributed to all services via a well-known endpoint
+   Services cache public keys locally — validation is local, no network hop
+   Key rotation: rolling 90-day rotation with 24-hour overlap window
+   
+❌ Opaque tokens with central introspection → every request hits auth server (death at scale)
+```
+
+**3. Token Revocation at Scale**
+```
+Challenge: JWTs are stateless. How do you revoke a token before it expires?
+
+Option A: Bloom Filter (probabilistic, fast)
+  - Maintain a distributed bloom filter of revoked JTIs
+  - False positive rate: ~0.1% (user gets unexpectedly logged out — acceptable)
+  - Very fast to check, very small memory footprint
+  
+Option B: Distributed Blacklist (Redis Cluster)
+  - Store revoked JTIs with TTL = remaining token lifetime
+  - Exact, no false positives
+  - Higher infrastructure cost
+  - Used by high-security flows (banking, admin)
+  
+Meta/Google in practice: Bloom filter for general sessions, Redis blacklist for
+privileged sessions (admin consoles, payment flows).
+```
+
+**4. Handling Credential Stuffing at Scale**
+```
+At 1B users, ~0.1% of login attempts may be credential stuffing attacks.
+That's millions of attack attempts per day.
+
+Defences:
+- Rate limiting per IP (but attackers use distributed IPs)
+- Risk scoring per login attempt: device fingerprint, geo, velocity
+- CAPTCHA on suspicious patterns
+- Breached password detection (compare against HaveIBeenPwned hash list)
+- Adaptive MFA: low-risk = no MFA, medium-risk = TOTP, high-risk = hardware key
+```
+
+```mermaid
+flowchart TD
+    subgraph Global["Global Auth Infrastructure"]
+        LB[Global Load Balancer\nGeoDNS routing] --> USE[US-East Auth Cluster]
+        LB --> USW[US-West Auth Cluster]
+        LB --> EU[EU Auth Cluster]
+        LB --> APAC[APAC Auth Cluster]
+    end
+
+    subgraph TokenFlow["Token Issuance"]
+        LOGIN[User login] --> RISK[Risk Engine\nDevice · Geo · Velocity]
+        RISK -->|Low risk| ISSUE[Issue JWT\nRS256 signed\nexp=15min]
+        RISK -->|High risk| MFA[Require MFA]
+        MFA --> ISSUE
+        ISSUE --> REFRESH[Issue Refresh Token\nStored server-side\ndevice-bound\nexp=30 days]
+    end
+
+    subgraph Validation["Token Validation — No Central Call"]
+        API[API Service] --> CACHE{Public key\nin cache?}
+        CACHE -->|YES| VERIFY[Verify JWT signature\nlocally]
+        CACHE -->|NO| JWKS[Fetch JWKS endpoint]
+        JWKS --> VERIFY
+        VERIFY --> REVOKE{JTI in\nbloom filter?}
+        REVOKE -->|NO| ALLOW[Allow request]
+        REVOKE -->|YES| DENY[401 Unauthorized]
+    end
+
+    style ISSUE fill:#4CAF50,color:#fff
+    style DENY fill:#f44336,color:#fff
+    style ALLOW fill:#4CAF50,color:#fff
+```
+
+---
+
+## Q: How would you design AWS IAM? (Amazon)
+
+**IAM is one of the most complex and critical systems in AWS.** Every API call in AWS goes through IAM. Design it wrong and you either block legitimate access or allow unauthorised access — both catastrophic at cloud scale.
+
+**Core Concepts:**
+
+**1. Policy Types and Precedence**
+```
+AWS IAM policy evaluation order (explicit trumps default):
+
+1. Organization SCPs (Service Control Policies) — ceiling, cannot exceed
+2. Resource-based policies (S3 bucket policy, KMS key policy)
+3. Identity-based policies (attached to user/role)
+4. Permission boundaries (maximum permissions for a role)
+5. Session policies (temporary restriction during role assumption)
+
+Rule: Explicit DENY always wins.
+      Explicit ALLOW must not be blocked by SCP or boundary.
+      Everything else is implicitly DENIED.
+```
+
+**2. Identity-Based vs Resource-Based Policies**
+```json
+// Identity-based: attached to the IAM principal
+// "What can this role do?"
+{
+  "Effect": "Allow",
+  "Action": ["s3:GetObject", "s3:PutObject"],
+  "Resource": "arn:aws:s3:::my-bucket/*"
+}
+
+// Resource-based: attached to the resource
+// "Who can access this resource?"
+// S3 bucket policy example:
+{
+  "Effect": "Allow",
+  "Principal": { "AWS": "arn:aws:iam::123456789:role/AppRole" },
+  "Action": ["s3:GetObject"],
+  "Resource": "arn:aws:s3:::my-bucket/*"
+}
+```
+
+**3. Role Assumption (STS) and Cross-Account Access**
+```
+The credential vending machine pattern:
+- Long-term credentials: IAM users (avoid for applications)
+- Short-term credentials: STS (AssumeRole) — expire in 15 min to 12 hours
+- EC2/Lambda/ECS: instance/execution role — credentials auto-rotated by platform
+
+Cross-account:
+Account A role → AssumeRole → Account B role
+Account B must have a trust policy allowing Account A.
+Account A must have permission to call sts:AssumeRole for Account B's role.
+```
+
+**4. Permission Boundaries**
+```
+Used to delegate permission management without privilege escalation:
+- A developer can create IAM roles, but only with permissions <= their boundary
+- Prevents "privilege escalation via IAM" attack
+- Common in multi-account environments where teams manage their own IAM
+```
+
+```mermaid
+flowchart TD
+    REQUEST[API Request\ne.g., s3:GetObject] --> SCP{Organization SCP\nAllows this action?}
+    SCP -->|NO| DENY1[❌ Explicit DENY\nAction blocked by SCP]
+    SCP -->|YES| RBP{Resource-based policy\nexplicitly DENYs?}
+    RBP -->|YES| DENY2[❌ Explicit DENY\nResource policy blocks]
+    RBP -->|NO| IBP{Identity-based policy\nexplicitly ALLOWs?}
+    IBP -->|NO| DENY3[❌ Implicit DENY\nNo allow found]
+    IBP -->|YES| BOUNDARY{Permission boundary\npermits this action?}
+    BOUNDARY -->|NO| DENY4[❌ Boundary blocks\neven with allow policy]
+    BOUNDARY -->|YES| SESSION{Session policy\n(if assumed role)\npermits?}
+    SESSION -->|NO| DENY5[❌ Session policy blocks]
+    SESSION -->|YES| ALLOW[✅ Access GRANTED]
+
+    style ALLOW fill:#4CAF50,color:#fff
+    style DENY1 fill:#f44336,color:#fff
+    style DENY2 fill:#f44336,color:#fff
+    style DENY3 fill:#f44336,color:#fff
+    style DENY4 fill:#f44336,color:#fff
+    style DENY5 fill:#f44336,color:#fff
+```
+
+> **Why this matters:** Understanding the policy evaluation order is critical for debugging "why doesn't this permission work?" — the most common IAM question in production. The answer is always: walk the evaluation chain and find where the DENY or missing ALLOW lives.
+
+---
+
+## Q: How does Netflix handle secrets across 1000+ microservices?
+
+**The problem at Netflix scale:**
+1000+ microservices, each potentially needing: DB credentials, API keys, TLS certificates, service account tokens. If each team manages secrets manually, you get: secrets in environment variables, in config files, in Dockerfiles, in git — all of which have been responsible for major breaches.
+
+**Netflix's approach (open-sourced or publicly documented):**
+
+**1. Lemur — Certificate Management**
+```
+Netflix open-sourced Lemur: a certificate management tool.
+- Central issuance of TLS certificates for all services
+- Automated renewal before expiry
+- Integration with Vault for storage
+- Audit log of all certificate issuance
+- Prevents "certificate expiry at 2AM" incidents (the most common cause
+  of HTTPS outages in large organisations)
+```
+
+**2. Vault — Secrets Storage**
+```
+HashiCorp Vault is the industry standard for secret storage.
+Netflix uses Vault for:
+- Database credentials (dynamic secrets — Vault creates short-lived DB users)
+- API keys (static secrets with access control and audit log)
+- Encryption as a service (Vault Transit — encrypt/decrypt without exposing keys)
+
+Key Vault patterns:
+Dynamic secrets:
+  Service requests DB creds → Vault creates a DB user valid for 1 hour →
+  Service uses creds → creds auto-expire
+  Benefit: no long-lived DB credentials in existence; every access traceable to a Vault lease
+
+AppRole authentication:
+  Service has a role_id (not secret) baked into the image
+  Secret_id is injected at runtime by the orchestration layer (Kubernetes)
+  Service exchanges (role_id, secret_id) for a Vault token → fetches secrets
+```
+
+**3. Service Identity — SPIFFE/SPIRE**
+```
+SPIFFE (Secure Production Identity Framework For Everyone):
+- Every service gets a cryptographic identity: spiffe://netflix.com/service-name
+- Identity is a short-lived X.509 certificate (SVID — SPIFFE Verifiable Identity Document)
+- SPIRE (SPIFFE Runtime Environment) manages issuance and rotation
+- Services prove their identity via their SVID — no shared secrets needed
+
+This enables: zero-trust service mesh — every service-to-service call is mutually authenticated
+```
+
+**4. Automated Rotation**
+```
+Secrets must rotate automatically or they will never rotate.
+Rotation approach:
+1. Vault lease expiry triggers re-issuance (dynamic secrets)
+2. Lemur monitors cert expiry and renews 30 days before
+3. Services are designed to reload credentials without restart (hot reload)
+4. Canary pattern: rotate for 1% of traffic, verify no errors, then full rotation
+```
+
+```mermaid
+flowchart LR
+    subgraph Boot["Service Bootstrap"]
+        SVC[Service starts] --> SPIRE[SPIRE agent\nissues SVID X.509\nfor this service identity]
+        SPIRE --> VAULT[Authenticate to Vault\nusing SVID]
+        VAULT --> CREDS[Fetch dynamic DB credentials\nLease: 1 hour]
+        CREDS --> DB[(Database\ntemporary user\nauto-expires)]
+    end
+
+    subgraph Rotation["Automatic Rotation"]
+        TIMER[Lease 45 min elapsed] --> RENEW[Request lease renewal]
+        RENEW --> NEWCREDS[New DB credentials issued]
+        NEWCREDS --> HOTRELOAD[Hot-reload in service\nno restart required]
+    end
+
+    subgraph Certs["Certificate Lifecycle (Lemur)"]
+        ISSUE[Certificate issued\n90-day validity] --> MONITOR[Lemur monitors expiry]
+        MONITOR -->|30 days before expiry| RENEW2[Auto-renew certificate]
+        RENEW2 --> DEPLOY[Deploy to service via\nKubernetes secret]
+    end
+
+    style CREDS fill:#4CAF50,color:#fff
+    style HOTRELOAD fill:#2196F3,color:#fff
+    style RENEW2 fill:#FF9800,color:#fff
+```
+
+---
+
+## Q: Explain how end-to-end encryption works in WhatsApp (Meta)
+
+**End-to-end encryption (E2EE):** Only the sender and recipient can read the message. The server routes ciphertext — even if it is compromised, messages cannot be read.
+
+WhatsApp uses the **Signal Protocol**, developed by Open Whisper Systems. It is the gold standard for E2EE messaging.
+
+**Key Exchange — X3DH (Extended Triple Diffie-Hellman)**
+
+Before two users can exchange messages, they must establish a shared secret without ever transmitting it.
+
+```
+Each user has (pre-registered with the server):
+
+Identity Key (IK):      Long-term key pair — permanent identity
+Signed Prekey (SPK):    Medium-term key pair — rotated monthly, signed with IK
+One-Time Prekeys (OPK): Single-use key pairs — replenished as consumed
+
+X3DH key exchange (Alice → Bob):
+Alice fetches Bob's public keys from server: IK_B, SPK_B, OPK_B
+
+Alice computes 4 Diffie-Hellman calculations:
+DH1 = DH(IK_A, SPK_B)        ← Alice's identity × Bob's signed prekey
+DH2 = DH(EK_A, IK_B)         ← Alice's ephemeral key × Bob's identity
+DH3 = DH(EK_A, SPK_B)        ← Alice's ephemeral key × Bob's signed prekey
+DH4 = DH(EK_A, OPK_B)        ← Alice's ephemeral key × Bob's one-time prekey
+
+Shared secret = KDF(DH1 || DH2 || DH3 || DH4)
+
+Bob can compute the same shared secret using his private keys.
+The server never sees any private keys — it only stores public keys.
+```
+
+**Forward Secrecy — The Double Ratchet**
+
+X3DH establishes an initial shared secret. The Double Ratchet algorithm ensures that **every message uses a different encryption key**. Compromising one message key does not compromise any other message.
+
+```
+Two ratchets running simultaneously:
+
+1. Diffie-Hellman Ratchet (per message exchange):
+   Each message includes a new ephemeral DH public key.
+   A new DH calculation produces a new root key.
+   → Every new exchange produces a completely new chain.
+
+2. Symmetric Key Ratchet (per message):
+   Each message derives a new message key from the chain key.
+   Message keys are immediately deleted after use (forward secrecy).
+   → Even if the current state is compromised, past messages are safe.
+
+Forward secrecy property: Compromising key N doesn't help decrypt key N-1.
+Break-in recovery: After compromise, once new DH ratchet step occurs,
+  the attacker loses access even if they had the device for a moment.
+```
+
+**Group Key Distribution**
+
+```
+WhatsApp group encryption uses Sender Keys (pairwise distribution):
+1. Each group member generates a Sender Key (chain key + signing key).
+2. Each member distributes their Sender Key to every other member
+   via the pairwise encrypted channel established by X3DH.
+3. Each group message is encrypted once with the sender's chain key.
+4. Recipients decrypt using the sender's distributed chain key.
+
+Result: O(n) message distribution (not O(n²)) — efficient at scale.
+New member joining: all existing members' past messages are inaccessible
+  (group forward secrecy — new member gets new sender keys only).
+```
+
+**Why the server cannot read messages:**
+```
+WhatsApp servers store only:
+- Public keys (IK, SPK, OPK) — mathematically useless without private keys
+- Encrypted ciphertext in transit (temporary)
+- Metadata: who sent to whom, when (not content)
+
+Private keys never leave the user's device.
+Even WhatsApp (Meta) cannot decrypt messages in transit.
+Law enforcement requests: WhatsApp can provide metadata only, not message content.
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Alice (Device)
+    participant S as WhatsApp Server
+    participant B as Bob (Device)
+
+    Note over A,B: Initial Key Exchange (X3DH)
+    B->>S: Register public keys: IK_B, SPK_B, OPK_B[1..100]
+    A->>S: Request Bob's public keys
+    S-->>A: IK_B, SPK_B, OPK_B[1] (one-time key consumed)
+    A->>A: Compute shared secret via X3DH\n(DH1 || DH2 || DH3 || DH4) → root key
+    A->>S: Send initial message + Alice's ephemeral public key
+    S->>B: Forward ciphertext
+    B->>B: Compute same shared secret\nusing Alice's ephemeral key + own private keys
+    B->>B: Decrypt message
+
+    Note over A,B: Ongoing Messages (Double Ratchet)
+    A->>A: Ratchet forward: derive new message key
+    A->>S: Ciphertext (server sees only encrypted bytes)
+    S->>B: Forward ciphertext
+    B->>B: Ratchet forward: derive same new message key
+    B->>B: Decrypt message
+    Note over S: Server cannot decrypt — no private keys
+```
+
+---
+
+## Q: How do you prevent and detect SQL injection at Google/Amazon scale?
+
+**SQL injection remains the #1 web vulnerability (OWASP).** At FAANG scale, the approach must be systematic — you cannot rely on code review alone for thousands of engineers.
+
+**Layer 1 — Baseline: Parameterized Queries (Non-Negotiable)**
+```
+At any scale, every query must use parameterized queries or ORMs that enforce this.
+No string concatenation. No interpolation. No exceptions.
+
+At FAANG scale: this is enforced via:
+- Linter rules that flag string-concatenated queries (fail in CI)
+- Approved DB client libraries that make raw string queries impossible
+- Code review checklists that treat SQL string interpolation as a critical finding
+```
+
+**Layer 2 — WAF Rules (Web Application Firewall)**
+```
+At Google/Amazon: Dedicated WAF layer (Cloud Armor / AWS WAF) with rules:
+- Block requests containing SQL keywords in unexpected positions
+  (e.g., ' OR 1=1, UNION SELECT, DROP TABLE)
+- Rate-limit IPs making high volumes of requests with SQL-like patterns
+- Geo-based blocking for attack patterns
+
+Limitation: WAF rules can be bypassed (encoding tricks, fragmentation).
+WAF is defense in depth, not a substitute for parameterized queries.
+```
+
+**Layer 3 — Runtime Query Analysis**
+```
+At scale: instrument the DB driver to log query patterns.
+Detect anomalies:
+- Queries with unusual UNION counts
+- Queries accessing tables the service should never touch
+- Queries with unusual nested subquery depth
+- Queries that match known injection payloads in decoded form
+
+Tools: Database Activity Monitoring (DAM) — Imperva, AWS Database Activity Streams
+At Google scale: custom query analysis in the DB proxy layer
+```
+
+**Layer 4 — Anomaly Detection on Query Patterns**
+```
+Baseline "normal" for each service:
+- Which tables does this service read?
+- What is the typical query shape?
+- What is the typical WHERE clause cardinality?
+
+Alerts on:
+- New tables accessed (service has never touched this table before)
+- Unusual query volume from a specific user_id or API token
+- Queries returning dramatically more rows than the service's normal pattern
+```
+
+**Layer 5 — FAANG Scale: Automated Vulnerability Scanning in CI/CD**
+```
+Every code change is scanned before merge:
+
+Static Analysis (SAST):
+- Semgrep rules detecting SQL string concatenation patterns
+- Language-specific rules: C# SqlCommand + string concat, Java + JDBC string, etc.
+- Fail CI pipeline on detection
+
+Dynamic Analysis (DAST):
+- Automated fuzzing of all API endpoints with SQL injection payloads
+- Run in staging environment before every release
+- At Google: built into internal deployment pipeline (cannot skip)
+
+Dependency scanning:
+- Check for known-vulnerable ORM/DB driver versions
+- Block deployments using components with unpatched SQL injection CVEs
+```
+
+```mermaid
+flowchart TD
+    DEV[Developer writes code] --> PR[Pull Request]
+    PR --> SAST[SAST Scan\nSemgrep: SQL concat patterns\nFails PR if found]
+    SAST -->|Clean| BUILD[Build and deploy to staging]
+    BUILD --> DAST[DAST Scan\nAutomated SQL injection fuzzing\nagainst staging endpoints]
+    DAST -->|Clean| PROD[Deploy to production]
+
+    subgraph Runtime["Runtime Defences (Production)"]
+        REQ[User request] --> WAF[WAF Layer\nCloud Armor / AWS WAF\nBlock known injection patterns]
+        WAF --> APP[Application\nParameterized queries only\nORM enforced]
+        APP --> PROXY[DB Proxy Layer\nQuery pattern analysis\nAnomaly detection]
+        PROXY --> DB[(Database)]
+        PROXY -->|Anomaly detected| ALERT[Alert: Security team\nSlack + PagerDuty]
+    end
+
+    style SAST fill:#FF9800,color:#fff
+    style DAST fill:#FF9800,color:#fff
+    style ALERT fill:#f44336,color:#fff
+    style PROD fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** SQL injection prevention at scale is a systems problem, not a developer awareness problem. You cannot train 10,000 engineers to never make a mistake. You build systems that make the mistake impossible (parameterized query enforcement) and detect it immediately when something slips through (SAST, DAST, runtime anomaly detection).
+
+---
+
+> ✅ **FAANG Security Guide complete** — Zero Trust · Auth at scale · IAM design · Secrets management · E2EE · SQL injection at scale
+>
+> 💡 **Interview talking points:**
+> - BeyondCorp: "The network is not the security boundary — identity and device trust are"
+> - IAM: "Explicit DENY always wins; implicit DENY is the default; follow the evaluation chain"
+> - Secrets: "Short-lived dynamic credentials are better than rotated static ones"
+> - E2EE: "The server routes ciphertext; forward secrecy means past messages stay safe even after compromise"
+> - SQL injection at scale: "Make the unsafe pattern impossible in CI before it reaches production"
+

@@ -3688,3 +3688,795 @@ public class SerializationBenchmarks
 // Compare: Mean, Allocated columns — both must improve before shipping
 ```
 
+---
+
+# 🏢 FAANG .NET / Backend Deep-Dive Questions
+
+> These are the kinds of questions asked at Amazon, Microsoft, Google, and Netflix for senior .NET/backend engineers.
+
+---
+
+## FAANG-1. How would you build a high-throughput event processing pipeline in .NET? (Amazon/Netflix)
+
+> **Why this matters:** Distributed systems at Amazon and Netflix process millions of events per second. Interviewers test whether you know how to build backpressure-aware, ordered, gracefully-draining pipelines in process — before even touching external queues.
+
+```
+Producers (N threads)
+      │
+      ▼
+┌──────────────────────────────────┐
+│   System.Threading.Channel<T>    │  ← bounded: applies backpressure
+│   BoundedChannelOptions           │
+│   capacity: 10_000               │
+│   FullMode: Wait                 │  ← producer awaits when full
+└──────────────────────────────────┘
+      │
+      ▼
+Consumer Pool (M workers)
+  Worker 0 — partitionKey % M == 0  ← ordering guarantee within partition
+  Worker 1 — partitionKey % M == 1
+  ...
+  Worker M-1
+
+Graceful shutdown:
+  CancellationToken signalled
+  → producers stop writing
+  → Channel.Writer.Complete()
+  → consumers drain remaining items
+  → IHostedService.StopAsync returns
+```
+
+```csharp
+// ── Registration ─────────────────────────────────────────────────────────
+builder.Services.AddSingleton(_ =>
+    Channel.CreateBounded<OrderEvent>(new BoundedChannelOptions(10_000)
+    {
+        FullMode        = BoundedChannelFullMode.Wait,   // backpressure: producer awaits
+        SingleWriter    = false,                          // multiple producers
+        SingleReader    = false                           // multiple consumers
+    }));
+
+builder.Services.AddHostedService<OrderEventConsumer>();
+
+// ── Producer ─────────────────────────────────────────────────────────────
+public class OrderController : ControllerBase
+{
+    private readonly ChannelWriter<OrderEvent> _writer;
+    public OrderController(Channel<OrderEvent> ch) => _writer = ch.Writer;
+
+    [HttpPost]
+    public async Task<IActionResult> Post([FromBody] OrderEvent evt,
+                                          CancellationToken ct)
+    {
+        await _writer.WriteAsync(evt, ct);   // blocks if channel full — backpressure in action
+        return Accepted();
+    }
+}
+
+// ── Consumer (IHostedService) ─────────────────────────────────────────────
+public class OrderEventConsumer : BackgroundService
+{
+    private readonly ChannelReader<OrderEvent> _reader;
+    private const int WorkerCount = 8;
+
+    public OrderEventConsumer(Channel<OrderEvent> ch) => _reader = ch.Reader;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Spin up N workers — partition by customerId for ordering
+        var workers = Enumerable.Range(0, WorkerCount)
+            .Select(partition => ProcessPartitionAsync(partition, stoppingToken))
+            .ToArray();
+
+        await Task.WhenAll(workers);
+    }
+
+    private async Task ProcessPartitionAsync(int partition, CancellationToken ct)
+    {
+        await foreach (var evt in _reader.ReadAllAsync(ct))
+        {
+            // Route to worker whose partition matches — ordering guaranteed per key
+            if (Math.Abs(evt.CustomerId.GetHashCode()) % WorkerCount != partition)
+            {
+                // Not ours — re-queue (real impl: use N separate channels)
+                continue;
+            }
+            await HandleAsync(evt, ct);
+        }
+        // ReadAllAsync completes when Writer.Complete() is called — drain guaranteed
+    }
+
+    private Task HandleAsync(OrderEvent evt, CancellationToken ct)
+    {
+        // Process event...
+        return Task.CompletedTask;
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    P1[Producer Thread 1] -->|WriteAsync| CH
+    P2[Producer Thread 2] -->|WriteAsync| CH
+    P3[Producer Thread N] -->|WriteAsync| CH
+
+    CH["BoundedChannel&lt;OrderEvent&gt;\ncapacity: 10,000\nFullMode: Wait"]
+
+    CH -->|ReadAllAsync| W0[Worker 0\npartition 0]
+    CH -->|ReadAllAsync| W1[Worker 1\npartition 1]
+    CH -->|ReadAllAsync| WN[Worker M-1\npartition M-1]
+
+    W0 --> DB[(Database /\nDownstream API)]
+    W1 --> DB
+    WN --> DB
+
+    STOP([CancellationToken\nsignalled]) -->|Writer.Complete| CH
+    CH -->|drains remaining| W0
+
+    style CH fill:#FF9800,color:#fff
+    style STOP fill:#f44336,color:#fff
+    style DB fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- `BoundedChannelFullMode.Wait` is backpressure — producer slows down instead of dropping
+- Separate channels per partition key gives strict ordering without locking
+- `ReadAllAsync` drains on `Writer.Complete()` — clean shutdown, zero message loss
+- Compare to external queues: Channels are in-process, sub-microsecond latency; use SQS/Kafka for cross-service durability
+
+---
+
+## FAANG-2. Design a thread-safe, high-performance cache in .NET with expiry (Google/Amazon)
+
+> **Why this matters:** Google and Amazon ask this to test understanding of cache stampede, atomic initialization, and the tradeoffs between IMemoryCache and IDistributedCache. Most candidates suggest a `Dictionary` — that's the wrong answer at scale.
+
+```
+Cache Lookup Flow:
+  Request for key K
+    │
+    ├─ Key exists + not expired?
+    │       └─ Return cached value   ← fast path (no lock)
+    │
+    └─ Key missing or expired
+            │
+            ├─ Multiple concurrent requests for same key?
+            │       └─ Lazy<T> ensures only ONE initializes  ← prevents stampede
+            │
+            └─ Compute value → store with TTL → return
+```
+
+```csharp
+// ── Option A: IMemoryCache (in-process, single node) ─────────────────────
+public class ProductCache
+{
+    private readonly IMemoryCache _cache;
+
+    public ProductCache(IMemoryCache cache) => _cache = cache;
+
+    public async Task<Product?> GetOrAddAsync(int id, Func<Task<Product?>> factory)
+    {
+        // GetOrCreateAsync uses Lazy<T> internally — prevents cache stampede
+        return await _cache.GetOrCreateAsync($"product:{id}", async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
+            entry.SlidingExpiration = TimeSpan.FromMinutes(2);    // reset on access
+            entry.Priority = CacheItemPriority.High;
+            entry.RegisterPostEvictionCallback((key, value, reason, _) =>
+                Console.WriteLine($"Evicted {key}: {reason}"));  // observability
+
+            return await factory();
+        });
+    }
+}
+
+// ── Option B: Custom ConcurrentDictionary + Lazy<T> + TTL ────────────────
+public class TtlCache<TKey, TValue> where TKey : notnull
+{
+    private record CacheEntry(Lazy<Task<TValue>> Value, DateTimeOffset Expiry);
+
+    private readonly ConcurrentDictionary<TKey, CacheEntry> _store = new();
+    private readonly TimeSpan _ttl;
+
+    public TtlCache(TimeSpan ttl) => _ttl = ttl;
+
+    public Task<TValue> GetOrAddAsync(TKey key, Func<TKey, Task<TValue>> factory)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        // Remove expired entry — atomic swap
+        _store.TryGetValue(key, out var existing);
+        if (existing is not null && existing.Expiry <= now)
+            _store.TryRemove(new KeyValuePair<TKey, CacheEntry>(key, existing));
+
+        var entry = _store.GetOrAdd(key, k =>
+            new CacheEntry(
+                new Lazy<Task<TValue>>(() => factory(k),   // Lazy<T> = one initialization
+                    LazyThreadSafetyMode.ExecutionAndPublication),
+                now.Add(_ttl)));
+
+        return entry.Value.Value;  // multiple threads await same Task
+    }
+
+    public void Invalidate(TKey key) => _store.TryRemove(key, out _);
+}
+```
+
+**Cache patterns comparison:**
+
+| Pattern | When to use | Write | Read |
+|---------|-------------|-------|------|
+| **Cache-aside** | Read-heavy, cache misses tolerable | App writes DB then cache | App reads cache, falls back to DB |
+| **Write-through** | Strong consistency needed | App writes cache + DB together | Cache always current |
+| **Write-behind** | Write-heavy, async durability OK | App writes cache; async flush to DB | Cache always current, DB eventually |
+
+```mermaid
+flowchart TD
+    REQ[Request for key K] --> HIT{Cache Hit?\nNot Expired?}
+    HIT -->|Yes| RET[Return cached value\nO(1) lookup]
+    HIT -->|No| LAZY{Lazy&lt;T&gt;\ninitialized?}
+    LAZY -->|No - first caller| INIT[Call factory\ncompute value]
+    LAZY -->|Yes - concurrent| WAIT[Await same Task\nno duplicate work]
+    INIT --> STORE[Store with TTL\nConcurrentDictionary]
+    STORE --> RET2[Return value]
+    WAIT --> RET2
+
+    style HIT fill:#FF9800,color:#fff
+    style LAZY fill:#2196F3,color:#fff
+    style INIT fill:#4CAF50,color:#fff
+    style WAIT fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- `Lazy<T>` with `ExecutionAndPublication` ensures exactly one thread runs the factory — prevents cache stampede under concurrent load
+- `IMemoryCache` = in-process, single node; `IDistributedCache` (Redis) = shared across all instances
+- Always set both AbsoluteExpiration (hard limit) and SlidingExpiration (activity-based) where appropriate
+- Cache invalidation strategy: publish an event on write, all nodes evict their local entry
+
+---
+
+## FAANG-3. How do you implement distributed locking in .NET? (Amazon/Meta)
+
+> **Why this matters:** Distributed locks appear in leader election, inventory reservation, cron-job deduplication, and any "exactly-once" operation. Interviewers want the Redlock algorithm, fencing tokens, and awareness of failure modes.
+
+```
+Distributed Lock Acquire Flow:
+  Client A wants lock on "inventory:sku-42"
+    │
+    ├─ SET inventory:sku-42 <token-A> NX PX 30000
+    │     NX = only if Not eXists
+    │     PX = expire in 30 seconds (safety net for crashed client)
+    │
+    ├─ Success? → Client A holds lock
+    │     └─ Do work, then:
+    │          DEL inventory:sku-42 WHERE value == token-A  (Lua script — atomic)
+    │
+    └─ Fail? → Client B already holds lock
+          └─ Retry with exponential backoff + jitter
+
+Fencing Token Problem:
+  Client A holds lock, GC pause for 35 seconds
+  Lock expires, Client B acquires lock
+  Client A resumes (thinks it still holds lock!)
+  → Both writing to storage simultaneously
+
+  Fix: fencing token (monotonically increasing number)
+  Storage rejects writes with token < current max seen
+```
+
+```csharp
+// ── Redis distributed lock (Redlock single-node) ─────────────────────────
+public class RedisDistributedLock : IAsyncDisposable
+{
+    private readonly IDatabase _db;
+    private readonly string _key;
+    private readonly string _token;   // unique per acquisition — prevents foreign release
+    private readonly TimeSpan _expiry;
+    private bool _acquired;
+
+    public RedisDistributedLock(IDatabase db, string resource, TimeSpan expiry)
+    {
+        _db     = db;
+        _key    = $"lock:{resource}";
+        _token  = Guid.NewGuid().ToString("N");
+        _expiry = expiry;
+    }
+
+    public async Task<bool> AcquireAsync(int maxRetries = 3, int retryDelayMs = 100)
+    {
+        for (int i = 0; i < maxRetries; i++)
+        {
+            // SET key token NX PX expiry_ms — atomic, returns true only if key was absent
+            _acquired = await _db.StringSetAsync(_key, _token, _expiry,
+                when: When.NotExists);
+
+            if (_acquired) return true;
+
+            // Exponential backoff + jitter (Amazon pattern — avoids thundering herd)
+            var delay = retryDelayMs * (int)Math.Pow(2, i)
+                        + Random.Shared.Next(0, retryDelayMs);
+            await Task.Delay(delay);
+        }
+        return false;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!_acquired) return;
+
+        // Lua script: check + delete are ATOMIC — prevents releasing another client's lock
+        const string script = @"
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
+            else
+                return 0
+            end";
+
+        await _db.ScriptEvaluateAsync(script,
+            keys:   new RedisKey[]  { _key },
+            values: new RedisValue[] { _token });
+    }
+}
+
+// Usage
+await using var lock_ = new RedisDistributedLock(_db, "inventory:sku-42", TimeSpan.FromSeconds(30));
+if (await lock_.AcquireAsync())
+{
+    // Critical section — inventory reservation
+    await ReserveInventoryAsync("sku-42", quantity: 1);
+}
+else
+{
+    throw new ConflictException("Could not acquire inventory lock — try again");
+}
+```
+
+```mermaid
+flowchart TD
+    CA[Client A] -->|SET lock:res token-A NX PX 30000| REDIS[(Redis)]
+    REDIS -->|OK - acquired| CA_WORK[Client A: do work]
+    CA_WORK -->|Lua: DEL if value==token-A| REDIS
+
+    CB[Client B] -->|SET lock:res token-B NX PX 30000| REDIS
+    REDIS -->|nil - lock held| CB_WAIT[Client B: retry\nexp backoff + jitter]
+    CB_WAIT -->|after A releases| CB_ACQ[Client B: acquired]
+
+    GC([GC pause / crash]) -.->|lock TTL expires| REDIS
+    REDIS -.->|auto-release after 30s| CB_ACQ
+
+    style REDIS fill:#f44336,color:#fff
+    style CA_WORK fill:#4CAF50,color:#fff
+    style CB_WAIT fill:#FF9800,color:#fff
+    style GC fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- Unique token per lock acquisition prevents Client B from releasing Client A's lock
+- Lua script makes check-and-delete atomic — no race between check and delete
+- TTL is the safety net for crashed clients — size it to slightly exceed your operation's SLA
+- Fencing tokens: pass a monotonically increasing counter to storage, storage rejects stale writes
+- Redlock (multi-node): acquire on N/2+1 Redis nodes — protects against single Redis node failure
+
+---
+
+## FAANG-4. Walk me through implementing the Circuit Breaker pattern from scratch in .NET (Netflix)
+
+> **Why this matters:** Netflix invented Hystrix specifically because cascading failures took down their entire platform. Circuit breakers are a critical resilience primitive. Interviewers want the state machine, thread safety, and a comparison with Polly.
+
+```
+Circuit Breaker States:
+  ┌─────────────────────────────────────────────────────────┐
+  │  CLOSED (normal)                                        │
+  │    → calls pass through                                 │
+  │    → failure count tracked                             │
+  │    → threshold exceeded? → trip to OPEN                │
+  └─────────────────────────────────────────────────────────┘
+             │ failure threshold exceeded
+             ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │  OPEN (failing fast)                                    │
+  │    → all calls rejected immediately                     │
+  │    → no traffic to failing downstream                   │
+  │    → timeout elapsed? → transition to HALF-OPEN         │
+  └─────────────────────────────────────────────────────────┘
+             │ timeout elapsed
+             ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │  HALF-OPEN (probing)                                    │
+  │    → allow ONE probe request through                    │
+  │    → success? → reset to CLOSED                        │
+  │    → failure? → back to OPEN                           │
+  └─────────────────────────────────────────────────────────┘
+```
+
+```csharp
+public enum CircuitState { Closed, Open, HalfOpen }
+
+public class CircuitBreaker
+{
+    private volatile CircuitState _state = CircuitState.Closed;
+    private int _failureCount;
+    private long _openedAtTicks;
+
+    private readonly int _failureThreshold;
+    private readonly TimeSpan _openDuration;
+    private readonly int _successThreshold;
+    private int _halfOpenSuccesses;
+
+    public CircuitBreaker(int failureThreshold = 5,
+                          TimeSpan openDuration = default,
+                          int successThreshold = 2)
+    {
+        _failureThreshold = failureThreshold;
+        _openDuration     = openDuration == default ? TimeSpan.FromSeconds(30) : openDuration;
+        _successThreshold = successThreshold;
+    }
+
+    public async Task<T> ExecuteAsync<T>(Func<Task<T>> operation)
+    {
+        switch (_state)
+        {
+            case CircuitState.Open:
+                // Check if timeout has elapsed — transition to half-open
+                if (DateTimeOffset.UtcNow.Ticks - Interlocked.Read(ref _openedAtTicks)
+                    >= _openDuration.Ticks)
+                {
+                    Interlocked.CompareExchange(
+                        ref Unsafe.As<CircuitState, int>(ref _state),
+                        (int)CircuitState.HalfOpen,
+                        (int)CircuitState.Open);
+                }
+                else
+                {
+                    throw new CircuitOpenException("Circuit is OPEN — failing fast");
+                }
+                break;
+
+            case CircuitState.HalfOpen:
+                // Only ONE probe through — others rejected
+                if (Interlocked.CompareExchange(
+                        ref Unsafe.As<CircuitState, int>(ref _state),
+                        (int)CircuitState.HalfOpen,
+                        (int)CircuitState.HalfOpen) != (int)CircuitState.HalfOpen)
+                    throw new CircuitOpenException("Circuit HALF-OPEN — probe in progress");
+                break;
+        }
+
+        try
+        {
+            var result = await operation();
+            OnSuccess();
+            return result;
+        }
+        catch (Exception)
+        {
+            OnFailure();
+            throw;
+        }
+    }
+
+    private void OnSuccess()
+    {
+        if (_state == CircuitState.HalfOpen)
+        {
+            if (Interlocked.Increment(ref _halfOpenSuccesses) >= _successThreshold)
+            {
+                // Reset — circuit closed again
+                Interlocked.Exchange(ref _failureCount, 0);
+                Interlocked.Exchange(ref _halfOpenSuccesses, 0);
+                _state = CircuitState.Closed;
+            }
+        }
+        else
+        {
+            Interlocked.Exchange(ref _failureCount, 0); // reset on success
+        }
+    }
+
+    private void OnFailure()
+    {
+        var failures = Interlocked.Increment(ref _failureCount);
+        if (failures >= _failureThreshold && _state == CircuitState.Closed)
+        {
+            Interlocked.Exchange(ref _openedAtTicks, DateTimeOffset.UtcNow.Ticks);
+            _state = CircuitState.Open;
+        }
+        else if (_state == CircuitState.HalfOpen)
+        {
+            // Probe failed — back to open
+            Interlocked.Exchange(ref _openedAtTicks, DateTimeOffset.UtcNow.Ticks);
+            Interlocked.Exchange(ref _halfOpenSuccesses, 0);
+            _state = CircuitState.Open;
+        }
+    }
+}
+
+// ── Polly equivalent (production recommendation) ─────────────────────────
+var pipeline = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio          = 0.5,          // 50% failure rate
+        MinimumThroughput     = 10,           // minimum 10 calls before evaluating
+        SamplingDuration      = TimeSpan.FromSeconds(30),
+        BreakDuration         = TimeSpan.FromSeconds(15),
+        OnOpened  = args => { /* alert / metric */ return ValueTask.CompletedTask; },
+        OnClosed  = args => { /* alert / metric */ return ValueTask.CompletedTask; }
+    })
+    .Build();
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Open : failure count >= threshold
+    Open --> HalfOpen : open duration elapsed
+    HalfOpen --> Closed : success count >= threshold
+    HalfOpen --> Open : any failure
+
+    Closed : Closed\nRequests pass through\nfailures counted
+    Open : Open\nRequests fail immediately\n(CircuitOpenException)
+    HalfOpen : Half-Open\nOne probe request\nallowed through
+```
+
+**Key talking points:**
+- `Interlocked` operations make state transitions thread-safe without locks
+- Half-Open prevents thundering herd when the downstream recovers
+- Production recommendation: use Polly — it handles sampling windows, not just raw counts
+- Pair with bulkhead (semaphore) to prevent thread pool exhaustion while circuit is closed
+
+---
+
+## FAANG-5. How does .NET's ThreadPool work and how can it become a bottleneck? (Microsoft)
+
+> **Why this matters:** ThreadPool starvation is one of the hardest production bugs to diagnose in .NET. Microsoft interviewers specifically probe for this because it causes latency spikes and request timeouts that look like network issues.
+
+```
+ThreadPool Architecture:
+  ┌───────────────────────────────────────────────────────┐
+  │  Work Queue                                            │
+  │  [Task1][Task2][Task3]...[TaskN]                      │
+  └───────────────────────────────────────────────────────┘
+          │
+          ▼
+  ┌───────────────────────────────────────────────────────┐
+  │  Worker Thread Pool (CPU-bound work)                  │
+  │  Min: Environment.ProcessorCount  (e.g. 8)           │
+  │  Max: 32767 (default)                                 │
+  │  Hill-climbing algorithm adds threads every 500ms     │
+  └───────────────────────────────────────────────────────┘
+          │
+  ┌───────────────────────────────────────────────────────┐
+  │  IOCP Thread Pool (I/O-bound: network, disk)          │
+  │  Separate pool — not consumed by CPU work             │
+  └───────────────────────────────────────────────────────┘
+
+Starvation Scenario:
+  All 8 (min) worker threads blocked on Task.Result / .Wait()
+  New tasks can't run until a thread is freed
+  Hill-climbing adds one thread every 500ms
+  → Under load: seconds of delay before enough threads created
+  → Appears as latency spike / timeout cascade
+```
+
+```csharp
+// ❌ Causing starvation — blocking calls in async context
+[HttpGet("{id}")]
+public IActionResult Get(int id)
+{
+    var result = _service.GetByIdAsync(id).Result;  // BLOCKS the ThreadPool thread
+    return Ok(result);
+    // Under load: all threads blocked → new requests queue up → timeouts
+}
+
+// ✅ Proper async — thread returns to pool while awaiting I/O
+[HttpGet("{id}")]
+public async Task<IActionResult> Get(int id)
+{
+    var result = await _service.GetByIdAsync(id);   // thread released during await
+    return Ok(result);
+}
+
+// ── Diagnosing starvation with dotnet-counters ────────────────────────────
+// dotnet-counters monitor --process-id <pid> System.Runtime
+
+// Key counters to watch:
+//   ThreadPool.Queue.Length        > 0 sustained = starvation
+//   ThreadPool.Thread.Count        climbing = adding threads to compensate
+//   ThreadPool.Completed.Items/s   dropping = throughput degraded
+//   Monitor.Lock.Contention.Count  rising = lock pressure
+
+// ── Increasing min threads (fix for thread-pool-dependent legacy code) ────
+ThreadPool.SetMinThreads(
+    workerThreads:      Environment.ProcessorCount * 4,
+    completionPortThreads: Environment.ProcessorCount * 4);
+// Use sparingly — symptom fix; async I/O is the real solution
+
+// ── Custom TaskScheduler for background work ──────────────────────────────
+// Prevents background tasks from competing with request-serving threads
+var scheduler = new LimitedConcurrencyLevelTaskScheduler(maxDegreeOfParallelism: 4);
+var factory   = new TaskFactory(scheduler);
+await factory.StartNew(() => HeavyCpuWork(), TaskCreationOptions.LongRunning);
+```
+
+```mermaid
+flowchart TD
+    REQ[HTTP Requests\narriving] --> QUEUE[Work Queue]
+    QUEUE --> TP[ThreadPool\nWorker Threads]
+
+    TP -->|async I/O| IOCP[IOCP Threads\nNetwork/Disk I/O]
+    IOCP -->|I/O complete| TP
+
+    BLOCK[".Result / .Wait()\nblocking calls"] -->|thread consumed| TP
+    BLOCK -->|all threads busy| STARV[Starvation\nNew tasks queue up\n500ms per new thread]
+
+    STARV --> TIMEOUT[Request Timeouts\nLatency Spikes]
+
+    ASYNC[await keyword\nasync I/O] -->|thread released\nduring I/O| TP
+    ASYNC --> SCALE[Scales to thousands\nof concurrent requests]
+
+    style BLOCK fill:#f44336,color:#fff
+    style STARV fill:#f44336,color:#fff
+    style TIMEOUT fill:#f44336,color:#fff
+    style ASYNC fill:#4CAF50,color:#fff
+    style SCALE fill:#4CAF50,color:#fff
+```
+
+**Key talking points:**
+- Min threads = CPU count by default; hill-climbing adds one every 500ms when saturated — the 500ms gap is the starvation signature
+- `Task.Result` and `.Wait()` are the primary culprits — they synchronously block a ThreadPool thread
+- IOCP threads are separate — they're not consumed by CPU work, only by I/O callbacks
+- `dotnet-counters` `ThreadPool.Queue.Length` > 0 sustained is the smoking gun for starvation
+- Fix hierarchy: 1) make everything async, 2) raise min threads as a bridge, 3) custom scheduler for CPU-bound isolation
+
+---
+
+## FAANG-6. Design an idempotent background processor in .NET (Amazon style)
+
+> **Why this matters:** Amazon SQS delivers messages at-least-once. Without idempotency, duplicate deliveries cause double-charges, duplicate emails, and corrupted state. The Inbox/Outbox pattern is a standard solution.
+
+```
+Idempotent Processing Flow:
+  Message arrives (SQS / Service Bus)
+    │
+    ├─ Check Inbox table for message.IdempotencyKey
+    │       └─ Already processed? → Acknowledge + skip
+    │
+    ├─ Begin DB transaction
+    │       ├─ INSERT INTO Inbox (IdempotencyKey, ProcessedAt)  ← unique constraint
+    │       ├─ Execute business logic
+    │       └─ COMMIT
+    │
+    ├─ Unique constraint violation? → Duplicate detected → safe to ignore
+    │
+    └─ Acknowledge message to broker
+         (message removed from queue only after successful processing)
+
+Outbox Pattern (for reliable event publishing):
+  Business logic commit + event record in same transaction
+  Separate relay process reads Outbox and publishes to broker
+  → No "processed but event not sent" inconsistency
+```
+
+```csharp
+// ── EF Core entities ──────────────────────────────────────────────────────
+public class InboxMessage
+{
+    public string IdempotencyKey { get; set; } = default!;  // unique index
+    public string MessageType    { get; set; } = default!;
+    public DateTimeOffset ProcessedAt { get; set; }
+}
+
+public class OutboxMessage
+{
+    public Guid   Id          { get; set; } = Guid.NewGuid();
+    public string EventType   { get; set; } = default!;
+    public string Payload     { get; set; } = default!;     // serialized event
+    public bool   Published   { get; set; } = false;
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+// ── Background processor ──────────────────────────────────────────────────
+public class OrderMessageProcessor : BackgroundService
+{
+    private readonly ServiceBusProcessor _processor;
+    private readonly IServiceScopeFactory _scopeFactory;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _processor.ProcessMessageAsync  += HandleMessageAsync;
+        _processor.ProcessErrorAsync    += HandleErrorAsync;
+        await _processor.StartProcessingAsync(stoppingToken);
+    }
+
+    private async Task HandleMessageAsync(ProcessMessageEventArgs args)
+    {
+        var idempotencyKey = args.Message.MessageId;     // SQS MessageId / deduplication ID
+        var body           = args.Message.Body.ToString();
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        // Check + insert in one transaction — unique constraint is the guard
+        await using var tx = await db.Database.BeginTransactionAsync();
+        try
+        {
+            var alreadyProcessed = await db.InboxMessages
+                .AnyAsync(m => m.IdempotencyKey == idempotencyKey);
+
+            if (alreadyProcessed)
+            {
+                await args.CompleteMessageAsync(args.Message);  // ack + skip
+                return;
+            }
+
+            // Business logic
+            var order = JsonSerializer.Deserialize<PlaceOrderCommand>(body)!;
+            await ProcessOrderAsync(order, db);
+
+            // Record outbox event in same transaction
+            db.OutboxMessages.Add(new OutboxMessage
+            {
+                EventType = nameof(OrderPlacedEvent),
+                Payload   = JsonSerializer.Serialize(new OrderPlacedEvent(order.OrderId)),
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+
+            // Mark as processed
+            db.InboxMessages.Add(new InboxMessage
+            {
+                IdempotencyKey = idempotencyKey,
+                MessageType    = "PlaceOrderCommand",
+                ProcessedAt    = DateTimeOffset.UtcNow
+            });
+
+            await db.SaveChangesAsync();
+            await tx.CommitAsync();
+
+            await args.CompleteMessageAsync(args.Message);     // ack AFTER commit
+        }
+        catch (DbUpdateException ex) when (ex.IsUniqueConstraintViolation())
+        {
+            await tx.RollbackAsync();
+            await args.CompleteMessageAsync(args.Message);     // duplicate — safe to ack
+        }
+        catch
+        {
+            await tx.RollbackAsync();
+            // Do NOT complete — message returns to queue after visibility timeout
+            // After maxDeliveryCount attempts → dead letter queue
+            throw;
+        }
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    SQS[Azure Service Bus\nor AWS SQS] -->|delivers message| PROC[Background Processor\nIHostedService]
+
+    PROC --> CHECK{Inbox table\nhas IdempotencyKey?}
+    CHECK -->|Yes - duplicate| ACK1[Acknowledge + Skip\nno processing]
+    CHECK -->|No - new message| TX[Begin DB Transaction]
+
+    TX --> BIZ[Execute Business Logic]
+    BIZ --> OUTBOX[Write Outbox event\n+ Inbox record]
+    OUTBOX --> COMMIT[COMMIT transaction]
+    COMMIT --> ACK2[Acknowledge message\nremoved from queue]
+
+    COMMIT -->|unique constraint violation| DUP[Duplicate detected\nRollback + Ack]
+    COMMIT -->|other error| DLQ[No Ack\nmessage returns to queue\nmax retries → DLQ]
+
+    RELAY[Outbox Relay\nBackgroundService] -->|polls Outbox| PUB[Publish events\nto broker]
+
+    style CHECK fill:#FF9800,color:#fff
+    style ACK1 fill:#9C27B0,color:#fff
+    style COMMIT fill:#4CAF50,color:#fff
+    style DLQ fill:#f44336,color:#fff
+    style RELAY fill:#2196F3,color:#fff
+```
+
+**Key talking points:**
+- Unique constraint on `IdempotencyKey` is the database-level guarantee — not application-level logic
+- Acknowledge the message AFTER the transaction commits — if process crashes between commit and ack, re-delivery is safe (idempotent)
+- Outbox pattern decouples "processing succeeded" from "event published" — both are atomic with business logic via the same transaction
+- Dead letter queue catches poison messages after `maxDeliveryCount` retries — always wire up a DLQ consumer for alerting

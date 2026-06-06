@@ -2787,3 +2787,1215 @@ classDiagram
     ParkingLot o-- FeeCalculator
 ```
 
+---
+
+# 🏢 FAANG Low-Level Design Questions
+
+> Classic LLD problems asked at Google, Amazon, Meta, Apple, Netflix — with C# implementations, Mermaid diagrams, and design discussion.
+
+---
+
+## 🟠 Amazon: Design Amazon Locker System
+
+### Requirements
+- Customer receives an OTP to retrieve a package from a locker
+- Lockers have slots of different sizes: Small, Medium, Large
+- Slot allocation uses best-fit by package size
+- Unclaimed packages expire after a set period
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class LockerSystem {
+        -lockers List~Locker~
+        +AllocateSlot(package) LockerSlot
+        +DeliverPackage(packageId, slot)
+        +RetrievePackage(otpCode) Package
+        +ExpireUnclaimedSlots()
+    }
+
+    class Locker {
+        +Id string
+        +Location string
+        -slots List~LockerSlot~
+        +FindAvailableSlot(size) LockerSlot
+    }
+
+    class LockerSlot {
+        +Id string
+        +Size SlotSize
+        +IsOccupied bool
+        +Package Package
+        +OtpCode string
+        +OtpExpiry DateTime
+        +Allocate(package, otp)
+        +Release()
+        +IsExpired() bool
+    }
+
+    class Package {
+        +Id string
+        +Size SlotSize
+        +Customer Customer
+        +DeliveredAt DateTime
+    }
+
+    class Customer {
+        +Id string
+        +Name string
+        +Email string
+        +Phone string
+    }
+
+    class Delivery {
+        +PackageId string
+        +LockerId string
+        +SlotId string
+        +OtpCode string
+        +ExpiryTime DateTime
+        +Status DeliveryStatus
+    }
+
+    LockerSystem "1" *-- "many" Locker
+    Locker "1" *-- "many" LockerSlot
+    LockerSlot o-- Package
+    Package o-- Customer
+    LockerSystem ..> Delivery : creates
+```
+
+### Core Implementation
+
+```csharp
+public enum SlotSize { Small, Medium, Large }
+public enum DeliveryStatus { Pending, Delivered, Retrieved, Expired }
+
+public class Package
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString();
+    public SlotSize Size { get; init; }
+    public Customer Customer { get; init; } = null!;
+    public DateTime DeliveredAt { get; set; }
+}
+
+public class LockerSlot
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString();
+    public SlotSize Size { get; init; }
+    public bool IsOccupied { get; private set; }
+    public Package? Package { get; private set; }
+    public string? OtpCode { get; private set; }
+    public DateTime? OtpExpiry { get; private set; }
+
+    public bool IsAvailable() => !IsOccupied;
+
+    public bool IsExpired() =>
+        IsOccupied && OtpExpiry.HasValue && OtpExpiry.Value < DateTime.UtcNow;
+
+    public void Allocate(Package package, string otp, TimeSpan holdDuration)
+    {
+        IsOccupied = true;
+        Package = package;
+        OtpCode = otp;
+        OtpExpiry = DateTime.UtcNow.Add(holdDuration);
+    }
+
+    public Package? Release()
+    {
+        var pkg = Package;
+        IsOccupied = false;
+        Package = null;
+        OtpCode = null;
+        OtpExpiry = null;
+        return pkg;
+    }
+}
+
+public class Locker
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString();
+    public string Location { get; init; } = "";
+    private readonly List<LockerSlot> _slots;
+
+    public Locker(string location, Dictionary<SlotSize, int> slotCounts)
+    {
+        Location = location;
+        _slots = slotCounts
+            .SelectMany(kv => Enumerable.Range(0, kv.Value)
+                .Select(_ => new LockerSlot { Size = kv.Key }))
+            .ToList();
+    }
+
+    // Best-fit: find the smallest available slot that fits the package
+    public LockerSlot? FindBestFitSlot(SlotSize packageSize)
+    {
+        return _slots
+            .Where(s => s.IsAvailable() && s.Size >= packageSize)
+            .OrderBy(s => s.Size) // smallest that fits = best fit
+            .FirstOrDefault();
+    }
+
+    public IEnumerable<LockerSlot> GetExpiredSlots() =>
+        _slots.Where(s => s.IsExpired());
+}
+
+public class LockerSystem
+{
+    private readonly List<Locker> _lockers;
+    private readonly Dictionary<string, LockerSlot> _otpIndex = new();
+    private readonly TimeSpan _defaultHoldDuration = TimeSpan.FromDays(3);
+
+    public LockerSystem(List<Locker> lockers) => _lockers = lockers;
+
+    public (Locker locker, LockerSlot slot, string otp)? AllocateSlot(Package package)
+    {
+        foreach (var locker in _lockers)
+        {
+            var slot = locker.FindBestFitSlot(package.Size);
+            if (slot == null) continue;
+
+            string otp = GenerateOtp();
+            slot.Allocate(package, otp, _defaultHoldDuration);
+            package.DeliveredAt = DateTime.UtcNow;
+            _otpIndex[otp] = slot;
+
+            return (locker, slot, otp);
+        }
+        return null; // no locker with available slot
+    }
+
+    public Package? RetrievePackage(string otpCode)
+    {
+        if (!_otpIndex.TryGetValue(otpCode, out var slot))
+            throw new ArgumentException("Invalid OTP");
+
+        if (slot.IsExpired())
+        {
+            _otpIndex.Remove(otpCode);
+            slot.Release();
+            throw new InvalidOperationException("OTP has expired. Contact support for redelivery.");
+        }
+
+        if (slot.OtpCode != otpCode)
+            throw new UnauthorizedAccessException("OTP mismatch");
+
+        var package = slot.Release();
+        _otpIndex.Remove(otpCode);
+        return package;
+    }
+
+    // Background job: expire unclaimed packages
+    public List<Package> ExpireUnclaimedSlots()
+    {
+        var expired = new List<Package>();
+        foreach (var locker in _lockers)
+        {
+            foreach (var slot in locker.GetExpiredSlots().ToList())
+            {
+                if (slot.OtpCode != null) _otpIndex.Remove(slot.OtpCode);
+                var pkg = slot.Release();
+                if (pkg != null) expired.Add(pkg);
+            }
+        }
+        return expired; // notify customers, trigger redelivery flow
+    }
+
+    private static string GenerateOtp() =>
+        Random.Shared.Next(100000, 999999).ToString();
+}
+```
+
+### Design Discussion
+```
+Slot allocation: Best-fit (smallest slot that fits) minimises wasted space.
+OTP security: OTPs should be hashed in storage; only the customer receives plaintext.
+Concurrency: Use distributed locks (Redis) per locker when multiple delivery agents work simultaneously.
+Expiry: Background job (Hangfire / hosted service) runs every hour to expire unclaimed slots.
+Extensibility: Add refrigerated slots by extending SlotSize enum + pricing strategy.
+```
+
+---
+
+## 🟢 Google: Design a Cache with LRU Eviction
+
+> LeetCode #146 at design level — thread-safe generic implementation.
+
+### Design
+- HashMap for O(1) key lookup
+- DoublyLinkedList to track access order (most recently used at head, LRU at tail)
+- On `Get`: move accessed node to head
+- On `Put`: add to head; if capacity exceeded, evict tail node
+- Thread-safe with `ReaderWriterLockSlim` (concurrent reads, exclusive writes)
+
+### Full C# Implementation
+
+```csharp
+public class LRUCache<TKey, TValue> where TKey : notnull
+{
+    private class Node
+    {
+        public TKey Key;
+        public TValue Value;
+        public Node? Prev, Next;
+        public Node(TKey k, TValue v) { Key = k; Value = v; }
+    }
+
+    private readonly int _capacity;
+    private readonly Dictionary<TKey, Node> _map;
+    private readonly Node _head, _tail; // dummy sentinels
+    private readonly ReaderWriterLockSlim _lock = new();
+
+    public LRUCache(int capacity)
+    {
+        _capacity = capacity;
+        _map = new Dictionary<TKey, Node>(capacity);
+        _head = new Node(default!, default!);
+        _tail = new Node(default!, default!);
+        _head.Next = _tail;
+        _tail.Prev = _head;
+    }
+
+    // O(1) — concurrent reads allowed
+    public bool TryGet(TKey key, out TValue value)
+    {
+        _lock.EnterUpgradeableReadLock();
+        try
+        {
+            if (!_map.TryGetValue(key, out var node))
+            {
+                value = default!;
+                return false;
+            }
+            _lock.EnterWriteLock();
+            try { MoveToHead(node); }
+            finally { _lock.ExitWriteLock(); }
+
+            value = node.Value;
+            return true;
+        }
+        finally { _lock.ExitUpgradeableReadLock(); }
+    }
+
+    // O(1) — exclusive write lock
+    public void Put(TKey key, TValue value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            if (_map.TryGetValue(key, out var existing))
+            {
+                existing.Value = value;
+                MoveToHead(existing);
+                return;
+            }
+
+            var node = new Node(key, value);
+            _map[key] = node;
+            AddToHead(node);
+
+            if (_map.Count > _capacity)
+            {
+                var lru = RemoveTail();
+                _map.Remove(lru.Key);
+            }
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    private void AddToHead(Node node)
+    {
+        node.Prev = _head;
+        node.Next = _head.Next;
+        _head.Next!.Prev = node;
+        _head.Next = node;
+    }
+
+    private void RemoveNode(Node node)
+    {
+        node.Prev!.Next = node.Next;
+        node.Next!.Prev = node.Prev;
+    }
+
+    private void MoveToHead(Node node) { RemoveNode(node); AddToHead(node); }
+
+    private Node RemoveTail()
+    {
+        var lru = _tail.Prev!;
+        RemoveNode(lru);
+        return lru;
+    }
+
+    public int Count { get { _lock.EnterReadLock(); try { return _map.Count; } finally { _lock.ExitReadLock(); } } }
+}
+
+// Usage:
+var cache = new LRUCache<int, string>(3);
+cache.Put(1, "one");
+cache.Put(2, "two");
+cache.Put(3, "three");
+cache.TryGet(1, out _);  // access 1 → moves to head
+cache.Put(4, "four");    // evicts 2 (LRU), not 1
+```
+
+### Complexity
+| Operation | Time | Space |
+|-----------|------|-------|
+| Get | O(1) | O(1) |
+| Put | O(1) | O(capacity) |
+| Thread safety | ReaderWriterLockSlim — concurrent reads, exclusive writes | |
+
+---
+
+## 🔴 Netflix: Design a Movie Ticket Booking System
+
+> Extends the BookMyShow concept with Netflix-scale considerations.
+
+### State Machine: Seat Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Available : Show created
+
+    Available --> Locked : selectSeat(userId)\n10 min timer
+
+    Locked --> Available : lockExpired()\nor userCancelled()
+
+    Locked --> PaymentPending : proceedToPayment()
+
+    PaymentPending --> Booked : paymentSuccess()
+    PaymentPending --> Available : paymentFailed()\nor timeout()
+
+    Booked --> Cancelled : cancelBooking()\nbefore show start
+
+    Cancelled --> Available : refundIssued()
+
+    note right of Locked
+        Optimistic lock with
+        RowVersion column
+        prevents double-booking
+    end note
+```
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class Movie {
+        +Id string
+        +Title string
+        +DurationMinutes int
+        +Genre string
+        +Rating string
+    }
+
+    class Show {
+        +Id string
+        +Movie Movie
+        +Screen Screen
+        +StartTime DateTime
+        +ShowSeats List~ShowSeat~
+        +GetAvailableSeats() List~ShowSeat~
+    }
+
+    class Screen {
+        +Id string
+        +Name string
+        +TotalCapacity int
+    }
+
+    class ShowSeat {
+        +Id string
+        +Row char
+        +Number int
+        +Category SeatCategory
+        +Price decimal
+        +Status SeatStatus
+        +LockedByUser string
+        +LockedUntil DateTime
+        +RowVersion byte[]
+        +Lock(userId) void
+        +Confirm() void
+        +Release() void
+    }
+
+    class Booking {
+        +Id string
+        +User User
+        +Show Show
+        +Seats List~ShowSeat~
+        +TotalAmount decimal
+        +Status BookingStatus
+        +Payment Payment
+    }
+
+    class Payment {
+        +Id string
+        +Amount decimal
+        +Method PaymentMethod
+        +TransactionId string
+        +Status PaymentStatus
+    }
+
+    Movie "1" --> "many" Show
+    Show "1" --> "1" Screen
+    Show "1" *-- "many" ShowSeat
+    Booking "1" --> "many" ShowSeat
+    Booking "1" --> "1" Payment
+```
+
+### Concurrency: Optimistic Locking to Prevent Double-Booking
+
+```csharp
+// EF Core optimistic concurrency with RowVersion
+public class ShowSeat
+{
+    public Guid Id { get; init; }
+    public SeatStatus Status { get; set; } = SeatStatus.Available;
+    public Guid? LockedByUser { get; set; }
+    public DateTime? LockedUntil { get; set; }
+
+    [Timestamp]
+    public byte[] RowVersion { get; set; } = null!; // EF Core optimistic lock token
+
+    public void Lock(Guid userId)
+    {
+        if (Status != SeatStatus.Available)
+            throw new SeatNotAvailableException();
+        Status = SeatStatus.Locked;
+        LockedByUser = userId;
+        LockedUntil = DateTime.UtcNow.AddMinutes(10);
+    }
+}
+
+// BookingService handles DbUpdateConcurrencyException
+public async Task<HoldResult> HoldSeatsAsync(Guid showId, List<Guid> seatIds, Guid userId)
+{
+    int retries = 3;
+    while (retries-- > 0)
+    {
+        try
+        {
+            var seats = await _db.ShowSeats
+                .Where(s => seatIds.Contains(s.Id))
+                .ToListAsync();
+
+            foreach (var seat in seats) seat.Lock(userId);
+            await _db.SaveChangesAsync(); // throws DbUpdateConcurrencyException on conflict
+            return BuildHoldResult(seats);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Refresh stale entities and retry
+            await _db.Entry(/* conflicting entity */).ReloadAsync();
+        }
+    }
+    throw new SeatNotAvailableException("Seats were taken by another user. Please reselect.");
+}
+```
+
+---
+
+## 🔵 Meta: Design a Social Graph (Friend/Follow System)
+
+### Directed vs Undirected
+
+| | Friend (undirected) | Follow (directed) |
+|-|---------------------|-------------------|
+| Edge type | Bidirectional (mutual consent) | One-way (A follows B) |
+| Storage | One row per pair | One row per direction |
+| Example | Facebook Friends | Twitter/Instagram Follow |
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class User {
+        +Id string
+        +Name string
+        +Email string
+        +PrivacyLevel PrivacyLevel
+    }
+
+    class UserRelationship {
+        +FromUserId string
+        +ToUserId string
+        +Type RelationType
+        +CreatedAt DateTime
+    }
+
+    class SocialGraph {
+        -adjacencyList Dictionary~string, HashSet~string~~
+        +AddFollow(fromId, toId)
+        +RemoveFollow(fromId, toId)
+        +SendFriendRequest(fromId, toId)
+        +AcceptFriendRequest(fromId, toId)
+        +GetFollowers(userId) List~string~
+        +GetFollowing(userId) List~string~
+        +GetMutualFriends(userA, userB) List~string~
+        +GetPeopleYouMayKnow(userId) List~string~
+    }
+
+    class PrivacyFilter {
+        +CanView(viewerId, targetId, content) bool
+    }
+
+    User "1" --> "many" UserRelationship : has
+    SocialGraph ..> UserRelationship : manages
+    SocialGraph ..> PrivacyFilter : uses
+```
+
+### Core Implementation
+
+```csharp
+public enum RelationType { Follow, Friend, Blocked }
+public enum PrivacyLevel { Public, FriendsOnly, Private }
+
+public class SocialGraph
+{
+    // Directed adjacency list: followerId → set of followeeIds
+    private readonly Dictionary<string, HashSet<string>> _following = new();
+    private readonly Dictionary<string, HashSet<string>> _followers = new();
+    private readonly Dictionary<string, HashSet<string>> _friends = new();
+    private readonly HashSet<(string, string)> _pendingRequests = new();
+
+    public void AddFollow(string fromId, string toId)
+    {
+        _following.GetOrCreate(fromId).Add(toId);
+        _followers.GetOrCreate(toId).Add(fromId);
+    }
+
+    public void RemoveFollow(string fromId, string toId)
+    {
+        _following.GetValueOrDefault(fromId)?.Remove(toId);
+        _followers.GetValueOrDefault(toId)?.Remove(fromId);
+    }
+
+    public void SendFriendRequest(string fromId, string toId) =>
+        _pendingRequests.Add((fromId, toId));
+
+    public void AcceptFriendRequest(string fromId, string toId)
+    {
+        if (!_pendingRequests.Remove((fromId, toId)))
+            throw new InvalidOperationException("No pending request found");
+
+        // Friendship is bidirectional
+        _friends.GetOrCreate(fromId).Add(toId);
+        _friends.GetOrCreate(toId).Add(fromId);
+        // Also follow each other
+        AddFollow(fromId, toId);
+        AddFollow(toId, fromId);
+    }
+
+    // Mutual friends: intersection of friend sets
+    public IEnumerable<string> GetMutualFriends(string userA, string userB)
+    {
+        var friendsA = _friends.GetValueOrDefault(userA) ?? new HashSet<string>();
+        var friendsB = _friends.GetValueOrDefault(userB) ?? new HashSet<string>();
+        return friendsA.Intersect(friendsB);
+    }
+
+    // People You May Know: BFS to degree-2 connections, sorted by mutual friends count
+    public IEnumerable<string> GetPeopleYouMayKnow(string userId, int limit = 10)
+    {
+        var directFriends = _friends.GetValueOrDefault(userId) ?? new HashSet<string>();
+        var suggestions = new Dictionary<string, int>(); // userId → mutual friend count
+
+        foreach (var friend in directFriends)
+        {
+            var friendsOfFriend = _friends.GetValueOrDefault(friend) ?? new HashSet<string>();
+            foreach (var candidate in friendsOfFriend)
+            {
+                if (candidate == userId || directFriends.Contains(candidate)) continue;
+                suggestions[candidate] = suggestions.GetValueOrDefault(candidate) + 1;
+            }
+        }
+
+        return suggestions
+            .OrderByDescending(kv => kv.Value) // most mutual friends first
+            .Take(limit)
+            .Select(kv => kv.Key);
+    }
+
+    public IEnumerable<string> GetFollowers(string userId) =>
+        _followers.GetValueOrDefault(userId) ?? Enumerable.Empty<string>();
+
+    public IEnumerable<string> GetFollowing(string userId) =>
+        _following.GetValueOrDefault(userId) ?? Enumerable.Empty<string>();
+}
+
+// Extension helper
+public static class DictionaryExtensions
+{
+    public static HashSet<string> GetOrCreate(this Dictionary<string, HashSet<string>> dict, string key)
+    {
+        if (!dict.ContainsKey(key)) dict[key] = new HashSet<string>();
+        return dict[key];
+    }
+}
+```
+
+### Design Discussion
+```
+Scale: At Meta scale, adjacency list lives in a distributed graph DB (TAO).
+Privacy: Before returning friends/followers, filter via PrivacyFilter based on user's PrivacyLevel.
+Feed generation: Pull model (fetch on demand) for users with many followees;
+                 Push model (fan-out on write) for celebrities with millions of followers.
+Blocked users: Check blocked list before any graph traversal.
+```
+
+---
+
+## 🚗 Uber: Design a Ride Sharing App (LLD)
+
+### State Machine: Trip Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> TripRequested : riderRequestsRide()
+
+    TripRequested --> DriverAssigned : nearbyDriverAccepts()
+    TripRequested --> Cancelled : noDriverAvailable()\nor riderCancels()
+
+    DriverAssigned --> DriverArrived : driverReachesPickup()
+    DriverAssigned --> Cancelled : driverCancels()\nor riderCancels()
+
+    DriverArrived --> InProgress : riderBoarded()
+
+    InProgress --> Completed : tripEnded()\ndriverEndsRide()
+
+    Completed --> Rated : riderRatesDriver()
+```
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class Rider {
+        +Id string
+        +Name string
+        +Location Location
+        +Rating decimal
+    }
+
+    class Driver {
+        +Id string
+        +Name string
+        +Vehicle Vehicle
+        +Location Location
+        +Rating decimal
+        +IsAvailable bool
+    }
+
+    class Trip {
+        +Id string
+        +Rider Rider
+        +Driver Driver
+        +PickupLocation Location
+        +DropoffLocation Location
+        +Status TripStatus
+        +FareAmount decimal
+        +RequestedAt DateTime
+        +StartedAt DateTime
+        +CompletedAt DateTime
+    }
+
+    class Location {
+        +Latitude double
+        +Longitude double
+        +DistanceTo(other) double
+    }
+
+    class IPricingStrategy {
+        <<interface>>
+        +CalculateFare(trip) decimal
+    }
+
+    class StandardPricing {
+        +CalculateFare(trip) decimal
+    }
+
+    class SurgePricing {
+        -surgeMultiplier decimal
+        +CalculateFare(trip) decimal
+    }
+
+    class PoolPricing {
+        +CalculateFare(trip) decimal
+    }
+
+    class TripService {
+        +RequestRide(rider, pickup, dropoff) Trip
+        +AssignDriver(trip) Driver
+        +UpdateTripStatus(tripId, status)
+        +CompleteTripWithFare(tripId) decimal
+    }
+
+    Rider "1" --> "many" Trip
+    Driver "1" --> "many" Trip
+    Trip o-- Location
+    TripService ..> IPricingStrategy : uses
+    IPricingStrategy <|.. StandardPricing
+    IPricingStrategy <|.. SurgePricing
+    IPricingStrategy <|.. PoolPricing
+```
+
+### Core Implementation — Strategy + Observer
+
+```csharp
+// Pricing Strategy Pattern
+public interface IPricingStrategy
+{
+    decimal CalculateFare(Trip trip);
+    string StrategyName { get; }
+}
+
+public class StandardPricing : IPricingStrategy
+{
+    private const decimal BaseFare = 2.50m;
+    private const decimal PerKm = 1.20m;
+    private const decimal PerMinute = 0.25m;
+    public string StrategyName => "Standard";
+
+    public decimal CalculateFare(Trip trip)
+    {
+        var distance = trip.PickupLocation.DistanceTo(trip.DropoffLocation);
+        var duration = (trip.CompletedAt!.Value - trip.StartedAt!.Value).TotalMinutes;
+        return BaseFare + (decimal)distance * PerKm + (decimal)duration * PerMinute;
+    }
+}
+
+public class SurgePricing : IPricingStrategy
+{
+    private readonly decimal _multiplier;
+    public string StrategyName => $"Surge x{_multiplier}";
+    public SurgePricing(decimal multiplier) => _multiplier = multiplier;
+
+    public decimal CalculateFare(Trip trip) =>
+        new StandardPricing().CalculateFare(trip) * _multiplier;
+}
+
+// Observer Pattern for trip status updates
+public interface ITripObserver
+{
+    Task OnTripStatusChangedAsync(Trip trip, TripStatus newStatus);
+}
+
+public class RiderNotificationObserver : ITripObserver
+{
+    public async Task OnTripStatusChangedAsync(Trip trip, TripStatus newStatus)
+    {
+        // Send push notification to rider
+        await Task.CompletedTask;
+        Console.WriteLine($"[Push] Trip {trip.Id}: {newStatus} — notifying {trip.Rider.Name}");
+    }
+}
+
+public class TripService
+{
+    private readonly List<ITripObserver> _observers = new();
+    private readonly IPricingStrategy _pricing;
+
+    public TripService(IPricingStrategy pricing) => _pricing = pricing;
+
+    public void Subscribe(ITripObserver observer) => _observers.Add(observer);
+
+    public async Task<TripStatus> UpdateTripStatusAsync(Trip trip, TripStatus newStatus)
+    {
+        trip.Status = newStatus;
+        if (newStatus == TripStatus.InProgress) trip.StartedAt = DateTime.UtcNow;
+        if (newStatus == TripStatus.Completed)
+        {
+            trip.CompletedAt = DateTime.UtcNow;
+            trip.FareAmount = _pricing.CalculateFare(trip);
+        }
+
+        // Notify all observers (push notifications, analytics, payment trigger, etc.)
+        foreach (var observer in _observers)
+            await observer.OnTripStatusChangedAsync(trip, newStatus);
+
+        return newStatus;
+    }
+
+    // Nearest-driver assignment (simplified: closest available driver)
+    public Driver? AssignDriver(Trip trip, IEnumerable<Driver> availableDrivers)
+    {
+        return availableDrivers
+            .Where(d => d.IsAvailable)
+            .OrderBy(d => d.Location.DistanceTo(trip.PickupLocation))
+            .FirstOrDefault();
+    }
+}
+
+public record Location(double Latitude, double Longitude)
+{
+    // Haversine formula (simplified Euclidean for LLD purposes)
+    public double DistanceTo(Location other)
+    {
+        var dLat = other.Latitude - Latitude;
+        var dLon = other.Longitude - Longitude;
+        return Math.Sqrt(dLat * dLat + dLon * dLon) * 111; // ~km
+    }
+}
+```
+
+---
+
+## 🏨 General (FAANG): Design a Hotel Booking System
+
+### Requirements
+- Browse hotels, view rooms by type (Single, Double, Suite)
+- Check availability for a date range
+- Double booking prevention (pessimistic lock / DB constraint)
+- Seasonal pricing (Strategy pattern)
+- Cancellation policy
+- Guest reviews
+
+### Full C# Implementation
+
+```csharp
+public enum RoomType { Single, Double, Deluxe, Suite }
+public enum BookingStatus { Confirmed, Cancelled, CheckedIn, CheckedOut }
+
+// Entities
+public class Hotel
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public string Name { get; init; } = "";
+    public string Location { get; init; } = "";
+    public List<Room> Rooms { get; } = new();
+    public List<Review> Reviews { get; } = new();
+    public double AverageRating => Reviews.Any() ? Reviews.Average(r => r.Rating) : 0;
+}
+
+public class Room
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public Guid HotelId { get; init; }
+    public int RoomNumber { get; init; }
+    public RoomType Type { get; init; }
+    public int MaxOccupancy { get; init; }
+    public decimal BasePrice { get; init; }
+}
+
+public class Booking
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public Guid RoomId { get; init; }
+    public Guid GuestId { get; init; }
+    public DateTime CheckIn { get; init; }
+    public DateTime CheckOut { get; init; }
+    public decimal TotalPrice { get; set; }
+    public BookingStatus Status { get; set; } = BookingStatus.Confirmed;
+    public DateTime BookedAt { get; init; } = DateTime.UtcNow;
+
+    public int Nights => (CheckOut - CheckIn).Days;
+
+    public bool OverlapsWith(DateTime checkIn, DateTime checkOut) =>
+        CheckIn < checkOut && CheckOut > checkIn;
+}
+
+public class Review
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public Guid HotelId { get; init; }
+    public Guid GuestId { get; init; }
+    public int Rating { get; init; } // 1-5
+    public string Comment { get; init; } = "";
+    public DateTime PostedAt { get; init; } = DateTime.UtcNow;
+}
+
+// Pricing Strategy
+public interface IPricingStrategy
+{
+    decimal CalculateTotal(Room room, DateTime checkIn, DateTime checkOut);
+}
+
+public class SeasonalPricingStrategy : IPricingStrategy
+{
+    private static readonly HashSet<int> PeakMonths = new() { 6, 7, 8, 12 };
+
+    public decimal CalculateTotal(Room room, DateTime checkIn, DateTime checkOut)
+    {
+        decimal total = 0;
+        for (var date = checkIn; date < checkOut; date = date.AddDays(1))
+        {
+            var multiplier = PeakMonths.Contains(date.Month) ? 1.5m : 1.0m;
+            total += room.BasePrice * multiplier;
+        }
+        return Math.Round(total, 2);
+    }
+}
+
+public class FlatRatePricingStrategy : IPricingStrategy
+{
+    public decimal CalculateTotal(Room room, DateTime checkIn, DateTime checkOut) =>
+        room.BasePrice * (checkOut - checkIn).Days;
+}
+
+// Booking Service
+public interface IBookingRepository
+{
+    Task<List<Booking>> GetActiveBookingsForRoomAsync(Guid roomId, DateTime checkIn, DateTime checkOut);
+    Task AddAsync(Booking booking);
+    Task<Booking?> GetByIdAsync(Guid bookingId);
+    Task UpdateAsync(Booking booking);
+}
+
+public class HotelBookingService
+{
+    private readonly IBookingRepository _bookings;
+    private readonly IPricingStrategy _pricing;
+    private readonly SemaphoreSlim _bookingLock = new(1, 1); // prevent race conditions
+
+    public HotelBookingService(IBookingRepository bookings, IPricingStrategy pricing)
+    {
+        _bookings = bookings;
+        _pricing = pricing;
+    }
+
+    public async Task<bool> IsRoomAvailableAsync(Guid roomId, DateTime checkIn, DateTime checkOut)
+    {
+        var conflicts = await _bookings.GetActiveBookingsForRoomAsync(roomId, checkIn, checkOut);
+        return !conflicts.Any();
+    }
+
+    public async Task<Booking> BookRoomAsync(Room room, Guid guestId, DateTime checkIn, DateTime checkOut)
+    {
+        if (checkIn >= checkOut) throw new ArgumentException("Check-out must be after check-in");
+        if (checkIn < DateTime.Today) throw new ArgumentException("Cannot book past dates");
+
+        // Pessimistic lock: only one booking attempt per room at a time
+        await _bookingLock.WaitAsync();
+        try
+        {
+            var conflicts = await _bookings.GetActiveBookingsForRoomAsync(room.Id, checkIn, checkOut);
+            if (conflicts.Any())
+                throw new RoomNotAvailableException($"Room {room.RoomNumber} is not available for the selected dates.");
+
+            var booking = new Booking
+            {
+                RoomId = room.Id,
+                GuestId = guestId,
+                CheckIn = checkIn,
+                CheckOut = checkOut,
+                TotalPrice = _pricing.CalculateTotal(room, checkIn, checkOut)
+            };
+
+            await _bookings.AddAsync(booking);
+            return booking;
+        }
+        finally
+        {
+            _bookingLock.Release();
+        }
+    }
+
+    public async Task CancelBookingAsync(Guid bookingId, Guid requestingGuestId)
+    {
+        var booking = await _bookings.GetByIdAsync(bookingId)
+            ?? throw new NotFoundException("Booking not found");
+
+        if (booking.GuestId != requestingGuestId)
+            throw new UnauthorizedAccessException("Cannot cancel another guest's booking");
+
+        if (booking.Status != BookingStatus.Confirmed)
+            throw new InvalidOperationException($"Cannot cancel booking in status: {booking.Status}");
+
+        // Cancellation policy: full refund if > 48 hours before check-in
+        var hoursUntilCheckIn = (booking.CheckIn - DateTime.UtcNow).TotalHours;
+        if (hoursUntilCheckIn < 48)
+            throw new InvalidOperationException("Cancellations must be made at least 48 hours before check-in");
+
+        booking.Status = BookingStatus.Cancelled;
+        await _bookings.UpdateAsync(booking);
+    }
+}
+```
+
+---
+
+## ♟️ General: Design a Chess Game
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class Piece {
+        <<abstract>>
+        +Color Color
+        +Position Square
+        +GetValidMoves(board) IEnumerable~Square~
+        +CanMoveTo(target, board) bool
+    }
+
+    class King {
+        +GetValidMoves(board) IEnumerable~Square~
+        +HasMoved bool
+    }
+    class Queen {
+        +GetValidMoves(board) IEnumerable~Square~
+    }
+    class Rook {
+        +GetValidMoves(board) IEnumerable~Square~
+        +HasMoved bool
+    }
+    class Bishop {
+        +GetValidMoves(board) IEnumerable~Square~
+    }
+    class Knight {
+        +GetValidMoves(board) IEnumerable~Square~
+    }
+    class Pawn {
+        +GetValidMoves(board) IEnumerable~Square~
+        +EnPassantEligible bool
+    }
+
+    class Board {
+        -grid Piece?[8,8]
+        +GetPiece(square) Piece
+        +SetPiece(piece, square)
+        +MovePiece(from, to)
+        +AllPieces(color) IEnumerable~Piece~
+    }
+
+    class Game {
+        +Board Board
+        +Players Player[]
+        +CurrentPlayer Player
+        +MakeMove(from, to) MoveResult
+        +IsInCheck(color) bool
+        +IsCheckmate(color) bool
+    }
+
+    class Player {
+        +Name string
+        +Color Color
+    }
+
+    Piece <|-- King
+    Piece <|-- Queen
+    Piece <|-- Rook
+    Piece <|-- Bishop
+    Piece <|-- Knight
+    Piece <|-- Pawn
+    Game "1" *-- "1" Board
+    Game "1" *-- "2" Player
+    Board o-- Piece
+```
+
+> Full piece implementation already covered in section 10.5. Key design points:
+> - Each piece owns its move validation (polymorphism / Template Method concept)
+> - `Board` is a pure data structure — no game logic
+> - `Game` handles turn management, check detection, and checkmate
+> - Special moves (castling, en passant, pawn promotion) handled in respective piece classes
+
+---
+
+## 🅿️ General: Design a Parking Lot (Extended — Multi-Floor + Pricing)
+
+> Base implementation covered in section 7.1. This extends it with multi-floor routing, pricing strategies, EV spots, and ANPR entry/exit.
+
+### Extensions
+
+```csharp
+// Extended SpotType
+public enum SpotType { Compact, Large, Handicapped, EV, Motorcycle }
+
+// Multi-floor routing: prefer ground floor, then ascending
+public class MultiFloorParkingLot
+{
+    private readonly List<ParkingFloor> _floors;
+    private readonly IPricingStrategy _pricing;
+
+    public MultiFloorParkingLot(List<ParkingFloor> floors, IPricingStrategy pricing)
+    {
+        _floors = floors;
+        _pricing = pricing;
+    }
+
+    public (ParkingFloor floor, ParkingSpot spot)? FindSpot(VehicleType vehicleType)
+    {
+        // Prefer lower floors (faster exit)
+        foreach (var floor in _floors.OrderBy(f => f.FloorNumber))
+        {
+            var spot = floor.FindAvailableSpot(vehicleType);
+            if (spot != null) return (floor, spot);
+        }
+        return null;
+    }
+}
+
+// Pricing strategies
+public class HourlyPricingStrategy : IPricingStrategy
+{
+    private readonly Dictionary<SpotType, decimal> _rates = new()
+    {
+        [SpotType.Compact]    = 2.00m,
+        [SpotType.Large]      = 3.00m,
+        [SpotType.EV]         = 4.00m, // EV includes charging cost
+        [SpotType.Motorcycle] = 1.00m
+    };
+
+    public decimal Calculate(Ticket ticket)
+    {
+        var hours = Math.Ceiling((ticket.ExitTime!.Value - ticket.EntryTime).TotalHours);
+        return (decimal)hours * _rates.GetValueOrDefault(ticket.Spot.Type, 2.00m);
+    }
+}
+
+public class OvernightFlatRateStrategy : IPricingStrategy
+{
+    private const decimal OvernightRate = 15.00m;
+
+    public decimal Calculate(Ticket ticket)
+    {
+        var duration = ticket.ExitTime!.Value - ticket.EntryTime;
+        // Overnight: > 8 hours = flat rate
+        return duration.TotalHours > 8 ? OvernightRate : new HourlyPricingStrategy().Calculate(ticket);
+    }
+}
+
+// ANPR (Automatic Number Plate Recognition) entry/exit
+public class ANPRGate
+{
+    private readonly MultiFloorParkingLot _lot;
+    private readonly Dictionary<string, Ticket> _activeTickets = new();
+
+    public Ticket? VehicleEntered(string licensePlate, VehicleType vehicleType)
+    {
+        var result = _lot.FindSpot(vehicleType);
+        if (result == null) return null; // lot full
+
+        var (floor, spot) = result;
+        spot.Occupy();
+        var ticket = new Ticket(licensePlate, spot);
+        _activeTickets[licensePlate] = ticket;
+        Console.WriteLine($"[ANPR] {licensePlate} → Floor {floor.FloorNumber}, Spot {spot.Id}");
+        return ticket;
+    }
+
+    public decimal VehicleExited(string licensePlate)
+    {
+        if (!_activeTickets.TryGetValue(licensePlate, out var ticket))
+            throw new InvalidOperationException("No active ticket for this vehicle");
+
+        ticket.ExitTime = DateTime.UtcNow;
+        ticket.Spot.Vacate();
+        _activeTickets.Remove(licensePlate);
+
+        var fare = _lot.CalculateFare(ticket);
+        Console.WriteLine($"[ANPR] {licensePlate} exited. Fare: ${fare:F2}");
+        return fare;
+    }
+}
+```
+
+### Design Points Added Over Base
+```
+Multi-floor routing: Prefer lowest floor → minimize walking distance for customers.
+EV charging spots: Separate SpotType.EV with higher rate (includes charging).
+ANPR: Auto-detect plate on entry/exit → no physical ticket needed.
+Pricing: Strategy pattern — swap HourlyPricing for OvernightFlatRate or SeasonalPricing.
+Reservations: Add ReservedSpot concept — spot held for user with booking confirmation.
+```
+

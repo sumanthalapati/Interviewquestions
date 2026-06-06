@@ -4656,3 +4656,486 @@ flowchart LR
 ```
 
 ---
+
+---
+
+# 🏢 FAANG Object-Oriented Design Questions
+
+> These questions test how OOP principles apply at the scale and architectural context of FAANG companies. Expect system-level thinking, not just pattern recitation.
+
+---
+
+## FAANG-OOP-1 — How does Amazon's SOA/microservices architecture apply OOP principles?
+
+**Answer:**
+Amazon's famous 2002 "API Mandate" (Jeff Bezos) required every team to expose data and functionality through well-defined service interfaces — no direct database access, no back-channel communication. This is OOP's Encapsulation and the Dependency Inversion Principle applied at the infrastructure level.
+
+**OOP principles at service scale:**
+
+| OOP Principle | Microservice Equivalent |
+|---------------|------------------------|
+| **Encapsulation** | Each service owns its data store; no other service accesses its DB directly |
+| **Abstraction** | Public API is the contract; internal implementation can change freely |
+| **Single Responsibility** | One service = one bounded context (orders, inventory, payments) |
+| **Open/Closed** | Add new endpoints, never break existing ones (additive-only API changes) |
+| **Dependency Inversion** | Services depend on each other's API contracts, not concrete implementations |
+
+**The Bezos API Mandate — applied OOP:**
+```
+Before (monolith — OOP violation):
+  OrderService.cs accesses InventoryRepository directly
+  → tight coupling, impossible to deploy independently
+
+After (SOA — OOP applied at scale):
+  OrderService calls InventoryService.CheckStock(productId) via HTTP/gRPC
+  → encapsulated, contract-based, independently deployable
+```
+
+**Additive API changes (Open/Closed at API level):**
+```csharp
+// v1 contract — never change field names or remove fields
+public record OrderResponse(string OrderId, string Status, decimal Total);
+
+// v2 — ADD new fields, never remove (consumers ignore unknown fields)
+public record OrderResponseV2(string OrderId, string Status, decimal Total,
+                               string? TrackingNumber,     // new — nullable ✅
+                               DateTimeOffset? EstimatedDelivery); // new — nullable ✅
+
+// ❌ Breaking change — renaming 'Status' to 'OrderStatus' breaks all consumers
+// ✅ Additive change — adding TrackingNumber doesn't break existing consumers
+```
+
+**Domain-Driven Design boundary (Encapsulation):**
+```csharp
+// Each service is an encapsulated object — public interface only
+public interface IInventoryService
+{
+    Task<StockLevel> CheckStockAsync(string productId, CancellationToken ct);
+    Task<ReservationId> ReserveStockAsync(string productId, int quantity, CancellationToken ct);
+    Task ReleaseReservationAsync(ReservationId reservationId, CancellationToken ct);
+}
+
+// OrderService depends on IInventoryService — Dependency Inversion ✅
+// It has NO idea if Inventory stores data in DynamoDB, RDS, or Redis — Abstraction ✅
+public class OrderService
+{
+    private readonly IInventoryService _inventory;
+    private readonly IPaymentService _payment;
+    private readonly INotificationService _notifications;
+
+    public OrderService(IInventoryService inventory, IPaymentService payment,
+                        INotificationService notifications)
+    {
+        _inventory = inventory;
+        _payment = payment;
+        _notifications = notifications;
+    }
+
+    public async Task<OrderResult> PlaceOrderAsync(PlaceOrderRequest request, CancellationToken ct)
+    {
+        var stock = await _inventory.CheckStockAsync(request.ProductId, ct);
+        if (stock.Available < request.Quantity)
+            return OrderResult.Fail("Insufficient stock");
+
+        var reservation = await _inventory.ReserveStockAsync(request.ProductId, request.Quantity, ct);
+        var payment = await _payment.ChargeAsync(request.PaymentToken, request.Total, ct);
+
+        if (!payment.Success)
+        {
+            await _inventory.ReleaseReservationAsync(reservation, ct);
+            return OrderResult.Fail("Payment failed");
+        }
+
+        await _notifications.SendConfirmationAsync(request.CustomerId, payment.TransactionId, ct);
+        return OrderResult.Success(payment.TransactionId);
+    }
+}
+```
+
+---
+
+## FAANG-OOP-2 — How does Google's Protocol Buffers system apply Interface Segregation? (Google)
+
+**Answer:**
+Protocol Buffers (protobuf) is Google's contract-first interface definition language used for all internal and external gRPC services. Its design enforces Interface Segregation Principle (ISP) structurally — services only expose the methods their consumers need, and message schemas are carefully segregated by concern.
+
+**Contract-first = Interface Segregation by design:**
+```protobuf
+// ❌ Violates ISP — fat service with unrelated operations
+service GodService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc CreateOrder(CreateOrderRequest) returns (Order);
+  rpc ProcessPayment(PaymentRequest) returns (PaymentResult);
+  rpc SendEmail(EmailRequest) returns (EmailResult);
+}
+
+// ✅ Segregated services — each has a single clear responsibility
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (User);
+}
+
+service OrderService {
+  rpc CreateOrder(CreateOrderRequest) returns (Order);
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+}
+```
+
+**Backward/forward compatibility rules (field numbers are sacred):**
+```protobuf
+// UserProfile — field NUMBERS are the identity, not names
+message UserProfile {
+  string user_id = 1;         // NEVER renumber or reuse field 1
+  string email = 2;
+  string display_name = 3;
+  // Field 4 was 'phone_number' — deprecated, NEVER reuse number 4
+  reserved 4;
+  reserved "phone_number";    // documents why 4 is reserved
+
+  // New fields always get NEW numbers — backward compatible ✅
+  string avatar_url = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+```
+
+**Why field number reuse breaks ISP/compatibility:**
+- Old client receives message with field 4 = they read it as deleted `phone_number` type → data corruption
+- New client receives message without field 5 = they see zero value (proto3 defaults) → safe, backward compatible
+- This is Open/Closed at the wire protocol level: **fields only added, never removed or reused**
+
+**gRPC service definitions as precise interfaces:**
+```csharp
+// Generated C# from .proto — ISP enforced at the type level
+public abstract class UserService : ServerServiceDefinition
+{
+    public abstract Task<User> GetUser(GetUserRequest request, ServerCallContext context);
+    public abstract Task<ListUsersResponse> ListUsers(ListUsersRequest request, ServerCallContext context);
+}
+
+// Implementing service — MUST implement all declared methods (no partial implementations)
+public class UserServiceImpl : UserService.UserServiceBase
+{
+    public override async Task<User> GetUser(GetUserRequest request, ServerCallContext context)
+    {
+        // Only user concerns here — no payment, order, email logic (ISP ✅)
+        return await _userRepository.FindByIdAsync(request.UserId, context.CancellationToken);
+    }
+}
+```
+
+---
+
+## FAANG-OOP-3 — Design the Observer pattern for a distributed event system (Meta/Amazon scale)
+
+**Answer:**
+In-process Observer (GoF pattern) and distributed pub/sub solve the same logical problem but with fundamentally different guarantees. At FAANG scale, you typically need both: in-process for low-latency domain events within a service, and Kafka/SQS for cross-service event delivery.
+
+**In-process Observer (C# — IObservable/IObserver):**
+```csharp
+// Using Rx.NET (System.Reactive) — production-grade IObservable implementation
+public class OrderService
+{
+    private readonly Subject<OrderPlacedEvent> _orderPlaced = new();
+
+    // Expose as IObservable — callers subscribe, never push
+    public IObservable<OrderPlacedEvent> OrderPlaced => _orderPlaced.AsObservable();
+
+    public async Task<OrderResult> PlaceOrderAsync(PlaceOrderRequest request)
+    {
+        // ... place order logic ...
+        _orderPlaced.OnNext(new OrderPlacedEvent(orderId, request.CustomerId, request.Total));
+        return OrderResult.Success(orderId);
+    }
+}
+
+// Observers register for specific events
+public class NotificationObserver : IObserver<OrderPlacedEvent>
+{
+    public void OnNext(OrderPlacedEvent e) =>
+        Console.WriteLine($"Sending confirmation to customer {e.CustomerId}");
+
+    public void OnError(Exception ex) => Console.WriteLine($"Error: {ex.Message}");
+    public void OnCompleted() => Console.WriteLine("Stream completed");
+}
+
+// Wiring (DI / startup)
+var svc = new OrderService();
+using var subscription = svc.OrderPlaced
+    .Where(e => e.Total > 1000)              // Rx filtering
+    .Subscribe(new NotificationObserver());   // automatic unsubscribe via IDisposable
+```
+
+**Distributed Observer with Kafka (at-scale):**
+```csharp
+// Producer — publish domain events as Kafka messages
+public class KafkaOrderEventPublisher : IOrderEventPublisher
+{
+    private readonly IProducer<string, string> _producer;
+
+    public async Task PublishOrderPlacedAsync(OrderPlacedEvent evt)
+    {
+        var message = new Message<string, string>
+        {
+            Key = evt.OrderId,   // partition key — all events for same order go to same partition
+            Value = JsonSerializer.Serialize(evt)
+        };
+        await _producer.ProduceAsync("order.placed", message);
+    }
+}
+
+// Consumer — each consumer group gets its own copy (fan-out)
+public class EmailConsumer : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _consumer.Subscribe("order.placed");
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var result = _consumer.Consume(stoppingToken);
+            var evt = JsonSerializer.Deserialize<OrderPlacedEvent>(result.Message.Value)!;
+            await _emailService.SendConfirmationAsync(evt.CustomerId, evt.OrderId, stoppingToken);
+            _consumer.Commit(result); // manual commit — at-least-once delivery
+        }
+    }
+}
+```
+
+**Back-pressure handling (slow consumers):**
+- Kafka retains messages in the log — slow consumers fall behind but don't drop messages
+- Consumer lag monitoring alerts when a consumer group is too far behind
+- Dead Letter Topic (DLT) for messages that fail processing after N retries
+
+```mermaid
+flowchart LR
+    subgraph IN_PROCESS["In-Process Observer (same service)"]
+        ORD["OrderService\nSubject&lt;OrderPlacedEvent&gt;"] -->|"OnNext()"| N1["NotificationObserver"]
+        ORD -->|"OnNext()"| N2["AuditObserver"]
+        ORD -->|"OnNext()"| N3["AnalyticsObserver"]
+    end
+
+    subgraph DISTRIBUTED["Distributed Observer (cross-service)"]
+        PROD["OrderService\n(Kafka Producer)"] -->|"order.placed topic"| KAFKA["Kafka\n(durable log)"]
+        KAFKA -->|"Consumer Group A"| EMAIL["Email Service"]
+        KAFKA -->|"Consumer Group B"| INVENTORY["Inventory Service"]
+        KAFKA -->|"Consumer Group C"| ANALYTICS["Analytics Pipeline"]
+    end
+
+    style ORD fill:#1565c0,color:#fff
+    style KAFKA fill:#e65100,color:#fff
+```
+
+---
+
+## FAANG-OOP-4 — How does Netflix use the Null Object pattern to achieve resilience? (Netflix)
+
+**Answer:**
+Netflix's microservices architecture operates under the assumption that any dependency can fail at any moment. Instead of returning `null` (and forcing every caller to null-check) or throwing exceptions (and degrading the user experience), they return **Null Objects** — implementations that provide safe, reasonable defaults silently.
+
+**Classic Null Object vs exception vs null:**
+```csharp
+// ❌ Returning null — every caller must null-check
+public interface IRecommendationService
+{
+    IReadOnlyList<Recommendation> GetRecommendations(string userId);
+}
+
+public class RecommendationServiceClient : IRecommendationService
+{
+    public IReadOnlyList<Recommendation> GetRecommendations(string userId)
+    {
+        try { return _httpClient.Get<List<Recommendation>>($"/recommendations/{userId}"); }
+        catch { return null!; } // ❌ caller will crash on .Count or foreach
+    }
+}
+
+// Caller — defensive but noisy
+var recs = service.GetRecommendations(userId);
+if (recs != null) // ❌ null check everywhere
+    foreach (var rec in recs) { /* ... */ }
+```
+
+✅ **Null Object pattern — safe fallback, no null propagation:**
+```csharp
+// Null Object implementation — returns empty/default data silently
+public class NullRecommendationService : IRecommendationService
+{
+    // Returns trending/popular content as a safe fallback
+    private static readonly IReadOnlyList<Recommendation> _fallback =
+        new List<Recommendation>
+        {
+            new("trending_1", "Popular Show 1", RecommendationType.Trending),
+            new("trending_2", "Popular Show 2", RecommendationType.Trending),
+        };
+
+    public IReadOnlyList<Recommendation> GetRecommendations(string userId) => _fallback; // ✅
+}
+
+// Circuit breaker — return Null Object when circuit is open
+public class RecommendationServiceWithFallback : IRecommendationService
+{
+    private readonly IRecommendationService _real;
+    private readonly IRecommendationService _null = new NullRecommendationService();
+    private readonly CircuitBreaker _breaker;
+
+    public IReadOnlyList<Recommendation> GetRecommendations(string userId)
+    {
+        if (_breaker.IsOpen) return _null.GetRecommendations(userId); // Null Object ✅
+
+        try
+        {
+            var result = _real.GetRecommendations(userId);
+            _breaker.RecordSuccess();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _breaker.RecordFailure();
+            return _null.GetRecommendations(userId); // ✅ degrade gracefully
+        }
+    }
+}
+
+// Caller — NO null checks needed. The contract is always fulfilled.
+var recs = service.GetRecommendations(userId);
+foreach (var rec in recs) // ✅ always works — might be trending fallback, user doesn't know
+    RenderCard(rec);
+```
+
+**Null Object vs Maybe/Option monad:**
+```csharp
+// Option<T> (functional approach — forces caller to handle empty case)
+Option<IReadOnlyList<Recommendation>> result = service.TryGetRecommendations(userId);
+result.Match(
+    some: recs => recs.ForEach(RenderCard),
+    none: () => RenderTrending() // explicit — caller decides fallback
+);
+
+// Null Object (OOP approach — hides failure behind contract)
+// Caller never knows about the failure — appropriate when fallback is universal
+```
+
+The key difference: **Null Object** makes the degraded behavior invisible to the caller (Netflix's philosophy — always show something). **Option/Maybe** makes the absence explicit and forces the caller to decide (appropriate when fallback logic varies by call site).
+
+---
+
+## FAANG-OOP-5 — Explain the Flyweight pattern and where FAANG companies use it
+
+**Answer:**
+The Flyweight pattern reduces memory by sharing common (intrinsic) state across many objects. Each flyweight stores only the immutable shared data; variable (extrinsic) data is passed in at runtime by the caller.
+
+**Real-world FAANG usage:**
+- **.NET/JVM string interning** — `string.Intern()` / `String.intern()` — identical strings share a single object in the string pool (the JVM/CLR are automatic flyweight factories for string literals)
+- **Browser DOM text nodes** — browsers pool text node objects where possible
+- **Chrome V8 hidden classes** — all objects with the same property layout share one hidden class object
+- **Game engines** — thousands of terrain tiles share one "Grass" or "Stone" flyweight object; only position is extrinsic
+
+**C# implementation — character rendering (classic example):**
+```csharp
+// Intrinsic state — shared, immutable
+public class CharacterStyle
+{
+    public string FontName { get; }
+    public int FontSize { get; }
+    public bool IsBold { get; }
+    public ConsoleColor Color { get; }
+
+    public CharacterStyle(string fontName, int fontSize, bool isBold, ConsoleColor color)
+    {
+        FontName = fontName; FontSize = fontSize; IsBold = isBold; Color = color;
+    }
+
+    // Render — extrinsic state (position, actual char) passed in by caller
+    public void Render(char character, int x, int y)
+    {
+        Console.SetCursorPosition(x, y);
+        Console.ForegroundColor = Color;
+        Console.Write(character);
+        Console.ResetColor();
+    }
+}
+
+// Flyweight Factory — ensures style objects are shared, not duplicated
+public class CharacterStyleFactory
+{
+    private readonly Dictionary<string, CharacterStyle> _styles = new();
+
+    public CharacterStyle GetStyle(string fontName, int fontSize, bool isBold, ConsoleColor color)
+    {
+        var key = $"{fontName}|{fontSize}|{isBold}|{color}";
+        if (!_styles.TryGetValue(key, out var style))
+        {
+            style = new CharacterStyle(fontName, fontSize, isBold, color);
+            _styles[key] = style; // cache — created once, reused by all characters
+        }
+        return style; // ✅ shared instance
+    }
+}
+
+// Character — extrinsic state only (position + value)
+public class Character
+{
+    public char Value { get; }
+    public int X { get; }
+    public int Y { get; }
+    private readonly CharacterStyle _style; // shared flyweight reference
+
+    public Character(char value, int x, int y, CharacterStyle style)
+    {
+        Value = value; X = x; Y = y; _style = style;
+    }
+
+    public void Render() => _style.Render(Value, X, Y);
+}
+
+// Usage — 10,000 characters, but only 3 style objects
+var factory = new CharacterStyleFactory();
+var normalStyle = factory.GetStyle("Arial", 12, false, ConsoleColor.White);
+var boldStyle   = factory.GetStyle("Arial", 12, true,  ConsoleColor.White);
+var headingStyle = factory.GetStyle("Arial", 18, true, ConsoleColor.Yellow);
+
+var document = new List<Character>();
+for (int i = 0; i < 10000; i++)
+{
+    // Each char has unique position (extrinsic), but shares style object (intrinsic)
+    document.Add(new Character('A', i % 80, i / 80, normalStyle)); // all share ONE normalStyle
+}
+// Memory: 10,000 Character objects + 3 CharacterStyle objects (not 10,000!)
+```
+
+**When NOT to use Flyweight:**
+- When objects don't share enough intrinsic state to justify the factory complexity
+- When extrinsic state is so large it negates the memory savings
+- When object creation is rare (premature optimization)
+- When the factory's dictionary lookup cost exceeds allocation cost
+
+```mermaid
+classDiagram
+    class CharacterStyleFactory {
+        -Dictionary~string, CharacterStyle~ _styles
+        +GetStyle(fontName, fontSize, isBold, color) CharacterStyle
+    }
+
+    class CharacterStyle {
+        +string FontName
+        +int FontSize
+        +bool IsBold
+        +ConsoleColor Color
+        +Render(char, x, y) void
+    }
+
+    class Character {
+        +char Value
+        +int X
+        +int Y
+        -CharacterStyle _style
+        +Render() void
+    }
+
+    CharacterStyleFactory --> CharacterStyle : creates and caches
+    Character --> CharacterStyle : shared reference (flyweight)
+    note for CharacterStyle "Intrinsic state — shared\n(1 instance per unique style)"
+    note for Character "Extrinsic state — unique\n(1 instance per character)"
+```
+

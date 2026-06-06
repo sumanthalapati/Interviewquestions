@@ -3000,3 +3000,384 @@ type UnpackPromise<T> = T extends Promise<infer U> ? U : T;
 type Result = UnpackPromise<Promise<string>>; // string
 ```
 
+
+---
+
+# 🏢 FAANG TypeScript & Type System Questions
+
+> These questions test deep knowledge of TypeScript's type system, compiler internals, and how to leverage types for correctness at scale — commonly asked at Microsoft, Google, and Meta.
+
+---
+
+## FAANG-TS-1 — How does TypeScript's structural type system differ from nominal typing? (Microsoft/Google)
+
+**Answer:**
+TypeScript uses **structural typing** (also called "duck typing + static checks"): two types are compatible if they have the same shape — the same set of properties and method signatures — regardless of their declared names. This is in contrast to **nominal typing** (C#, Java, Swift) where two types are compatible only if they share a declared inheritance relationship, even if their shapes are identical.
+
+**Structural typing in practice:**
+```typescript
+interface Point2D { x: number; y: number; }
+interface Vector2D { x: number; y: number; } // same shape
+
+function render(p: Point2D) { /* ... */ }
+
+const v: Vector2D = { x: 1, y: 2 };
+render(v); // ✅ TypeScript: compatible shapes — this works!
+// In Java/C# this would be a compile error — Vector2D is not a Point2D
+```
+
+**Why structural typing is more flexible for large codebases:**
+- Libraries can define local types that are compatible with external types without explicit `implements`
+- Easier to integrate third-party code without wrapping everything
+- Enables structural subtyping — a type with extra properties is assignable to a type with fewer
+
+**Branding / opaque types for nominal-like behavior:**
+```typescript
+// Problem: string-based IDs are structurally identical
+type UserId = string;
+type OrderId = string;
+
+function getUser(id: UserId) { /* ... */ }
+declare const orderId: OrderId;
+getUser(orderId); // ✅ TypeScript allows this — same shape! But logically wrong ❌
+
+// Solution: Branded types (nominal simulation)
+type Brand<T, TBrand> = T & { readonly __brand: TBrand };
+type UserId  = Brand<string, 'UserId'>;
+type OrderId = Brand<string, 'OrderId'>;
+
+function createUserId(id: string): UserId   { return id as UserId; }
+function createOrderId(id: string): OrderId { return id as OrderId; }
+
+function getUser(id: UserId) { /* ... */ }
+
+const userId  = createUserId('usr_123');
+const orderId = createOrderId('ord_456');
+
+getUser(userId);  // ✅ correct
+getUser(orderId); // ❌ Type 'OrderId' is not assignable to type 'UserId' — compile error!
+getUser('raw-string'); // ❌ must go through constructor ✅
+```
+
+| Aspect | Structural (TypeScript) | Nominal (Java/C#) |
+|--------|------------------------|-------------------|
+| Compatibility based on | Shape (properties/methods) | Declared name / hierarchy |
+| Flexibility | High — easy third-party integration | Lower — explicit `implements` required |
+| Safety for domain types | Weaker (use branding) | Strong by default |
+| Refactoring | Easier — rename doesn't break shape | Harder — rename propagates |
+
+---
+
+## FAANG-TS-2 — How do you design a type-safe event system in TypeScript? (Microsoft/Meta)
+
+**Answer:**
+A type-safe event emitter uses generics and discriminated unions to ensure:
+- You can only emit events with the correct payload type
+- Listeners are typed to receive the correct payload
+- Registering a listener for a non-existent event is a compile error
+
+```typescript
+// ─── Define the event map ───────────────────────────────────────
+interface AppEvents {
+  'user:login':   { userId: string; timestamp: Date };
+  'user:logout':  { userId: string };
+  'cart:add':     { productId: string; quantity: number };
+  'cart:remove':  { productId: string };
+  'error':        { code: number; message: string };
+}
+
+// ─── Type-safe EventEmitter ────────────────────────────────────
+type EventHandler<TPayload> = (payload: TPayload) => void;
+
+class TypedEventEmitter<TEvents extends Record<string, unknown>> {
+  private listeners = new Map<keyof TEvents, Set<EventHandler<unknown>>>();
+
+  on<K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): () => void {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event)!.add(handler as EventHandler<unknown>);
+    // Return unsubscribe function
+    return () => this.off(event, handler);
+  }
+
+  off<K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): void {
+    this.listeners.get(event)?.delete(handler as EventHandler<unknown>);
+  }
+
+  emit<K extends keyof TEvents>(event: K, payload: TEvents[K]): void {
+    this.listeners.get(event)?.forEach(handler => handler(payload));
+  }
+
+  once<K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): void {
+    const wrapper: EventHandler<TEvents[K]> = (payload) => {
+      handler(payload);
+      this.off(event, wrapper);
+    };
+    this.on(event, wrapper);
+  }
+}
+
+// ─── Usage ─────────────────────────────────────────────────────
+const emitter = new TypedEventEmitter<AppEvents>();
+
+// ✅ Fully typed — handler gets { userId: string; timestamp: Date }
+const unsubscribe = emitter.on('user:login', ({ userId, timestamp }) => {
+  console.log(`User ${userId} logged in at ${timestamp}`);
+});
+
+emitter.emit('user:login', { userId: 'u_123', timestamp: new Date() }); // ✅
+
+// ❌ Compile errors:
+emitter.emit('user:login', { userId: 123 }); // number not assignable to string
+emitter.on('unknown:event', () => {});        // 'unknown:event' not in AppEvents
+emitter.emit('cart:add', { productId: 'p1' }); // missing 'quantity' property
+
+unsubscribe(); // clean unsubscribe
+```
+
+---
+
+## FAANG-TS-3 — Explain TypeScript's template literal types and how they're used at scale (Microsoft)
+
+**Answer:**
+Template literal types apply template literal syntax at the type level. When a union is embedded inside a template literal type, TypeScript distributes across all members and produces a union of all combinations — enabling precise string type construction without manual enumeration.
+
+**Building typed route systems:**
+```typescript
+// Auto-generate typed routes from resource names
+type Resource = 'user' | 'product' | 'order';
+type CrudRoute = `/${Resource}s` | `/${Resource}s/:id`;
+// '/users' | '/users/:id' | '/products' | '/products/:id' | '/orders' | '/orders/:id'
+
+// Type-safe path params extraction
+type ExtractParams<T extends string> =
+  T extends `${string}:${infer Param}/${infer Rest}`
+    ? Param | ExtractParams<`/${Rest}`>
+    : T extends `${string}:${infer Param}`
+    ? Param
+    : never;
+
+type Params = ExtractParams<'/users/:userId/orders/:orderId'>;
+// 'userId' | 'orderId'
+
+function navigate<T extends string>(
+  path: T,
+  params: Record<ExtractParams<T>, string>
+): void {
+  /* replace :param in path with params[param] */
+}
+
+navigate('/users/:userId/orders/:orderId', { userId: 'u1', orderId: 'o1' }); // ✅
+navigate('/users/:userId', { orderId: 'o1' }); // ❌ 'orderId' not in params, missing 'userId'
+```
+
+**Key remapping with `as` clause:**
+```typescript
+// Generate getter method names from property names
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K]
+};
+
+interface User { name: string; age: number; email: string; }
+type UserGetters = Getters<User>;
+// { getName: () => string; getAge: () => number; getEmail: () => string; }
+```
+
+**Typed CSS-in-JS:**
+```typescript
+type CSSUnit = 'px' | 'rem' | 'em' | '%' | 'vh' | 'vw';
+type CSSValue = `${number}${CSSUnit}`;
+
+type SpacingProp = 'margin' | 'padding';
+type SpacingSide = 'top' | 'right' | 'bottom' | 'left';
+type SpacingKey = `${SpacingProp}-${SpacingSide}`;
+// 'margin-top' | 'margin-right' | ... | 'padding-left'
+
+// Typed event name conventions
+type DomainEvent<TDomain extends string, TAction extends string> =
+  `${TDomain}:${TAction}`;
+
+type UserEvent = DomainEvent<'user', 'created' | 'updated' | 'deleted'>;
+// 'user:created' | 'user:updated' | 'user:deleted'
+```
+
+---
+
+## FAANG-TS-4 — How does TypeScript's `infer` keyword enable advanced type inference? (Microsoft)
+
+**Answer:**
+`infer` is used inside conditional types to capture and name a type that TypeScript infers in a structural match. It enables building powerful utility types that extract sub-types from complex generic types.
+
+```typescript
+// ─── How infer works ───────────────────────────────────────────
+// "If T matches this pattern, capture the inferred type as U"
+type ReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+type Parameters<T> = T extends (...args: infer P) => any ? P : never;
+type Awaited<T> = T extends Promise<infer U> ? Awaited<U> : T; // recursive for nested promises
+
+// ─── Custom utility types using infer ─────────────────────────
+// Extract the element type of an array
+type ElementOf<T> = T extends (infer E)[] ? E : never;
+type StringElement = ElementOf<string[]>; // string
+type UnionElement  = ElementOf<(string | number)[]>; // string | number
+
+// Extract the first element of a tuple
+type Head<T extends unknown[]> = T extends [infer H, ...unknown[]] ? H : never;
+type First = Head<[string, number, boolean]>; // string
+
+// Extract the last element of a tuple
+type Tail<T extends unknown[]> = T extends [...unknown[], infer L] ? L : never;
+type Last = Tail<[string, number, boolean]>; // boolean
+
+// Unwrap a constructor parameter type
+type ConstructorParam<T> = T extends new (arg: infer P) => unknown ? P : never;
+class Service { constructor(config: { apiKey: string }) {} }
+type ServiceConfig = ConstructorParam<typeof Service>; // { apiKey: string }
+
+// ─── Infer in function overloads ───────────────────────────────
+// Get the overloaded return type of the last overload signature
+type OverloadedReturnType<T> =
+  T extends { (...args: any[]): infer R; (...args: any[]): any } ? R :
+  T extends (...args: any[]) => infer R ? R : never;
+
+// ─── Practical: extract Observable value type ──────────────────
+import { Observable } from 'rxjs';
+type ObservedValueOf<T> = T extends Observable<infer V> ? V : never;
+
+type UserStream = ObservedValueOf<Observable<{ id: string; name: string }>>;
+// { id: string; name: string }
+```
+
+```mermaid
+flowchart LR
+    CT["Conditional Type\nT extends Pattern<infer U> ? U : never"]
+    CT -->|"TypeScript checks:\ndoes T match Pattern?"| MATCH["Match found\nU = inferred type"]
+    CT -->|"No match"| NEVER["never"]
+    MATCH --> RESULT["Use U in true branch\n(extracted type)"]
+
+    style CT fill:#1565c0,color:#fff
+    style MATCH fill:#2e7d32,color:#fff
+    style NEVER fill:#b71c1c,color:#fff
+    style RESULT fill:#6a1b9a,color:#fff
+```
+
+---
+
+## FAANG-TS-5 — How would you enforce strict typing in a large TypeScript monorepo? (Google/Microsoft)
+
+**Answer:**
+At monorepo scale, TypeScript strictness is a force multiplier — catching bugs at compile time is orders of magnitude cheaper than catching them in production.
+
+**TSConfig project references (incremental builds):**
+```json
+// tsconfig.json (root)
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/ui" },
+    { "path": "./packages/api-client" },
+    { "path": "./apps/web" }
+  ]
+}
+
+// packages/core/tsconfig.json
+{
+  "compilerOptions": {
+    "composite": true,          // required for references
+    "declaration": true,        // emit .d.ts files
+    "declarationMap": true,     // source maps for .d.ts
+    "outDir": "./dist"
+  }
+}
+
+// apps/web/tsconfig.json
+{
+  "compilerOptions": { "composite": true },
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/ui" }
+  ]
+}
+```
+
+**Maximum strictness settings:**
+```json
+// tsconfig.base.json — shared across all packages
+{
+  "compilerOptions": {
+    "strict": true,                        // enables 8 strict checks at once
+    "noUncheckedIndexedAccess": true,      // arr[0] is T | undefined, not T
+    "exactOptionalPropertyTypes": true,    // { x?: number } ≠ { x?: number | undefined }
+    "noImplicitReturns": true,             // all code paths must return
+    "noFallthroughCasesInSwitch": true,    // switch fallthrough is an error
+    "noImplicitOverride": true,            // must use 'override' keyword explicitly
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "bundler",
+    "isolatedModules": true                // each file independently compilable
+  }
+}
+```
+
+**`noUncheckedIndexedAccess` in practice:**
+```typescript
+// Without noUncheckedIndexedAccess:
+const arr = [1, 2, 3];
+const first: number = arr[0]; // ✅ — but arr[99] would also be 'number' at compile time
+
+// With noUncheckedIndexedAccess:
+const first: number | undefined = arr[0]; // forced to handle undefined ✅
+const safe = arr[0] ?? 0; // explicit fallback required
+```
+
+**ESLint + @typescript-eslint rules for additional safety:**
+```json
+{
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "error",
+    "@typescript-eslint/no-non-null-assertion": "warn",
+    "@typescript-eslint/consistent-type-imports": "error",
+    "@typescript-eslint/no-floating-promises": "error",      // await all promises
+    "@typescript-eslint/no-misused-promises": "error",       // no async where sync expected
+    "@typescript-eslint/prefer-nullish-coalescing": "error", // ?? over ||
+    "@typescript-eslint/prefer-optional-chain": "error"      // ?. over && chains
+  }
+}
+```
+
+**Type-only imports (better tree shaking):**
+```typescript
+// ❌ Regular import — bundler may keep module in runtime bundle
+import { User } from './types';
+
+// ✅ Type-only import — erased at compile time, zero runtime cost
+import type { User } from './types';
+
+// Auto-enforced by: "@typescript-eslint/consistent-type-imports": "error"
+```
+
+```mermaid
+graph TD
+    ROOT["Monorepo Root\ntsconfig.json\n(references)"]
+    ROOT --> CORE["packages/core\n(composite: true)"]
+    ROOT --> UI["packages/ui\n(composite: true)"]
+    ROOT --> API["packages/api-client\n(composite: true)"]
+    ROOT --> WEB["apps/web"]
+    ROOT --> MOBILE["apps/mobile"]
+    WEB --> CORE
+    WEB --> UI
+    WEB --> API
+    MOBILE --> CORE
+    MOBILE --> UI
+    CORE --> SHARED["tsconfig.base.json\n(strict settings, shared)"]
+    UI --> SHARED
+    API --> SHARED
+    WEB --> SHARED
+    MOBILE --> SHARED
+
+    style ROOT fill:#1565c0,color:#fff
+    style SHARED fill:#4e342e,color:#fff
+    style CORE fill:#2e7d32,color:#fff
+    style UI fill:#6a1b9a,color:#fff
+    style API fill:#e65100,color:#fff
+```
+

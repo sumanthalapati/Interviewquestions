@@ -1825,3 +1825,401 @@ dotnet-dump analyze <dump-file>
 **💡 Production Example:**
 A background processing service was being restarted every 6 hours by the ops team because memory climbed steadily until OOM. Profiling with `dotnet-gcdump` showed the handler chain on a static `EventAggregator` growing on every service restart within the pod. Each time the BackgroundService was constructed (DI-registered as Scoped, accidentally instantiated multiple times due to a factory bug), it subscribed to the event without ever unsubscribing. Implementing `IDisposable` to unsubscribe on service stop, combined with fixing the factory to return a singleton, eliminated the leak. Endurance testing over 4 hours confirmed stable memory usage.
 
+
+---
+
+## 🏢 FAANG Production & On-Call Scenarios
+
+---
+
+### Q: How does Netflix handle a regional AWS outage? (Netflix)
+
+**Netflix's multi-region architecture:**
+- Active-active across us-east-1, us-west-2, eu-west-1
+- Every region can serve 100% of global traffic independently
+- Design principle: no single-region dependency in the critical path
+
+**Stateless services:**
+- All application servers are stateless — any region can serve any request
+- Session state stored in distributed caches (EVCache — Netflix's Memcached wrapper with multi-region replication)
+- No sticky sessions
+
+**Stateful data:**
+- **Cassandra:** multi-region replication with tunable consistency (Netflix's primary operational store)
+- **DynamoDB Global Tables:** for AWS-native services requiring managed replication
+- Write conflict strategy: last-writer-wins with timestamp
+
+**"Chaos Kong" — proactive regional evacuation drill:**
+- Netflix intentionally evacuates an entire AWS region several times per year
+- Process: shift DNS weights to remove the target region from Route 53, watch traffic drain, verify other regions absorb load
+- Teams discover evacuation gaps (unresolved DNS hardcodes, region-specific S3 buckets) before real outages expose them
+
+**Automated runbook — regional failover:**
+1. Route 53 health check detects region unavailability (< 30 seconds)
+2. DNS weights for the failed region are set to 0 (automated by Lambda + CloudWatch alarm)
+3. Traffic redistributed to healthy regions (< 3 minutes total)
+4. Alert fires to on-call; team monitors capacity in surviving regions
+5. Auto-scaling in healthy regions absorbs the additional load
+
+```mermaid
+flowchart TD
+    USERS[Global Users] --> R53[Route 53\nlatency-based routing\nus-east-1 / us-west-2 / eu-west-1]
+
+    R53 -->|normal| USE1[us-east-1\n33% traffic]
+    R53 -->|normal| USW2[us-west-2\n33% traffic]
+    R53 -->|normal| EUW1[eu-west-1\n34% traffic]
+
+    USE1 -->|region goes down| ALARM[CloudWatch Alarm\nhealth check fails]
+    ALARM --> LAMBDA[Lambda\nset Route 53 weight = 0\nfor us-east-1]
+    LAMBDA --> R53_FAIL[Route 53 redistributes\n50% to us-west-2\n50% to eu-west-1]
+
+    R53_FAIL --> USW2_SCALE[us-west-2 Auto Scaling\nabsorbs extra load]
+    R53_FAIL --> EUW1_SCALE[eu-west-1 Auto Scaling\nabsorbs extra load]
+
+    style USE1 fill:#f44336,color:#fff
+    style ALARM fill:#FF9800,color:#fff
+    style USW2_SCALE fill:#4CAF50,color:#fff
+    style EUW1_SCALE fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** A regional outage without active-active architecture causes a full service outage until a manual failover is executed. Netflix's architecture converts a potential hour-long outage into a 3-minute automated DNS reroute that most customers never notice.
+
+**💡 Production Example:**
+During the December 2021 AWS us-east-1 networking event, Netflix's automated regional failover shifted traffic to us-west-2 and eu-west-1 within 3 minutes. Customer-facing impact was limited to a brief increase in latency for us-east-1 users — no widespread streaming outage, unlike services with single-region dependencies.
+
+---
+
+### Q: Walk me through Amazon's incident response process (Amazon)
+
+**Amazon's COE (Correction of Errors) framework:**
+
+COE is Amazon's version of a blameless postmortem — the mandatory document produced after every significant incident. It is a first-class operational artifact tracked by leadership.
+
+**COE structure:**
+1. **What happened:** timeline of events from first alert to resolution
+2. **Impact:** customer-facing impact, duration, affected services, revenue estimate
+3. **Root cause:** 5 Whys analysis — drill down to the systemic cause, not the proximate cause
+4. **Contributing factors:** what made the system fragile (missing alarm, no circuit breaker, etc.)
+5. **Corrective actions:** specific, time-bound, owner-assigned action items; tracked in tickets
+
+**5 Whys example:**
+```
+Problem: Checkout service returned 500 errors for 22 minutes
+
+Why 1: The checkout service could not connect to the payments service
+Why 2: The payments service was unresponsive because its database was at max connections
+Why 3: The database was at max connections because a new deploy had a connection leak
+Why 4: The connection leak was not caught because integration tests used an in-memory DB (no connection pool)
+Why 5: The team had no runbook for connection pool exhaustion and no alarm on pool wait time
+
+Root cause: Absence of connection pool observability and integration test coverage
+Corrective actions: add pool_wait_time alarm, add Testcontainers-based integration test, add runbook
+```
+
+**Two-Pizza Team escalation structure:**
+- First responder: on-call engineer for the service
+- L2 escalation: team tech lead (if not resolved in 15 minutes)
+- L3 escalation: service owner + principal engineer (if customer impact ongoing)
+- Executive escalation: VP or above (if S1 with prolonged customer impact)
+
+**Pre-mortems:**
+- Before launching a new service or major feature, run a "pre-mortem": ask the team "imagine it's 6 months from now and this failed catastrophically — what went wrong?"
+- Forces teams to surface operational risks before they become incidents
+- Common outputs: missing alarms, undocumented dependencies, single points of failure
+
+**Operational metrics:**
+- **MTTD** (Mean Time to Detect): time from issue onset to first alert firing — target: < 5 minutes
+- **MTTR** (Mean Time to Resolve): time from first alert to service restored — target: < 30 minutes
+- **MTTF** (Mean Time to Failure): average time between incidents — higher is better; tracks reliability trend
+
+```mermaid
+flowchart TD
+    ALERT[Alert fires\nCloudWatch / PagerDuty] --> ONCALL[On-call engineer\nacknowledges within 5min]
+    ONCALL --> RUNBOOK{Runbook\navailable?}
+    RUNBOOK -->|Yes| FOLLOW[Follow runbook steps]
+    RUNBOOK -->|No| TRIAGE[Triage: check metrics\nlogs and traces]
+
+    FOLLOW --> RESOLVED{Resolved?}
+    TRIAGE --> RESOLVED
+
+    RESOLVED -->|Yes within 15min| COE_MINOR[COE: minor\nteam-level review]
+    RESOLVED -->|No| ESCALATE[Escalate to\ntech lead / principal]
+    ESCALATE --> RESOLVED2{Resolved?}
+    RESOLVED2 -->|Yes| COE_MAJOR[COE: major\ncross-team review\nleadership visibility]
+    RESOLVED2 -->|No with customer impact| EXEC[Executive escalation\nstatus page update\ncustomer communication]
+
+    COE_MINOR --> ACTIONS[Corrective action tickets\nowner-assigned + time-bound]
+    COE_MAJOR --> ACTIONS
+    ACTIONS --> PREVENT[Pre-mortem on next\nmajor launch]
+
+    style ALERT fill:#f44336,color:#fff
+    style COE_MAJOR fill:#FF9800,color:#fff
+    style ACTIONS fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Amazon's COE process treats every incident as a learning opportunity, not a blame session. The 5 Whys forces engineers past the proximate cause to the systemic cause — and the mandatory corrective action tracking ensures the learning is actually applied.
+
+**💡 Production Example:**
+After a DynamoDB throttling incident caused order processing delays, the COE 5 Whys revealed the root cause was missing capacity planning for a seasonal traffic surge — the team had never reviewed DynamoDB provisioned capacity vs projected Black Friday traffic. The COE produced three corrective actions: a quarterly capacity review process, CloudWatch alarms on consumed read/write capacity units, and automatic on-demand scaling enabled for all tables.
+
+---
+
+### Q: How does Google handle SLO burn rate alerts? (Google SRE)
+
+**The problem with simple threshold alerts:**
+- "Alert if error rate > 1% for 5 minutes" — too noisy for minor blips; misses slow degradations
+- Burn rate alerts solve this: alert based on how fast you're consuming your error budget
+
+**Burn rate = actual bad rate / SLO-allowed bad rate**
+```
+If SLO = 99.9% (0.1% errors allowed):
+  Current error rate = 1% → burn rate = 1% / 0.1% = 10x
+  At 10x burn rate: 30-day budget exhausted in 3 days
+```
+
+**Multi-burn-rate, multi-window alerting (Google's recommended approach):**
+
+| Window | Burn rate | Budget consumed | Action | Urgency |
+|---|---|---|---|---|
+| 1 hour | > 14.4x | 2% in 1 hour | Page immediately | Critical |
+| 6 hours | > 6x | 5% in 6 hours | Create ticket | High |
+| 3 days | > 1x | 10% in 3 days | Weekly review | Low |
+
+**Multi-window rationale:**
+- Short window alone: detects fast burns but creates false positives for brief spikes
+- Long window alone: confirms sustained burns but is too slow to page for fast burns
+- Combined: alert only when BOTH windows show elevated burn rate — high precision
+
+**Alert fatigue prevention principles:**
+- Alert on **user impact**, not infrastructure symptoms
+- "Database CPU > 80%" is a symptom — "Error rate > SLO burn rate" is user impact
+- Every alert should have a clear action in a runbook — if there's no action, it's a dashboard metric, not an alert
+
+```yaml
+# Example Prometheus alerting rule — fast burn
+- alert: HighErrorBudgetBurnRate
+  expr: |
+    (
+      sum(rate(http_requests_total{status=~"5.."}[1h])) /
+      sum(rate(http_requests_total[1h]))
+    ) > (14.4 * 0.001)   # 14.4x burn rate = 2% budget in 1 hour
+  for: 5m
+  annotations:
+    summary: "Fast error budget burn — will exhaust monthly budget in 2 days"
+```
+
+```mermaid
+flowchart TD
+    MEASURE[Measure error rate\nevery 1 minute] --> CALC[Calculate burn rate\nerror_rate divided by SLO_error_rate]
+
+    CALC --> SHORT{1-hour window\nburn rate?}
+    CALC --> LONG{6-hour window\nburn rate?}
+
+    SHORT -->|greater than 14.4x| FAST_BURN[Fast burn detected]
+    SHORT -->|less than 14.4x| SHORT_OK[Short window OK]
+
+    LONG -->|greater than 6x| SLOW_BURN[Slow burn detected]
+    LONG -->|less than 6x| LONG_OK[Long window OK]
+
+    FAST_BURN & SLOW_BURN -->|BOTH triggered| PAGE[Page on-call\nP1 — 2% budget in 1hr]
+    FAST_BURN & LONG_OK -->|only short window| WATCH[Monitor — likely transient spike\nno page]
+    SHORT_OK & SLOW_BURN -->|only long window| TICKET[Create ticket\nP3 — slow degradation]
+    SHORT_OK & LONG_OK --> HEALTHY[Error budget healthy]
+
+    style PAGE fill:#f44336,color:#fff
+    style TICKET fill:#FF9800,color:#fff
+    style HEALTHY fill:#4CAF50,color:#fff
+    style WATCH fill:#2196F3,color:#fff
+```
+
+> **Why this matters:** Single-window threshold alerts generate alert fatigue (too many pages for transient spikes) or miss slow degradations. Google's multiwindow approach pages only when there's a sustained, meaningful burn — dramatically improving signal-to-noise and engineer trust in alerts.
+
+**💡 Production Example:**
+A team using simple 5-minute error rate alerts was averaging 12 pages per week, most for spikes that auto-recovered. After migrating to multiwindow burn rate alerts (1h + 6h), pages dropped to 2 per week — both actionable incidents. The change improved on-call quality of life and reduced alert fatigue that had led engineers to start ignoring pages.
+
+---
+
+### Q: How would you debug a sudden 10x latency spike at 3am? (Amazon/Google on-call)
+
+**Step 0 — Runbook first (< 2 minutes):**
+- Is there a runbook for this alert? Check the alert annotation or team wiki
+- Is there a recent deploy? Check deployment history — rollback is often faster than diagnosis
+- Is there a known issue? Check status pages of upstream dependencies (AWS, Stripe, Twilio)
+
+**USE method — for each infrastructure resource:**
+- **U**tilization: is CPU, memory, disk, or network I/O near capacity?
+- **S**aturation: is any queue growing (connection pool, message queue, thread pool)?
+- **E**rrors: are there error rates increasing at the resource level?
+
+**RED method — for each service in the call chain:**
+- **R**ate: requests per second — is traffic up (load-driven) or down (shed/throttled)?
+- **E**rrors: error rate — which service first shows elevated errors?
+- **D**uration: latency breakdown — which service in the trace is slow?
+
+**Tools by signal type:**
+
+| Signal | Tool | What to look for |
+|---|---|---|
+| Distributed traces | Jaeger / X-Ray / Tempo | Which span is slow? What changed in p99? |
+| Metrics | CloudWatch / Prometheus / Datadog | CPU, memory, connection pool wait, GC pause time |
+| Logs | CloudWatch Logs Insights / Splunk | Error messages, timeout messages, slow query log |
+| Database | pg_stat_activity, slow query log | Blocking queries, long transactions, missing index |
+| CPU profile | dotnet-trace, async-profiler | Hot code path, lock contention |
+
+**Escalation criteria:**
+- Customer-visible impact > 5 minutes → escalate to L2
+- Unable to identify root cause in 15 minutes → escalate with current findings
+- Revenue impact > threshold → page service owner + director
+
+```mermaid
+flowchart TD
+    ALERT[Latency spike alert\n3am] --> RUN{Runbook\nexists?}
+    RUN -->|Yes| FOLLOW[Follow runbook\ncheck known causes]
+    RUN -->|No| DEPLOY{Recent deploy\nin last 2 hours?}
+
+    FOLLOW --> RESOLVED1{Resolved?}
+    RESOLVED1 -->|Yes| DONE[Resolved\nupdate runbook]
+    RESOLVED1 -->|No| DEPLOY
+
+    DEPLOY -->|Yes| ROLLBACK[Rollback deploy\nmonitor for 5min]
+    DEPLOY -->|No| UPSTREAM{Upstream\ndependency issue?}
+
+    ROLLBACK --> RESOLVED2{Resolved?}
+    RESOLVED2 -->|Yes| COE[Write COE\nfix root cause]
+    RESOLVED2 -->|No| UPSTREAM
+
+    UPSTREAM -->|Yes| WAIT[Monitor upstream\nupdate status page]
+    UPSTREAM -->|No| RED[RED method\nwhich service first shows error?]
+
+    RED --> TRACE[Pull distributed traces\nidentify slow span]
+    TRACE --> USE[USE method on\nthat service's resources]
+    USE --> FIX[Apply fix or mitigation]
+
+    FIX --> RESOLVED3{Resolved?}
+    RESOLVED3 -->|Yes| COE
+    RESOLVED3 -->|No| ESCALATE[Escalate to L2\nshare findings so far]
+
+    style ALERT fill:#f44336,color:#fff
+    style ROLLBACK fill:#FF9800,color:#fff
+    style DONE fill:#4CAF50,color:#fff
+    style COE fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Without a systematic approach, 3am debugging devolves into random log searching. The USE/RED methods provide a structured elimination path. Starting with "was there a recent deploy?" catches the majority of production incidents — most latency regressions are deploy-related.
+
+**💡 Production Example:**
+A 10x latency spike at 3am was initially blamed on a traffic surge (rate was up 20%). RED method on the database service showed duration was up 50x, not just 20x — disproportionate to the traffic increase. A slow query log showed a new query introduced in the last deploy was missing an index. Rolling back the deploy resolved the spike in 4 minutes. The COE resulted in a pre-deploy checklist item: run EXPLAIN ANALYZE on all new queries in staging before production promotion.
+
+---
+
+### Q: How does Meta handle data center failures? (Meta)
+
+**Meta's data center architecture:**
+- "Data Center Region" (DCR): a cluster of 2–4 physical data centers within ~50 miles of each other
+- Connected by dedicated fiber with < 1ms latency between DCs in the same region
+- Multiple DCRs globally: US-East, US-West, Europe, Asia
+
+**Service discovery and leader election:**
+- **Zookeeper:** distributed coordination service; used for leader election in stateful services
+- Each stateful service registers itself in Zookeeper; clients discover the current leader
+- On DC failure: Zookeeper leader election automatically promotes a replica in a surviving DC
+
+**Shadow traffic — safe DC cutover:**
+- Before cutting production traffic to a new or recovered DC, replay production traffic as shadow traffic
+- Shadow responses are compared to primary responses (dark comparison)
+- Discrepancies surface bugs before real users are routed to the new DC
+- Used for both new DC bring-up and post-failure recovery validation
+
+**Disaster Recovery tiers:**
+
+| Tier | Strategy | RTO | RPO | Use case |
+|---|---|---|---|---|
+| **Hot standby** | Fully active replica, traffic shifted in seconds | < 1 min | Near zero | Critical: Feed, Messaging |
+| **Warm standby** | Replica running but not serving traffic; promoted in minutes | 5–15 min | Minutes | Important: Analytics pipelines |
+| **Cold standby** | Infrastructure defined in IaC; provisioned on demand | Hours | Hours | Non-critical: internal tools |
+
+**RTO/RPO targets per service tier:**
+- Tier 1 (user-facing, revenue-generating): RTO < 5 min, RPO < 30 seconds
+- Tier 2 (internal, SLA-bound): RTO < 30 min, RPO < 5 minutes
+- Tier 3 (best-effort): RTO < 4 hours, RPO < 1 hour
+
+> **Why this matters:** Not all services deserve the same recovery investment. Applying hot standby to every service is prohibitively expensive; applying cold standby to a payment service is reckless. Tiering services by business criticality and assigning RTO/RPO targets drives proportionate investment in resilience.
+
+**💡 Production Example:**
+During Meta's October 2021 BGP routing outage, the internal backbone between data centers became unreachable. Services with Zookeeper-based leader election that had replicas outside the affected DC group could re-elect leaders automatically. Services tightly coupled to a single DC were effectively unavailable for the full 6-hour duration. The incident drove a review of all Tier 1 services to ensure cross-DCR leader election was functional.
+
+---
+
+### Q: What is a black swan failure and how do you prepare for it? (General FAANG)
+
+**Black swan events in production:**
+- Originally from Nassim Taleb: rare, high-impact, retrospectively predictable but hard to forecast
+- In infrastructure: events outside the failure model you designed for
+- Examples: AWS us-east-1 multi-service outage (2017, 2021), Fastly CDN global outage (2021), CrowdStrike sensor update crashing 8.5 million Windows machines (2024), BGP route leak taking down large portions of the internet
+
+**What makes them different from normal failures:**
+- Normal failures: designed for (single instance death, AZ failure, disk failure) — runbooks exist
+- Black swan: outside the blast radius you assumed (entire region, entire cloud provider, global DNS, global CDN)
+
+**Preparation strategies:**
+
+| Strategy | How | Example |
+|---|---|---|
+| **Avoid single dependencies** | Use multiple vendors for critical path | Two CDN providers (CloudFront + Fastly); two DNS providers (Route 53 + Cloudflare) |
+| **Multi-cloud egress** | Ensure static assets + DNS can survive loss of one cloud | S3 + GCS for static content; failover DNS via secondary provider |
+| **Game days** | Simulate the scenario before it happens | "What if Route 53 was unavailable for 1 hour?" |
+| **Chaos engineering** | Discover unknown dependencies proactively | Kill all traffic to provider X; observe what breaks |
+| **DR Playbook** | Pre-written, owned, regularly drilled runbook for each scenario | Regional failover runbook, DNS provider failover runbook |
+| **Graceful degradation** | Serve partial functionality when dependencies fail | Serve cached content when real-time API is unavailable |
+
+**The DR Playbook principles:**
+- Written before the incident, not during
+- Owned by a named individual (not "the team")
+- Drilled quarterly — if you haven't rehearsed it, it doesn't work at 3am
+- Includes explicit "abort criteria" — if step X fails, escalate immediately rather than continue
+
+```mermaid
+flowchart TD
+    subgraph Users
+        U[Global Users]
+    end
+
+    subgraph DNS_Layer["DNS Layer — multi-provider"]
+        R53[Route 53\nPrimary DNS]
+        CF_DNS[Cloudflare\nSecondary DNS]
+        U -->|resolve| R53
+        R53 -->|fails| CF_DNS
+    end
+
+    subgraph CDN_Layer["CDN Layer — multi-vendor"]
+        CFR[CloudFront\nPrimary CDN]
+        FST[Fastly\nSecondary CDN]
+        R53 -->|healthy| CFR
+        CF_DNS -->|failover| FST
+    end
+
+    subgraph Compute_Layer["Compute — multi-region, multi-cloud"]
+        AWS[AWS us-east-1\nPrimary]
+        GCP[GCP us-central1\nSecondary]
+        CFR -->|origin| AWS
+        FST -->|origin| GCP
+    end
+
+    subgraph Data_Layer["Data — replicated"]
+        DB1[(DynamoDB\nGlobal Tables)]
+        DB2[(Spanner\nGCP fallback)]
+        AWS --- DB1
+        GCP --- DB2
+        DB1 <-->|async sync| DB2
+    end
+
+    style R53 fill:#FF9800,color:#fff
+    style CF_DNS fill:#2196F3,color:#fff
+    style AWS fill:#4CAF50,color:#fff
+    style GCP fill:#9C27B0,color:#fff
+```
+
+> **Why this matters:** Black swan events expose every shortcut taken in the name of simplicity. A single DNS provider, a single CDN, a single cloud — each is a hidden assumption that "this won't fail completely." The 2021 Fastly outage took down major news sites, governments, and e-commerce platforms simultaneously because they all shared a single CDN point of failure.
+
+**💡 Production Example:**
+After the Fastly CDN outage in June 2021 took down a major e-commerce platform for 49 minutes (estimated $2M+ revenue loss), the platform implemented dual-CDN routing: CloudFront as primary, Fastly as secondary, with automatic failover via Route 53 health checks. When Fastly experienced another degradation event in 2022, Route 53 detected the health check failure and redirected all traffic to CloudFront within 45 seconds — zero customer impact.

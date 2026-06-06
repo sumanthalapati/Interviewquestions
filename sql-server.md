@@ -5088,3 +5088,308 @@ ORDER BY qs.total_elapsed_time DESC;
 A search query ran in 50ms on staging (10,000 rows, uniform distribution) but took 12 seconds in production (50 million rows, 80% of rows sharing the same `Status` value). The execution plan showed a table scan caused by parameter sniffing — the optimizer had cached a plan based on an atypical parameter value. Adding `OPTION (OPTIMIZE FOR UNKNOWN)` and running `UPDATE STATISTICS` with a full scan fixed it. Response time dropped to 80ms in production.
 
 
+
+---
+
+## 🏢 FAANG Database & Data Engineering Questions
+
+---
+
+### Q: How does Amazon Aurora differ from standard RDS and when would you choose it? (Amazon)
+
+**Key differences:**
+- **Log-structured storage:** The redo log IS the database — no double-write buffer, no shared storage bottleneck
+- **6-way replication across 3 AZs:** quorum write = 4 of 6 nodes; quorum read = 3 of 6 nodes
+- **Storage auto-scaling:** grows in 10 GB increments automatically, up to 128 TB
+- **Global Database:** single primary region + up to 5 read-only secondary regions with < 1 second replication lag
+- **Aurora Serverless v2:** fractional ACU scaling (0.5 ACU increments) — cost-efficient for variable workloads
+- **Choose Aurora when:** you need MySQL/PostgreSQL compatibility, high availability, and are willing to trade portability for performance and managed operations
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant AuroraWriter
+    participant Q1 as AZ1-Node1
+    participant Q2 as AZ1-Node2
+    participant Q3 as AZ2-Node3
+    participant Q4 as AZ2-Node4
+    participant Q5 as AZ3-Node5
+    participant Q6 as AZ3-Node6
+
+    App->>AuroraWriter: Write (INSERT/UPDATE)
+    AuroraWriter->>Q1: Redo log segment
+    AuroraWriter->>Q2: Redo log segment
+    AuroraWriter->>Q3: Redo log segment
+    AuroraWriter->>Q4: Redo log segment
+    AuroraWriter->>Q5: Redo log segment
+    AuroraWriter->>Q6: Redo log segment
+    Q1-->>AuroraWriter: ACK
+    Q2-->>AuroraWriter: ACK
+    Q3-->>AuroraWriter: ACK
+    Q4-->>AuroraWriter: ACK
+    Note over AuroraWriter: 4 of 6 ACKs received → Quorum met → Commit
+    AuroraWriter-->>App: Write committed
+```
+
+> **Why this matters:** Traditional RDS replicates full data pages — Aurora only replicates redo log records, reducing I/O by up to 7.5× and enabling significantly higher write throughput with lower latency.
+
+**💡 Production Example:**
+A team migrated from RDS MySQL Multi-AZ to Aurora MySQL. Write latency dropped from ~8ms to ~2ms and failover time from ~60s to ~15s. Aurora's quorum-based writes meant they no longer needed a synchronous standby replica — the 6-node log replication handled durability automatically.
+
+---
+
+### Q: How would you shard a database at Amazon/Meta scale?
+
+**Sharding strategies:**
+
+| Strategy | How | Pros | Cons |
+|---|---|---|---|
+| **Range** | Shard by value range (e.g., user_id 1–1M on shard 1) | Simple range scans | Hot spots on sequential inserts |
+| **Hash** | `shard = hash(key) % N` | Even distribution | No range queries; resharding is hard |
+| **Directory** | Lookup table maps key → shard | Flexible | Lookup table is a bottleneck/SPOF |
+
+**Shard key selection criteria:**
+- High cardinality (not a boolean or enum)
+- Matches primary query patterns (avoid cross-shard queries)
+- Even write distribution (avoid hot shards)
+
+**Cross-shard queries and transactions:**
+- Scatter-gather: fan out to all shards, aggregate results (expensive)
+- Two-phase commit (2PC) for distributed transactions (avoid at scale — blocking)
+- Prefer eventual consistency via saga pattern or event sourcing
+
+**Resharding without downtime (consistent hashing + virtual nodes):**
+- Assign each physical shard N virtual nodes on the hash ring
+- Adding a shard: transfer only the virtual nodes it takes over
+- Vitess (YouTube's MySQL sharding solution): transparent sharding middleware, online schema changes, query routing, connection pooling
+
+```mermaid
+flowchart LR
+    subgraph Ring["Consistent Hash Ring (360°)"]
+        direction TB
+        VN1["VNode 0°\n→ Shard A"]
+        VN2["VNode 60°\n→ Shard B"]
+        VN3["VNode 120°\n→ Shard C"]
+        VN4["VNode 180°\n→ Shard A"]
+        VN5["VNode 240°\n→ Shard B"]
+        VN6["VNode 300°\n→ Shard C"]
+    end
+
+    K1["Key: user_42\nhash → 45°"] -->|routes to| VN1
+    K2["Key: user_99\nhash → 90°"] -->|routes to| VN2
+    K3["Key: order_7\nhash → 200°"] -->|routes to| VN4
+
+    VN1 --> SA[(Shard A\nPrimary + Replica)]
+    VN2 --> SB[(Shard B\nPrimary + Replica)]
+    VN3 --> SC[(Shard C\nPrimary + Replica)]
+    VN4 --> SA
+    VN5 --> SB
+    VN6 --> SC
+
+    style SA fill:#2196F3,color:#fff
+    style SB fill:#4CAF50,color:#fff
+    style SC fill:#FF9800,color:#fff
+```
+
+> **Why this matters:** Poor shard key selection causes hot shards — one shard receives 90% of traffic while others sit idle. Consistent hashing with virtual nodes solves the resharding problem: adding a new shard moves only `1/N` of the data rather than rehashing everything.
+
+**💡 Production Example:**
+An e-commerce platform sharded by `order_id % 8`. Black Friday caused a hot shard problem — sequential order IDs meant all new writes went to the same shard. Migrating to hash-based sharding on `customer_id` distributed load evenly across all 8 shards, and adding 4 virtual nodes per shard via Vitess allowed a future shard split with zero downtime.
+
+---
+
+### Q: How does Google Bigtable / DynamoDB store data? (NoSQL at scale)
+
+**DynamoDB internal storage — LSM tree + SSTable:**
+
+**Write path:**
+1. Write goes to **WAL (Write-Ahead Log)** for durability
+2. Written to **MemTable** (in-memory sorted structure)
+3. When MemTable is full → flushed to **SSTable** (immutable sorted file on disk)
+4. Background **compaction** merges and garbage-collects SSTables
+
+**Read path:**
+1. Check **MemTable** first (most recent writes)
+2. Check **SSTables** in reverse chronological order (newest first)
+3. **Bloom filter** on each SSTable to skip files that definitely don't contain the key
+4. Merge results (latest version wins)
+
+**Partition key → partition → tablet server:**
+- DynamoDB hashes the partition key to determine which partition (storage node) owns the data
+- Each partition is a Paxos group with a leader for writes
+- Range scans only possible within a single partition key (sort key range queries)
+
+```mermaid
+flowchart TD
+    W[Write Request] --> WAL[WAL\nWrite-Ahead Log]
+    WAL --> MEM[MemTable\nin-memory sorted]
+    MEM -->|flush when full| SS1[SSTable 1\nimmutable]
+    MEM -->|flush when full| SS2[SSTable 2\nimmutable]
+    SS1 & SS2 -->|compaction| SS3[SSTable 3\nmerged + GC'd]
+
+    R[Read Request] --> BF{Bloom Filter\ncheck each SSTable}
+    BF -->|maybe| MEM2[Check MemTable]
+    MEM2 --> SS_READ[Scan SSTables\nnewest first]
+    SS_READ --> MERGE[Merge results\nlatest version wins]
+    MERGE --> RESP[Return value]
+
+    style W fill:#2196F3,color:#fff
+    style R fill:#4CAF50,color:#fff
+    style WAL fill:#FF9800,color:#fff
+```
+
+> **Why this matters:** LSM trees optimize writes at the cost of read amplification (multiple SSTables to check). Bloom filters and compaction tune this trade-off. Understanding this explains why DynamoDB has predictable write latency but read latency can vary based on compaction state.
+
+**💡 Production Example:**
+A team saw DynamoDB read latency spike every few hours. The pattern matched SSTable compaction cycles. Adding a **DAX (DynamoDB Accelerator)** cache layer absorbed the read spikes during compaction, keeping p99 latency stable.
+
+---
+
+### Q: How would you design a time-series database for metrics? (Netflix/Amazon)
+
+**Write-heavy workload characteristics:**
+- Append-only (no updates, only inserts)
+- High cardinality tags (host, region, service, endpoint)
+- Queries are mostly recent data with time-range aggregations
+
+**Core design decisions:**
+
+| Concern | Solution |
+|---|---|
+| Partition by time | Each partition covers a fixed time window (e.g., 1 hour); old partitions become immutable |
+| Compression | Delta encoding for timestamps; XOR compression (Gorilla, Facebook 2015) for float values — achieves ~1.37 bytes/sample |
+| Downsampling | Rollup older data: raw → 1min → 5min → 1hr aggregates |
+| Retention | TTL-based deletion; drop entire time partitions (fast) |
+
+**Compression — Gorilla (Facebook):**
+- Store first value as-is; subsequent values store only the XOR difference with the previous value
+- Most metrics change by small amounts → XOR produces mostly zeros → compresses extremely well
+
+**Approaches:**
+- **OpenTSDB:** HBase-backed, good for high cardinality, complex to operate
+- **InfluxDB:** purpose-built, IOx engine (Apache Arrow + Parquet), great query language (Flux/InfluxQL)
+- **TimescaleDB:** PostgreSQL extension, familiar SQL, hypertable partitioning by time
+
+```mermaid
+flowchart LR
+    subgraph Ingest
+        AG[Agent/Scraper] --> BROKER[Kafka / Kinesis\nbuffering]
+    end
+
+    subgraph Write Path
+        BROKER --> WR[Writer Service\nbatch + compress]
+        WR --> RAW[(Raw Storage\ntime-partitioned\nGorilla-compressed)]
+    end
+
+    subgraph Rollup Pipeline
+        RAW -->|every 5 min| R1[(1-min rollup\nagg: min/max/avg/p99)]
+        R1 -->|every hour| R2[(5-min rollup)]
+        R2 -->|every day| R3[(1-hr rollup)]
+    end
+
+    subgraph Query Path
+        Q[Query API] -->|recent| RAW
+        Q -->|older| R1
+        Q -->|historical| R3
+    end
+
+    style RAW fill:#2196F3,color:#fff
+    style R1 fill:#4CAF50,color:#fff
+    style R3 fill:#9E9E9E,color:#fff
+```
+
+> **Why this matters:** A naive relational design (one row per metric sample) collapses at scale — 10,000 hosts × 200 metrics × 60 samples/min = 120M rows/min. Time-partitioned append-only storage with compression is the only viable approach.
+
+**💡 Production Example:**
+Netflix's Atlas handles ~2 million metrics/second. The system uses time-partitioned memory-mapped files with Gorilla compression, achieving ~1.37 bytes per data point vs ~16 bytes for a naive float64 + int64 timestamp pair — a 10× reduction in storage and I/O.
+
+---
+
+### Q: How does Facebook's TAO use MySQL under the hood?
+
+**TAO (The Associations and Objects) — Facebook's graph data store:**
+
+**Data model:**
+- **Objects:** typed nodes (User, Photo, Page) — stored as `(id, type, data)` in MySQL
+- **Associations:** typed edges (friend, liked, commented) — stored as `(id1, type, id2, time, data)`
+- Denormalized for read performance: association data duplicated on both ends of the edge
+
+**Storage layer:**
+- Objects and associations stored in MySQL sharded by ID
+- Each MySQL shard holds both objects and associations for that ID range
+- Schema is intentionally simple — `data` column is a serialized thrift blob
+
+**TAO cache layer:**
+- In-process and regional caches sit above MySQL
+- Cache hit rate ~99% — MySQL rarely hit in steady state
+- Write path: **TAO → MySQL leader → async replication → read replicas**
+- Read path: **TAO cache → (miss) → MySQL read replica → populate cache**
+
+**Consistency model:**
+- Eventual consistency between TAO and MySQL
+- After a write: MySQL leader is authoritative; cache may serve stale data briefly
+- "Look-aside" cache: TAO never writes back asynchronously — cache is invalidated on write, not updated
+
+> **Why this matters:** TAO demonstrates that a purpose-built caching + routing layer can make a simple relational backend (MySQL) perform at social-network scale. The key insight is separating the data model (graph) from the storage model (relational) via a dedicated service layer.
+
+**💡 Production Example:**
+When Facebook displayed a user's News Feed, TAO assembled thousands of objects and associations in milliseconds — not by issuing thousands of MySQL queries, but by serving from cache with occasional MySQL fallback. The system served billions of queries per second globally on top of MySQL as the source of truth.
+
+---
+
+### Q: Database connection pool management at scale (Amazon/Google)
+
+**Why connection pools matter:**
+- Each database connection is expensive: ~1–5 MB RAM on Postgres, ~10 MB on SQL Server
+- Without pooling: a spike of 1,000 concurrent requests → 1,000 new connections → database OOM
+- With pooling: connections are reused; queue waits if pool is exhausted
+
+**Pool sizing formula (from "HikariCP Sizing" and PgBouncer docs):**
+```
+pool_size = (core_count × 2) + effective_spindle_count
+```
+- For an 8-core server with SSDs (spindle count ≈ 1): `pool_size = 17`
+- Counterintuitive: more connections ≠ more throughput beyond this formula — context switching overhead dominates
+
+**Tools:**
+- **PgBouncer** (PostgreSQL): session pooling, transaction pooling, statement pooling
+- **HikariCP** (Java/JVM): fastest JVM connection pool; uses `ConcurrentBag` for lock-free borrowing
+- **Microsoft.Data.SqlClient** (.NET): built-in connection pooling per connection string
+
+**Key observability metrics:**
+- `pool_wait_time_ms`: time waiting for a free connection — p99 > 50ms = pool too small
+- `active_connections` vs `idle_connections`: too many idle = pool too large (wasting DB resources)
+- `connection_timeouts`: requests failing because pool exhausted
+
+```mermaid
+sequenceDiagram
+    participant App as App Thread
+    participant Pool as Connection Pool
+    participant DB as Database
+
+    App->>Pool: borrow()
+    alt Connection available
+        Pool-->>App: existing connection
+    else Pool exhausted
+        Pool->>Pool: wait (queue)
+        alt Timeout exceeded
+            Pool-->>App: ConnectionTimeoutException
+        else Connection returned
+            Pool-->>App: returned connection
+        end
+    end
+
+    App->>DB: Execute query
+    DB-->>App: Result
+    App->>Pool: return()
+    Pool->>Pool: mark connection idle\nreturn to pool
+
+    style Pool fill:#2196F3,color:#fff
+    style DB fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Under Black Friday traffic, connection pool exhaustion is one of the most common causes of cascading failure. A service with 50 pods × 20 connections each = 1,000 simultaneous database connections. Postgres starts degrading at ~300 connections per CPU core. Understanding pool sizing prevents database saturation during load spikes.
+
+**💡 Production Example:**
+A .NET API deployed to 40 pods, each with default HikariCP pool size of 10, hit a production Postgres database with 400 concurrent connections under load — exceeding Postgres's `max_connections = 200`. Adding PgBouncer in transaction-pooling mode reduced actual Postgres connections to 40 (one per pod), multiplexing all application threads through those 40, eliminating the connection saturation entirely.
+

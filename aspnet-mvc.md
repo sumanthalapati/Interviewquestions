@@ -2344,3 +2344,586 @@ flowchart LR
     style REMOTE fill:#4dabf7,color:#fff
 ```
 
+---
+
+# 🏢 FAANG ASP.NET Core & Web API Questions
+
+> Scenarios asked at Amazon, Google, Microsoft, Meta, and Netflix for senior ASP.NET Core / Web API engineers.
+
+---
+
+## FAANG-1. How would you design an ASP.NET Core API to handle 100,000 requests/second? (Amazon/Google)
+
+> **Why this matters:** At this scale, every blocking call, allocation, and middleware becomes measurable. Interviewers want to hear about async discipline, allocation avoidance, connection pooling, and horizontal scaling — not just "add more servers."
+
+```
+Scale Strategy Layers:
+  ┌──────────────────────────────────────────────────┐
+  │  1. Async all the way — no blocking calls         │  ← foundation
+  │  2. Connection pooling (DB, HttpClient)           │  ← resource efficiency
+  │  3. Allocation minimisation (Span, ArrayPool)     │  ← GC pressure
+  │  4. Response/output caching                       │  ← reduce compute
+  │  5. Horizontal scaling + load balancer            │  ← capacity
+  │  6. CDN for static + cacheable responses          │  ← edge offload
+  └──────────────────────────────────────────────────┘
+```
+
+```csharp
+// ── 1. Async all the way ──────────────────────────────────────────────────
+// ❌ Blocking — ThreadPool starvation under load
+public IActionResult GetOrder(Guid id) =>
+    Ok(_service.GetByIdAsync(id).Result);      // .Result blocks a thread
+
+// ✅ Fully async — thread released during I/O
+public async Task<IActionResult> GetOrder(Guid id) =>
+    Ok(await _service.GetByIdAsync(id));
+
+// ── 2. Connection pooling ─────────────────────────────────────────────────
+// ❌ New SqlConnection per request — pool exhaustion
+public async Task<Product> GetProduct(int id)
+{
+    using var conn = new SqlConnection(_connStr);  // manually managed — easy to mis-use
+    return await conn.QueryFirstAsync<Product>("SELECT...", new { id });
+}
+
+// ✅ EF Core + Npgsql handle pooling; HttpClient via IHttpClientFactory
+builder.Services.AddDbContextPool<AppDbContext>(o =>
+    o.UseNpgsql(connectionString), poolSize: 128);  // reuse DbContext instances
+
+builder.Services.AddHttpClient<PaymentClient>(c =>
+    c.BaseAddress = new Uri("https://payments.internal/"));
+
+// ── 3. Allocation minimisation ────────────────────────────────────────────
+// ❌ Large string/byte allocations on hot path
+public async Task<IActionResult> GetReport()
+{
+    var bytes = await _store.ReadAllBytesAsync("report");
+    return File(bytes, "application/pdf");  // allocates full byte array in memory
+}
+
+// ✅ Stream directly — no buffer allocation
+public async Task<IActionResult> GetReport()
+{
+    var stream = await _store.OpenReadStreamAsync("report");
+    return File(stream, "application/pdf");  // pipes directly to response
+}
+
+// ✅ ArrayPool for temporary buffers
+byte[] buffer = ArrayPool<byte>.Shared.Rent(4096);
+try
+{
+    int read = await stream.ReadAsync(buffer.AsMemory(0, 4096));
+    // process buffer[0..read]
+}
+finally
+{
+    ArrayPool<byte>.Shared.Return(buffer);  // returned to pool, no GC
+}
+
+// ── 4. Output caching (ASP.NET Core 7+) ──────────────────────────────────
+builder.Services.AddOutputCache(options =>
+{
+    options.AddPolicy("Products", builder =>
+        builder.Expire(TimeSpan.FromSeconds(60))
+               .SetVaryByQuery("category", "page")
+               .Tag("products"));   // evict by tag on product update
+});
+
+app.UseOutputCache();
+
+[HttpGet]
+[OutputCache(PolicyName = "Products")]
+public async Task<IActionResult> GetProducts([FromQuery] string category) { ... }
+
+// Evict on write (invalidation)
+await _outputCacheStore.EvictByTagAsync("products", CancellationToken.None);
+
+// ── 5. Benchmarking with NBomber ──────────────────────────────────────────
+// Establish baseline before and after each optimisation
+var scenario = Scenario.Create("get_product", async context =>
+{
+    using var client = new HttpClient();
+    var response = await client.GetAsync("http://localhost:5000/api/products/1");
+    return response.IsSuccessStatusCode ? Response.Ok() : Response.Fail();
+})
+.WithLoadSimulations(
+    Simulation.Inject(rate: 1000, interval: TimeSpan.FromSeconds(1),
+                      during: TimeSpan.FromSeconds(30)));
+
+NBomberRunner.RegisterScenarios(scenario).Run();
+```
+
+```mermaid
+flowchart TD
+    USERS[100k req/s\nUsers] --> LB[Load Balancer\nNginx / AWS ALB]
+
+    LB --> API1[ASP.NET Core\nInstance 1]
+    LB --> API2[ASP.NET Core\nInstance 2]
+    LB --> APIN[ASP.NET Core\nInstance N]
+
+    API1 --> CACHE[Output Cache\nRedis / In-Memory]
+    API1 --> POOL[Connection Pool\nEF Core / Npgsql]
+    POOL --> DB[(Database\nRead Replicas)]
+
+    CACHE -->|cache hit\nno DB call| API1
+
+    CDN[CDN\nCloudFront / Akamai] -->|static + cacheable| USERS
+
+    style LB fill:#FF9800,color:#fff
+    style CACHE fill:#4CAF50,color:#fff
+    style CDN fill:#2196F3,color:#fff
+    style DB fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- Async all the way is the foundation — one blocking `.Result` can starve the ThreadPool under load
+- `AddDbContextPool` reuses `DbContext` instances — reduces allocations and connection churn
+- Output caching with tag-based eviction lets you cache aggressively without serving stale data
+- `ArrayPool<byte>` and `Span<T>` cut GC pressure on hot paths — measure with `dotnet-trace` / BenchmarkDotNet
+- Horizontal scaling requires stateless APIs — session state in Redis, no in-memory singletons holding request state
+
+---
+
+## FAANG-2. How does ASP.NET Core's minimal API compare to controller-based API at scale? (Microsoft)
+
+> **Why this matters:** Microsoft asks this to test knowledge of startup performance, source generators, and when abstraction cost becomes measurable. For 100k+ req/s, the difference is real.
+
+| Dimension | Controller-based API | Minimal API |
+|-----------|---------------------|-------------|
+| Startup time | Slower (reflection, controller discovery) | Faster (no controller scanning) |
+| Per-request overhead | Action filter pipeline, model binding via reflection | Lightweight — direct delegate invocation |
+| Middleware overhead | Full MVC pipeline | Leaner pipeline |
+| JSON serialization | `System.Text.Json` (reflection by default) | Source-generator JSON available |
+| Code organisation | Controllers + actions — familiar at scale | Endpoint groups (`MapGroup`) — good for microservices |
+| OpenAPI / Swagger | `[ApiController]` decorations | `WithOpenApi()` / `Swashbuckle` |
+| When to choose | Large teams, complex filters, Razor views | Microservices, high-throughput APIs, greenfield |
+
+```csharp
+// ── Controller-based ──────────────────────────────────────────────────────
+[ApiController]
+[Route("api/products")]
+public class ProductsController : ControllerBase
+{
+    [HttpGet("{id:int}")]
+    [ResponseCache(Duration = 60)]
+    public async Task<ActionResult<ProductDto>> Get(int id, [FromServices] IProductService svc)
+        => await svc.GetByIdAsync(id) is { } p ? p : NotFound();
+}
+
+// ── Minimal API equivalent ────────────────────────────────────────────────
+var products = app.MapGroup("/api/products").WithTags("Products");
+
+products.MapGet("/{id:int}", async (int id, IProductService svc) =>
+    await svc.GetByIdAsync(id) is { } p
+        ? Results.Ok(p)
+        : Results.NotFound())
+.WithName("GetProduct")
+.WithOpenApi()
+.CacheOutput(p => p.Expire(TimeSpan.FromSeconds(60)));
+
+// ── Source-generator JSON (faster serialization, zero reflection) ─────────
+[JsonSerializable(typeof(ProductDto))]
+[JsonSerializable(typeof(List<ProductDto>))]
+internal partial class AppJsonContext : JsonSerializerContext { }
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonContext.Default));
+// Result: JSON serialization with no reflection — measurable gain at 100k req/s
+```
+
+**Key talking points:**
+- Source-generator JSON eliminates reflection on the hot path — benchmark shows 15-30% faster serialization
+- Minimal APIs shine in microservices — one file, one concern; controllers shine in large MVC apps with complex filter chains
+- `MapGroup` applies middleware, auth, rate limiting to a group of endpoints — replaces base controller inheritance
+- Both can use the full middleware pipeline — the difference is in MVC-layer overhead, not Kestrel or routing
+
+---
+
+## FAANG-3. How do you implement multi-tenancy in an ASP.NET Core API? (Amazon/SaaS companies)
+
+> **Why this matters:** SaaS platforms at Amazon scale serve thousands of tenants from one codebase. Interviewers want tenant isolation strategy, DI scoping, and EF Core query filters — and they want you to name the tradeoffs.
+
+```
+Tenant Resolution (choose one or combine):
+  ┌────────────────────────────────────────────────────┐
+  │  Subdomain:  tenant1.api.example.com               │  ← clean, DNS-based
+  │  Header:     X-Tenant-Id: tenant-abc               │  ← simple for B2B APIs
+  │  JWT Claim:  "tid": "tenant-abc"                   │  ← most secure, auth-bound
+  │  Path:       /api/tenant-abc/products              │  ← REST-visible
+  └────────────────────────────────────────────────────┘
+
+Data Isolation Models:
+  Separate DB        → strongest isolation, high cost, complex migration
+  Shared DB, tenant column → most common, row-level security via EF filters
+  Schema-per-tenant  → middle ground, PostgreSQL schemas
+```
+
+```csharp
+// ── 1. Tenant context (scoped to each request) ────────────────────────────
+public interface ITenantContext
+{
+    string TenantId { get; }
+}
+
+public class TenantContext : ITenantContext
+{
+    public string TenantId { get; set; } = default!;
+}
+
+// ── 2. Tenant resolution middleware ──────────────────────────────────────
+public class TenantResolutionMiddleware
+{
+    private readonly RequestDelegate _next;
+
+    public TenantResolutionMiddleware(RequestDelegate next) => _next = next;
+
+    public async Task InvokeAsync(HttpContext ctx, ITenantContext tenantCtx)
+    {
+        // Strategy 1: JWT claim
+        var tenantId = ctx.User.FindFirstValue("tid");
+
+        // Strategy 2: Header fallback
+        tenantId ??= ctx.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+
+        // Strategy 3: Subdomain
+        tenantId ??= ctx.Request.Host.Host.Split('.').FirstOrDefault();
+
+        if (string.IsNullOrEmpty(tenantId))
+        {
+            ctx.Response.StatusCode = 400;
+            await ctx.Response.WriteAsync("Tenant could not be resolved");
+            return;
+        }
+
+        ((TenantContext)tenantCtx).TenantId = tenantId;
+        await _next(ctx);
+    }
+}
+
+// ── 3. EF Core global query filter (row-level security) ──────────────────
+public class AppDbContext : DbContext
+{
+    private readonly ITenantContext _tenant;
+
+    public AppDbContext(DbContextOptions options, ITenantContext tenant)
+        : base(options) => _tenant = tenant;
+
+    public DbSet<Product> Products => Set<Product>();
+
+    protected override void OnModelCreating(ModelBuilder mb)
+    {
+        // Applied to EVERY query automatically — tenants never see each other's data
+        mb.Entity<Product>().HasQueryFilter(p => p.TenantId == _tenant.TenantId);
+        mb.Entity<Product>().HasIndex(p => p.TenantId);   // index is critical for performance
+    }
+}
+
+// ── 4. Registration ───────────────────────────────────────────────────────
+builder.Services.AddScoped<ITenantContext, TenantContext>();
+builder.Services.AddScoped<AppDbContext>();
+app.UseMiddleware<TenantResolutionMiddleware>();   // before UseAuthentication? No — after
+
+// ── 5. Bypassing the filter (admin/migration scenarios) ──────────────────
+var allProducts = await _db.Products
+    .IgnoreQueryFilters()    // explicit opt-out — only in admin contexts
+    .ToListAsync();
+```
+
+```mermaid
+flowchart TD
+    REQ[HTTP Request] --> AUTHN[Authentication\nJWT validated]
+    AUTHN --> TRES[Tenant Resolution\nMiddleware]
+
+    TRES -->|JWT claim 'tid'| TC[TenantContext\nscoped service]
+    TRES -->|Header X-Tenant-Id| TC
+    TRES -->|Subdomain| TC
+
+    TC --> CTRL[Controller / Endpoint]
+    CTRL --> DB[AppDbContext\nglobal query filter:\nWHERE TenantId = @tid]
+
+    DB --> SQL[(Shared Database\ntenant-partitioned rows)]
+    SQL -->|filtered results| CTRL
+
+    TC -.->|injected into| DB
+
+    style TRES fill:#FF9800,color:#fff
+    style DB fill:#4CAF50,color:#fff
+    style SQL fill:#9C27B0,color:#fff
+```
+
+**Key talking points:**
+- Global query filter in EF Core is the safest approach — tenant isolation is enforced at the data layer, not scattered across services
+- Always index the `TenantId` column — without it, every query scans the full table
+- Scoped `ITenantContext` means each HTTP request gets its own tenant identity — no cross-tenant leakage
+- Separate databases: use when tenants have contractual data residency requirements (GDPR, HIPAA)
+- `IgnoreQueryFilters()` must be gated behind admin authorization — it's a foot-gun
+
+---
+
+## FAANG-4. How would you implement API throttling and quotas like AWS API Gateway? (Amazon)
+
+> **Why this matters:** Rate limiting is a first-class concern at Amazon. Interviewers expect token bucket semantics, distributed enforcement via Redis, and proper 429 responses with `Retry-After`.
+
+```
+Token Bucket Algorithm:
+  Bucket capacity: 100 tokens (burst)
+  Refill rate:     10 tokens/second
+
+  Request arrives:
+    ├─ Tokens available? Consume 1 token → allow
+    └─ Empty bucket? → 429 Too Many Requests
+
+  Quota (daily/monthly limit):
+    Separate counter per API key, resets at UTC midnight / billing cycle
+    Redis INCR + EXPIREAT (set expiry to end of period on first write)
+```
+
+```csharp
+// ── Token bucket in Redis ─────────────────────────────────────────────────
+public class RedisBucketRateLimiter
+{
+    private readonly IDatabase _db;
+
+    public RedisBucketRateLimiter(IDatabase db) => _db = db;
+
+    public async Task<RateLimitResult> CheckAsync(string apiKey,
+        int capacity = 100, double refillPerSecond = 10)
+    {
+        var now    = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var key    = $"bucket:{apiKey}";
+
+        // Lua script — atomic read-modify-write
+        const string script = @"
+            local tokens_key  = KEYS[1]
+            local last_key    = KEYS[1] .. ':last'
+            local capacity    = tonumber(ARGV[1])
+            local refill_rate = tonumber(ARGV[2])
+            local now         = tonumber(ARGV[3])
+            local ttl         = math.ceil(capacity / refill_rate) + 1
+
+            local last_tokens = tonumber(redis.call('GET', tokens_key) or capacity)
+            local last_time   = tonumber(redis.call('GET', last_key)   or now)
+
+            local elapsed     = math.max(0, now - last_time)
+            local new_tokens  = math.min(capacity, last_tokens + elapsed * refill_rate)
+
+            if new_tokens >= 1 then
+                redis.call('SETEX', tokens_key, ttl, new_tokens - 1)
+                redis.call('SETEX', last_key,   ttl, now)
+                return {1, math.floor(new_tokens - 1)}   -- allowed, remaining
+            else
+                local retry_after = math.ceil((1 - new_tokens) / refill_rate)
+                return {0, retry_after}                   -- denied, retry-after seconds
+            end";
+
+        var result = (RedisResult[]) await _db.ScriptEvaluateAsync(script,
+            new RedisKey[]  { key },
+            new RedisValue[] { capacity, refillPerSecond, now });
+
+        var allowed = (int)result[0] == 1;
+        return new RateLimitResult(allowed, (long)result[1]);
+    }
+}
+
+// ── ASP.NET Core middleware integration ───────────────────────────────────
+public class RateLimitMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly RedisBucketRateLimiter _limiter;
+
+    public async Task InvokeAsync(HttpContext ctx)
+    {
+        var apiKey = ctx.Request.Headers["X-Api-Key"].FirstOrDefault()
+                  ?? ctx.User.FindFirstValue("sub")
+                  ?? ctx.Connection.RemoteIpAddress?.ToString()
+                  ?? "anonymous";
+
+        var result = await _limiter.CheckAsync(apiKey);
+
+        ctx.Response.Headers["X-RateLimit-Remaining"] = result.Remaining.ToString();
+
+        if (!result.Allowed)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            ctx.Response.Headers["Retry-After"] = result.Remaining.ToString();
+            await ctx.Response.WriteAsJsonAsync(new
+            {
+                error   = "Rate limit exceeded",
+                retryAfterSeconds = result.Remaining
+            });
+            return;
+        }
+
+        await _next(ctx);
+    }
+}
+
+// ── Daily quota (separate from rate limit) ────────────────────────────────
+public async Task<bool> CheckDailyQuotaAsync(string apiKey, int dailyLimit)
+{
+    var key = $"quota:{apiKey}:{DateTime.UtcNow:yyyyMMdd}";
+    var count = await _db.StringIncrementAsync(key);
+    if (count == 1)
+        await _db.KeyExpireAsync(key, DateTime.UtcNow.Date.AddDays(1)); // expire at midnight UTC
+    return count <= dailyLimit;
+}
+```
+
+```mermaid
+flowchart TD
+    REQ[API Request\nX-Api-Key: abc123] --> EXTRACT[Extract API Key\nHeader / JWT / IP]
+    EXTRACT --> QUOTA{Daily Quota\nremaining?}
+    QUOTA -->|Exhausted| R429A[429 Too Many Requests\nQuota-Reset header]
+    QUOTA -->|OK| BUCKET{Token Bucket\ntokens > 0?}
+    BUCKET -->|Empty| R429B[429 Too Many Requests\nRetry-After header]
+    BUCKET -->|Token consumed| HANDLER[Route to Handler]
+    HANDLER --> RESP[200 Response\nX-RateLimit-Remaining header]
+
+    REDIS[(Redis\nper-key state)] -.->|atomic Lua script| BUCKET
+    REDIS -.->|INCR + EXPIREAT| QUOTA
+
+    style R429A fill:#f44336,color:#fff
+    style R429B fill:#f44336,color:#fff
+    style BUCKET fill:#FF9800,color:#fff
+    style REDIS fill:#9C27B0,color:#fff
+    style RESP fill:#4CAF50,color:#fff
+```
+
+**Key talking points:**
+- Lua script in Redis makes token bucket check-and-decrement atomic — no race conditions across instances
+- Return `Retry-After` header — RFC 6585 requires it; clients need it to back off correctly
+- Rate limit (requests/second) and quota (daily/monthly total) are orthogonal — implement both
+- ASP.NET Core 7+ ships `RateLimiter` middleware built-in — use it for simple cases; Redis-backed for multi-instance
+- Partition by API key, not IP — IP-based limits punish users behind NAT and are trivially bypassed with proxies
+
+---
+
+## FAANG-5. How does ASP.NET Core handle WebSockets for real-time features? (Meta/Slack-style)
+
+> **Why this matters:** Real-time at Meta/Slack scale means millions of persistent connections. Interviewers test the upgrade flow, SignalR backplane for horizontal scaling, and reconnection strategies.
+
+```
+WebSocket Upgrade Flow:
+  Client                              Server
+    │                                   │
+    ├── HTTP GET /hub ──────────────────►│
+    │   Upgrade: websocket              │
+    │   Connection: Upgrade             │
+    │   Sec-WebSocket-Key: <base64>     │
+    │                                   │
+    │◄── 101 Switching Protocols ────────┤
+    │    Sec-WebSocket-Accept: <hash>   │
+    │                                   │
+    │◄══ Full-duplex TCP frames ════════►│  ← persistent connection
+    │   (no HTTP overhead per message)  │
+    │                                   │
+    ├── ping frame ─────────────────────►│  ← heartbeat (keep-alive)
+    │◄── pong frame ─────────────────────┤
+    │                                   │
+    ├── close frame (1000) ─────────────►│  ← graceful close
+    │◄── close frame ────────────────────┤
+```
+
+```csharp
+// ── SignalR Hub ────────────────────────────────────────────────────────────
+public class ChatHub : Hub
+{
+    public async Task SendMessage(string roomId, string message)
+    {
+        // Send to all clients in the group (room)
+        await Clients.Group(roomId).SendAsync("ReceiveMessage", new
+        {
+            User    = Context.User?.Identity?.Name,
+            Message = message,
+            SentAt  = DateTimeOffset.UtcNow
+        });
+    }
+
+    public async Task JoinRoom(string roomId)
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, roomId);
+        await Clients.Group(roomId).SendAsync("UserJoined", Context.User?.Identity?.Name);
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        // Cleanup — notify room of departure
+        await base.OnDisconnectedAsync(exception);
+    }
+}
+
+// ── Registration ──────────────────────────────────────────────────────────
+builder.Services.AddSignalR(options =>
+{
+    options.ClientTimeoutInterval    = TimeSpan.FromSeconds(30);  // server-side timeout
+    options.KeepAliveInterval        = TimeSpan.FromSeconds(15);  // heartbeat ping
+    options.MaximumReceiveMessageSize = 32 * 1024;               // 32KB max message
+});
+
+// ── Redis backplane for horizontal scaling ────────────────────────────────
+// Without backplane: user on Server1 can't receive messages sent via Server2
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(connectionString, options =>
+    {
+        options.Configuration.ChannelPrefix = RedisChannel.Literal("ChatApp");
+    });
+
+app.MapHub<ChatHub>("/hubs/chat");
+
+// ── TypeScript client with reconnection ──────────────────────────────────
+/*
+const connection = new signalR.HubConnectionBuilder()
+    .withUrl("/hubs/chat", { accessTokenFactory: () => getAuthToken() })
+    .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])  // retry delays ms
+    .configureLogging(signalR.LogLevel.Warning)
+    .build();
+
+connection.on("ReceiveMessage", (payload) => renderMessage(payload));
+
+connection.onreconnecting(() => showBanner("Reconnecting..."));
+connection.onreconnected(() => hideBanner());
+connection.onclose(() => showError("Disconnected. Please refresh."));
+
+await connection.start();
+*/
+
+// ── Scaling WebSockets (Azure Service Bus backplane for higher scale) ─────
+builder.Services.AddSignalR()
+    .AddAzureSignalR(options =>
+    {
+        options.ConnectionCount = 5;           // connections to Azure SignalR Service
+        options.ServerStickyMode = ServerStickyMode.Required;  // sticky sessions
+    });
+// Azure SignalR Service: offloads connection management — scales to millions
+```
+
+```mermaid
+flowchart TD
+    C1[Client 1\nServer 1] -->|WebSocket| S1[ASP.NET Core\nInstance 1\nSignalR Hub]
+    C2[Client 2\nServer 1] -->|WebSocket| S1
+    C3[Client 3\nServer 2] -->|WebSocket| S2[ASP.NET Core\nInstance 2\nSignalR Hub]
+
+    S1 -->|publish message| BACKPLANE[(Redis Backplane\nor Azure Service Bus)]
+    S2 -->|publish message| BACKPLANE
+    BACKPLANE -->|fan-out to all instances| S1
+    BACKPLANE -->|fan-out to all instances| S2
+
+    S1 -->|push to clients\nin group| C1
+    S1 -->|push to clients\nin group| C2
+    S2 -->|push to clients\nin group| C3
+
+    HBEAT[Heartbeat\n15s keepalive ping] -.->|KeepAliveInterval| S1
+    DISC([Client disconnect\nor network drop]) -.->|OnDisconnectedAsync| S1
+
+    style BACKPLANE fill:#f44336,color:#fff
+    style S1 fill:#4CAF50,color:#fff
+    style S2 fill:#4CAF50,color:#fff
+    style HBEAT fill:#FF9800,color:#fff
+```
+
+**Key talking points:**
+- Without a backplane, messages sent on Instance 1 never reach clients connected to Instance 2 — Redis pub/sub bridges instances
+- `KeepAliveInterval` sends pings; `ClientTimeoutInterval` disconnects unresponsive clients — always set both
+- Sticky sessions (same client always hits same server) can simplify state but break if a server dies — Redis backplane is the better solution
+- Azure SignalR Service offloads connection management entirely — the app server handles business logic, Azure handles millions of sockets
+- Reconnect with jitter to prevent thundering herd when a server restarts

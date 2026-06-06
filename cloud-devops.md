@@ -1596,3 +1596,368 @@ flowchart TD
     style FULL fill:#4CAF50,color:#fff
 ```
 
+
+---
+
+## 🏢 FAANG Cloud & Infrastructure Questions
+
+---
+
+### Q: How does Netflix deploy hundreds of times per day safely? (Netflix)
+
+**The Netflix deployment philosophy — "Freedom and Responsibility":**
+- Any team can deploy at any time with no central release gate
+- Safety comes from automation, not process gates
+
+**Spinnaker (open-sourced by Netflix):**
+- Multi-cloud CD platform supporting AWS, GCP, Azure, Kubernetes
+- Pipeline stages: Bake AMI → Deploy to staging → Run automated tests → Deploy canary → Automated canary analysis → Full rollout
+- Supports blue/green, canary, and rolling deployment strategies
+
+**Automated canary analysis with Kayenta:**
+- Routes ~1–5% of production traffic to canary instances
+- Compares key metrics (latency p99, error rate, business KPIs) between canary and baseline
+- Assigns a canary score (0–100); below threshold → automatic rollback
+
+**Immutable infrastructure:**
+- Never SSH into running instances; all config is baked into the AMI
+- "Bake → Deploy → Verify → Promote" — never patch in place
+- Instance replacement on every deploy ensures drift-free environments
+
+**Chaos Monkey:**
+- Randomly terminates production EC2 instances during business hours
+- Forces teams to design for instance failure from day one
+- Part of the broader Simian Army (Latency Monkey, Conformity Monkey, etc.)
+
+```mermaid
+flowchart TD
+    PR[Pull Request merged] --> CI[CI Build\nunit tests · lint · SAST]
+    CI --> BAKE[Bake AMI\nimmutable image]
+    BAKE --> STAGING[Deploy to Staging\nautomated integration tests]
+    STAGING --> CANARY[Deploy Canary\n1-5% production traffic]
+    CANARY --> KAYENTA{Kayenta\nCanary Analysis}
+    KAYENTA -->|Score < threshold| ROLLBACK[🚨 Auto Rollback\nKayenta kills canary]
+    KAYENTA -->|Score ≥ threshold| FULL[Full Production Rollout\nSpinnaker red/black deploy]
+    FULL --> CHAOS[Chaos Monkey\nrandom instance termination]
+    CHAOS --> MONITOR[Atlas Metrics\n+ Mantis Streaming]
+
+    style ROLLBACK fill:#f44336,color:#fff
+    style FULL fill:#4CAF50,color:#fff
+    style CANARY fill:#FF9800,color:#fff
+```
+
+> **Why this matters:** Netflix's model proves that deployment frequency and stability are not opposites — automation, observability, and canary analysis enable higher velocity with lower risk than manual QA gates.
+
+**💡 Production Example:**
+Netflix runs ~4,000 deployments per day across hundreds of microservices. When a canary deploy showed a 0.3% increase in 5xx errors, Kayenta automatically scored it below threshold and rolled back within 8 minutes — before any customer-facing incident was declared.
+
+---
+
+### Q: How does Amazon ECS/EKS schedule containers at scale? (Amazon)
+
+**ECS task placement strategies:**
+
+| Strategy | Behavior | Use case |
+|---|---|---|
+| **binpack** | Pack tasks onto fewest instances (minimize cost) | Batch / cost-sensitive workloads |
+| **spread** | Distribute tasks evenly across AZs / instances | High-availability services |
+| **random** | Place randomly | Quick prototyping |
+
+**EKS — kube-scheduler:**
+- **Filtering:** eliminate nodes that don't meet requirements (resource requests, node selectors, taints/tolerations)
+- **Scoring:** rank remaining nodes by available resources, affinity rules, pod spread constraints
+- **Binding:** assign pod to winning node
+
+**Cluster Autoscaler vs Karpenter:**
+- **Cluster Autoscaler:** scales existing node groups based on pending pods; slow (1–3 min to provision a node)
+- **Karpenter:** AWS-native, directly provisions EC2 instances matching exact pod requirements; 30–60 seconds; can consolidate nodes to reduce cost
+
+**KEDA (Kubernetes Event-Driven Autoscaling):**
+- Scales deployments based on external event sources: SQS queue depth, Kafka lag, HTTP request rate
+- Scales to zero when no events (cost optimization)
+
+**Fargate:**
+- Serverless containers: no node management, pay per pod CPU/memory
+- Each pod runs in its own microVM (Firecracker) — strong isolation
+- Trade-off: slower cold start, no daemonsets, no GPU support
+
+```mermaid
+flowchart TD
+    POD[New Pod Created] --> FILTER[Scheduler: Filtering Phase\nremove nodes that fail constraints\nresources · taints · node selectors]
+    FILTER --> SCORE[Scoring Phase\nrank nodes by:\nresource fit · spread · affinity]
+    SCORE --> BIND[Bind Pod to Node\nkubelet pulls image · starts container]
+
+    BIND --> HEALTHY{Pod healthy?}
+    HEALTHY -->|Yes| KARPENTER_CHECK{Node utilization\n< threshold?}
+    HEALTHY -->|No — CrashLoop| RESTART[Kubelet restarts pod\nback-off: 10s → 20s → 40s → 5min]
+
+    KARPENTER_CHECK -->|Low utilization| CONSOLIDATE[Karpenter consolidates\nevict pods → terminate node]
+    KARPENTER_CHECK -->|Pending pods exist| PROVISION[Karpenter provisions\nnew EC2 in ~45s]
+
+    style BIND fill:#4CAF50,color:#fff
+    style RESTART fill:#FF9800,color:#fff
+    style CONSOLIDATE fill:#2196F3,color:#fff
+```
+
+> **Why this matters:** Choosing the wrong autoscaling strategy has direct cost and reliability consequences. Cluster Autoscaler's 2-minute provisioning time means a sudden traffic spike can cause timeouts before new nodes are ready; Karpenter's 45-second provisioning significantly narrows that window.
+
+**💡 Production Example:**
+A team running batch ML inference jobs on EKS switched from Cluster Autoscaler to Karpenter and configured binpack scheduling. Karpenter's bin-packing reduced their EC2 spend by 35% by consistently selecting right-sized instances and consolidating underutilized nodes overnight.
+
+---
+
+### Q: How does Google's Borg/Kubernetes resource management work? (Google)
+
+**Resource requests vs limits:**
+- **Request:** the amount the scheduler guarantees (used for placement decisions)
+- **Limit:** the maximum the container is allowed to use
+- **CPU over limit:** throttled (container continues running, but CPU time is capped)
+- **Memory over limit:** OOM killed (container terminated immediately)
+
+**QoS classes (assigned automatically by Kubernetes):**
+
+| Class | Condition | Eviction priority |
+|---|---|---|
+| **Guaranteed** | requests == limits for all containers | Last to be evicted |
+| **Burstable** | requests < limits (or partial spec) | Middle priority |
+| **BestEffort** | No requests or limits set | First to be evicted |
+
+**LimitRange:** sets default/max/min resource values per namespace
+**ResourceQuota:** caps total resource consumption across all pods in a namespace
+
+**Vertical Pod Autoscaler (VPA):**
+- Analyzes historical CPU/memory usage and recommends (or auto-sets) resource requests
+- Requires pod restart to apply new requests — not suitable for stateful services without disruption budgets
+
+**Node affinity and pod anti-affinity for HA:**
+```yaml
+# Spread replicas across AZs — no two pods on same AZ
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: my-service
+        topologyKey: topology.kubernetes.io/zone
+```
+
+```mermaid
+flowchart TD
+    subgraph QoS["QoS Classes & Eviction Order"]
+        BE[BestEffort Pod\nno requests/limits] -->|evicted first| EVICT[Node Memory Pressure\neviction triggered]
+        BURST[Burstable Pod\nrequests < limits] -->|evicted second| EVICT
+        GUAR[Guaranteed Pod\nrequests == limits] -->|evicted last| EVICT
+    end
+
+    subgraph CPU["CPU Throttling"]
+        C1[Container hits CPU limit] --> THROTTLE[CFS Throttling\ncontainer sleeps until next period\nno kill · just slow]
+    end
+
+    subgraph MEM["Memory OOM"]
+        M1[Container hits memory limit] --> OOM[OOM Kill\ncontainer terminated\nkubelet restarts it]
+    end
+
+    style BE fill:#f44336,color:#fff
+    style GUAR fill:#4CAF50,color:#fff
+    style OOM fill:#f44336,color:#fff
+    style THROTTLE fill:#FF9800,color:#fff
+```
+
+> **Why this matters:** Setting resource limits without matching requests (BestEffort/Burstable) means your pods are the first casualties during node memory pressure. Production services should always be Guaranteed class — requests == limits — to prevent unexpected eviction.
+
+**💡 Production Example:**
+A team deployed a critical API without resource requests, giving it BestEffort QoS. During a memory pressure event caused by a noisy neighbor batch job on the same node, Kubernetes evicted the API pods first — causing a production outage. Setting `requests == limits` on the API pods promoted them to Guaranteed and eliminated the eviction risk.
+
+---
+
+### Q: How does Netflix implement Chaos Engineering? (Netflix)
+
+**The Simian Army — Netflix's chaos tools:**
+
+| Tool | What it does |
+|---|---|
+| **Chaos Monkey** | Randomly terminates EC2 instances in production during business hours |
+| **Chaos Kong** | Simulates failure of an entire AWS region — evacuates all traffic to other regions |
+| **Latency Monkey** | Injects artificial delays into REST calls between services |
+| **Conformity Monkey** | Finds and flags instances not adhering to best practices |
+| **FIT (Failure Injection Testing)** | Controlled fault injection at the request level — inject failures for specific users only |
+
+**Principles of Chaos Engineering (from principlesofchaos.org):**
+1. Define steady-state behavior (baseline metrics)
+2. Hypothesize that steady state continues in both control and experimental group
+3. Introduce real-world events (instance failures, network partitions, disk full)
+4. Disprove the hypothesis — look for deviations in steady state
+5. **Run experiments in production** — staging doesn't reveal production-only failure modes
+6. Control blast radius — start small (1 instance), expand gradually
+
+**Game Days:**
+- Planned chaos drills where teams simulate specific failure scenarios
+- Entire team on call, runbooks pre-prepared, metrics monitored in real time
+
+**Implementing chaos in .NET with Polly.Simmy (Polly v8):**
+```csharp
+// Add chaos to an HttpClient pipeline for testing resilience
+var chaosStrategy = new ChaosStrategyBuilder<HttpResponseMessage>()
+    .AddFault(new ChaosFaultStrategyOptions
+    {
+        InjectionRate = 0.1,          // 10% of calls throw an exception
+        FaultGenerator = _ => ValueTask.FromResult<Exception?>(new HttpRequestException("Simulated failure"))
+    })
+    .AddLatency(new ChaosLatencyStrategyOptions
+    {
+        InjectionRate = 0.2,          // 20% of calls get a 2-second delay
+        Latency = TimeSpan.FromSeconds(2)
+    })
+    .Build();
+
+// Wrap your existing resilience pipeline
+var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+    .AddRetry(retryOptions)
+    .AddCircuitBreaker(cbOptions)
+    .AddPipeline(chaosStrategy)        // chaos goes last (innermost)
+    .Build();
+```
+
+```mermaid
+flowchart LR
+    PROD[Production System] --> OBSERVE[Define Steady State\nlatency · error rate · throughput]
+    OBSERVE --> HYPO[Hypothesize:\nsteady state holds under failure]
+    HYPO --> INJECT[Inject Failure\nChaos Monkey / FIT / Latency Monkey]
+    INJECT --> MONITOR[Monitor Metrics\ndeviation from steady state?]
+    MONITOR -->|Deviation found| LEARN[Learn & Fix\nresilience gap identified]
+    MONITOR -->|No deviation| CONFIDENCE[Confidence increased\nexpand blast radius]
+    LEARN --> PROD
+    CONFIDENCE --> INJECT
+
+    style LEARN fill:#f44336,color:#fff
+    style CONFIDENCE fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Unknown dependencies are more dangerous than known ones. Chaos engineering forces hidden failure modes into the open during controlled experiments rather than discovering them at 3am during a real outage.
+
+**💡 Production Example:**
+Netflix discovered through Chaos Kong that one of their microservices had a hidden dependency on a regional DynamoDB table — it had not been configured for Global Tables. The dependency was only visible when the entire region was evacuated. The fix (migrating to DynamoDB Global Tables) was made before a real regional outage exposed it to customers.
+
+---
+
+### Q: How do you design a multi-region active-active deployment on AWS? (Amazon)
+
+**Active-active vs active-passive:**
+- **Active-passive:** one region handles all traffic; second region is warm standby — failover takes minutes
+- **Active-active:** all regions serve traffic simultaneously — no failover needed, but conflict resolution required
+
+**Traffic routing:**
+- **Route 53 latency-based routing:** routes each user to the lowest-latency region
+- **Route 53 geoproximity routing:** routes based on geographic location (with bias)
+- **Global Accelerator:** anycast routing — users connect to nearest AWS edge PoP, traffic travels AWS backbone (lower jitter than public internet)
+
+**Data layer:**
+- **DynamoDB Global Tables:** multi-region, multi-active replication; conflict resolution = last-writer-wins (based on timestamp)
+- **Aurora Global Database:** one primary region for writes; up to 5 read-only secondary regions; < 1s lag
+- **For stronger consistency needs:** use CRDT (Conflict-free Replicated Data Type) for data types that must converge (counters, sets)
+
+**Conflict resolution strategies:**
+| Strategy | When to use |
+|---|---|
+| Last-writer-wins (LWW) | Acceptable to lose one write; most common |
+| CRDT | Counters, presence, shopping cart — must converge |
+| Application-level merge | Complex domain objects requiring business logic |
+
+```mermaid
+flowchart TD
+    USER_EU[European User] --> GA[AWS Global Accelerator\nanycast IP]
+    USER_US[US User] --> GA
+    USER_AP[APAC User] --> GA
+
+    GA -->|nearest edge| R53{Route 53\nlatency-based routing}
+    R53 -->|lowest latency| EU[EU-WEST-1\nActive Region]
+    R53 -->|lowest latency| US[US-EAST-1\nActive Region]
+    R53 -->|lowest latency| AP[AP-SOUTHEAST-1\nActive Region]
+
+    EU <-->|DynamoDB Global Tables\nbidirectional replication| US
+    US <-->|DynamoDB Global Tables| AP
+    EU <-->|DynamoDB Global Tables| AP
+
+    EU --> DB_EU[(DynamoDB\nEU replica)]
+    US --> DB_US[(DynamoDB\nUS replica — primary write region)]
+    AP --> DB_AP[(DynamoDB\nAP replica)]
+
+    style EU fill:#2196F3,color:#fff
+    style US fill:#4CAF50,color:#fff
+    style AP fill:#FF9800,color:#fff
+```
+
+> **Why this matters:** Active-passive failover has an RTO of minutes and an RPO measured in seconds of data loss. Active-active has near-zero RTO and RPO — but requires designing around eventual consistency and conflict resolution from the start.
+
+**💡 Production Example:**
+An Amazon team running a global order management service migrated from active-passive (15-minute failover) to active-active across us-east-1, eu-west-1, and ap-southeast-1 using DynamoDB Global Tables. A us-east-1 degradation event that previously would have caused a 15-minute outage was absorbed automatically — Route 53 health checks rerouted traffic to eu-west-1 and ap-southeast-1 in under 30 seconds.
+
+---
+
+### Q: How does Google manage SRE and error budgets? (Google SRE Book)
+
+**The three-tier SLx framework:**
+
+| Term | Definition | Example |
+|---|---|---|
+| **SLI** (Service Level Indicator) | The metric you measure | % of HTTP requests returning 2xx in < 200ms |
+| **SLO** (Service Level Objective) | Your target for that metric | 99.9% of requests succeed in < 200ms |
+| **SLA** (Service Level Agreement) | Contract with external customers; breach triggers penalties | 99.5% monthly uptime or credit issued |
+
+**Error budget:**
+```
+error_budget = 1 - SLO
+# If SLO = 99.9%:
+error_budget = 0.1% of requests may fail
+             = 0.1% × 43,800 min/month = 43.8 minutes of downtime/month
+```
+
+**When error budget is exhausted:**
+- Feature releases frozen until budget resets (start of next month)
+- Engineering effort shifts from features to reliability
+- Removes the finger-pointing between dev and ops — both lose when budget burns
+
+**Burn rate alerts (multiwindow, multi-burn-rate):**
+- **Fast burn (2% budget in 1 hour):** page immediately — you'll exhaust the budget in 2 days
+- **Slow burn (5% budget in 6 hours):** create a ticket — low urgency but trend is bad
+- **Multiwindow:** combine a short window (detects fast burn) + long window (confirms it's not a spike)
+
+```yaml
+# Example Prometheus alerting rule — fast burn
+- alert: HighErrorBudgetBurnRate
+  expr: |
+    (
+      sum(rate(http_requests_total{status=~"5.."}[1h])) /
+      sum(rate(http_requests_total[1h]))
+    ) > (14.4 * 0.001)   # 14.4x burn rate = 2% budget in 1 hour
+  for: 5m
+  annotations:
+    summary: "Fast error budget burn — will exhaust monthly budget in 2 days"
+```
+
+```mermaid
+flowchart TD
+    MEASURE[Measure SLI\ne.g. success rate every 1min] --> COMPARE{SLO met?}
+    COMPARE -->|Yes| BUDGET_OK[Error budget healthy\nfeature releases allowed]
+    COMPARE -->|No| BURN{Burn rate?}
+
+    BURN -->|> 14.4x in 1hr\n2% budget consumed| PAGE[🚨 Page on-call immediately\nP1 incident]
+    BURN -->|> 6x in 6hr\n5% budget consumed| TICKET[📋 Create ticket\naddress within 1 day]
+    BURN -->|Slow accumulation| REVIEW[Weekly review\nreliability roadmap item]
+
+    PAGE --> FIX[Fix + blameless postmortem]
+    TICKET --> FIX
+    FIX --> FREEZE{Budget exhausted\nthis month?}
+    FREEZE -->|Yes| HALT[🛑 Freeze feature releases\nfocus on reliability]
+    FREEZE -->|No| RESUME[Resume normal velocity]
+
+    style PAGE fill:#f44336,color:#fff
+    style HALT fill:#FF9800,color:#fff
+    style BUDGET_OK fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Error budgets transform the dev-vs-ops conflict into a shared incentive. Both sides want to ship features (use the budget efficiently) and maintain reliability (don't exhaust it). The budget is an objective, data-driven arbiter — not a subjective judgment call.
+
+**💡 Production Example:**
+A Google SRE team for a storage service had an SLO of 99.95%. After a botched deploy consumed 60% of the monthly error budget in one day, the error budget policy automatically triggered a feature freeze. The engineering team spent the next two weeks on reliability improvements (better canary analysis, improved rollback automation) before resuming feature work — preventing the same failure class from recurring.
+
