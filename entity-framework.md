@@ -814,3 +814,246 @@ await _db.Orders
     .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, "Archived")); // one UPDATE
 ```
 
+---
+
+### Q: You're building a new API. How do you decide between EF Core and Dapper?
+
+**Answer:**
+
+EF Core is the default choice for productivity, consistency, and maintainability. It handles CRUD operations, migrations, change tracking, and relationships with minimal boilerplate. Dapper is a targeted tool for performance-critical, read-heavy paths where hand-tuned SQL gives a measurable advantage over EF Core's generated queries.
+
+A mixed strategy works well when the boundary is explicit:
+
+| Scenario | Use |
+|----------|-----|
+| Standard CRUD, domain operations | ✅ EF Core |
+| Complex analytics, reporting queries | ✅ Dapper |
+| Multi-table joins with window functions | ✅ Dapper |
+| Write operations requiring change tracking | ✅ EF Core |
+
+❌ **Bad — using raw ADO.NET or Dapper everywhere "for performance":**
+```csharp
+// Every endpoint hand-rolls SQL — even simple CRUD
+public async Task<User> GetUserAsync(int id)
+{
+    using var conn = new SqlConnection(_connStr);
+    return await conn.QuerySingleAsync<User>(
+        "SELECT Id, Name, Email FROM Users WHERE Id = @id", new { id });
+}
+
+public async Task UpdateUserAsync(User user)
+{
+    using var conn = new SqlConnection(_connStr);
+    await conn.ExecuteAsync(
+        "UPDATE Users SET Name = @Name, Email = @Email WHERE Id = @Id", user);
+}
+// Hundreds of hand-maintained SQL strings, no migrations, no change tracking
+```
+
+✅ **Good — EF Core for CRUD, Dapper for complex reads:**
+```csharp
+// EF Core for standard domain operations
+public class UserRepository
+{
+    private readonly AppDbContext _db;
+    public UserRepository(AppDbContext db) => _db = db;
+
+    public async Task<User?> GetByIdAsync(int id)
+        => await _db.Users.FindAsync(id);
+
+    public async Task UpdateAsync(User user)
+    {
+        _db.Users.Update(user);
+        await _db.SaveChangesAsync();
+    }
+}
+
+// Dapper for performance-critical analytics query
+public class ReportRepository
+{
+    private readonly IDbConnection _conn;
+    public ReportRepository(IDbConnection conn) => _conn = conn;
+
+    public async Task<IEnumerable<SalesDto>> GetSalesSummaryAsync(DateRange range)
+    {
+        // Complex 6-table join with window functions — hand-tuned SQL
+        const string sql = @"
+            SELECT c.Name, SUM(ol.Qty * ol.Price) AS Revenue,
+                   RANK() OVER (ORDER BY SUM(ol.Qty * ol.Price) DESC) AS Rank
+            FROM Orders o
+            JOIN Customers c ON c.Id = o.CustomerId
+            JOIN OrderLines ol ON ol.OrderId = o.Id
+            JOIN Products p ON p.Id = ol.ProductId
+            JOIN Categories cat ON cat.Id = p.CategoryId
+            JOIN Regions r ON r.Id = c.RegionId
+            WHERE o.PlacedAt BETWEEN @From AND @To
+            GROUP BY c.Id, c.Name";
+
+        return await _conn.QueryAsync<SalesDto>(sql, new { range.From, range.To });
+    }
+}
+```
+
+> **Why this matters:** Picking the wrong data access tool creates either unmaintainable generated SQL or needless complexity. Interviews test whether you treat this as a deliberate architectural boundary rather than a blanket preference.
+
+**💡 Production Example:**
+A reporting dashboard API used EF Core for all CRUD operations on the main domain but switched to Dapper for a complex analytics query joining six tables with window functions. The EF Core-generated SQL for that query took 3 seconds due to inefficient join ordering. Hand-tuned Dapper cut query time to 200ms. EF Core remained for all writes and simpler reads — the boundary was a single repository class.
+
+```mermaid
+flowchart LR
+    API["API Layer"] --> EF["EF Core\nCRUD · Writes · Migrations"]
+    API --> D["Dapper\nAnalytics · Complex Reads"]
+    EF --> DB[(SQL Server)]
+    D --> DB
+    style EF fill:#2d6a4f,color:#fff
+    style D fill:#0d47a1,color:#fff
+```
+
+---
+
+### Q: What is the N+1 query problem and how do you fix it?
+
+**Answer:**
+
+The N+1 problem occurs when one query loads N parent records, and then N additional queries are issued — one per parent — to load related child data. With 500 orders, that is 501 database round-trips instead of 1.
+
+**Root causes in EF Core:**
+
+| Cause | Example |
+|-------|---------|
+| Lazy loading enabled | Accessing `order.LineItems` inside a loop |
+| Missing `.Include()` | Forgetting to eager-load a navigation |
+| `.Select()` projecting navigations without including | `o.Customer.Name` in a projection without `.Include()` |
+
+❌ **Bad — lazy loading causes N+1:**
+```csharp
+// Lazy loading enabled — each access to .LineItems triggers a new query
+var orders = await _db.Orders.ToListAsync(); // 1 query: SELECT * FROM Orders
+
+foreach (var order in orders)
+{
+    // NEW query per iteration: SELECT * FROM LineItems WHERE OrderId = X
+    var total = order.LineItems.Sum(li => li.Price);
+    Console.WriteLine($"Order {order.Id}: {total}");
+}
+// 500 orders → 501 queries → 4s page load
+```
+
+✅ **Good — eager loading collapses to a single JOIN:**
+```csharp
+// .Include() generates one SQL with JOIN
+var orders = await _db.Orders
+    .Include(o => o.LineItems)
+    .ToListAsync();
+// 1 query: SELECT o.*, li.* FROM Orders o JOIN LineItems li ON li.OrderId = o.Id
+
+foreach (var order in orders)
+{
+    var total = order.LineItems.Sum(li => li.Price); // data already loaded — no query
+    Console.WriteLine($"Order {order.Id}: {total}");
+}
+```
+
+✅ **Better — project only what you need (no unnecessary columns):**
+```csharp
+var summaries = await _db.Orders
+    .Select(o => new OrderSummaryDto
+    {
+        Id = o.Id,
+        Total = o.LineItems.Sum(li => li.Price), // translated to SQL SUM — 1 query
+        ItemCount = o.LineItems.Count
+    })
+    .ToListAsync();
+```
+
+**Always verify generated SQL:**
+```csharp
+// In development: log all SQL to console
+optionsBuilder.LogTo(Console.WriteLine, LogLevel.Information)
+              .EnableSensitiveDataLogging();
+
+// Or use MiniProfiler / Application Insights to count queries per request
+```
+
+> **Why this matters:** N+1 queries are invisible in small datasets and only appear under production load. They are one of the most common causes of slow EF Core endpoints — every interviewer asking about EF performance expects you to name this pattern first.
+
+**💡 Production Example:**
+A dashboard endpoint listing orders with line items was issuing 1 query for the order list plus N queries for each order's items. The developer had only tested with 5 orders locally. In production with 500 orders on the same page, 501 round-trips were issued and page load reached 4 seconds. Adding `.Include(o => o.LineItems)` reduced round-trips to 1, and page load dropped to under 200ms.
+
+---
+
+### Q: How do you review a pull request for hidden query performance problems in EF Core?
+
+**Answer:**
+
+EF Core query issues rarely appear in unit tests — they require production-scale data and load to surface. A PR review must check the query shape, not just the C# code.
+
+**Checklist for EF Core PRs:**
+
+| Check | What to look for |
+|-------|-----------------|
+| Missing `.Include()` | Navigation properties accessed in loops without eager loading |
+| Client-side evaluation | `.Where()`, `.OrderBy()`, or `.Select()` after `.ToList()` / `.AsEnumerable()` |
+| No `.AsNoTracking()` on reads | Read-only endpoints tracking entities unnecessarily |
+| Unbounded queries | No `.Take()` on potentially large result sets |
+| Scalar subqueries in projections | `o.Customer.Name` in a `.Select()` without `.Include()` |
+| Cardinality explosion via `.Include()` | Including large collections on already-large parent sets |
+
+❌ **Bad — client-side filtering on the entire table:**
+```csharp
+// WRONG: .ToList() materialises the entire table FIRST, then filters in memory
+public async Task<List<Order>> GetRecentOrdersAsync(int customerId)
+{
+    var allOrders = await _db.Orders.ToListAsync(); // SELECT * FROM Orders — entire table!
+    return allOrders.Where(o => o.CustomerId == customerId).ToList(); // filtered in C#
+}
+// 8 million rows pulled into memory; passes tests on a dev DB with 50 rows
+```
+
+✅ **Good — predicate translated to SQL WHERE clause:**
+```csharp
+// Correct: .Where() before .ToListAsync() is translated to SQL
+public async Task<List<Order>> GetRecentOrdersAsync(int customerId)
+{
+    return await _db.Orders
+        .Where(o => o.CustomerId == customerId) // SQL: WHERE CustomerId = @p0
+        .AsNoTracking()
+        .Take(100)
+        .ToListAsync();
+}
+```
+
+❌ **Bad — accidental AsEnumerable switches to LINQ-to-Objects:**
+```csharp
+var results = await _db.Products
+    .AsEnumerable()            // switches to in-memory evaluation HERE
+    .Where(p => p.Price > 100) // no longer translated to SQL
+    .ToListAsync();
+```
+
+✅ **Good — stay in IQueryable until the terminal call:**
+```csharp
+var results = await _db.Products
+    .Where(p => p.Price > 100) // SQL WHERE
+    .OrderBy(p => p.Name)      // SQL ORDER BY
+    .Take(50)                  // SQL TOP 50
+    .AsNoTracking()
+    .ToListAsync();
+```
+
+**During PR review, ask:**
+- "Can you share the generated SQL for this endpoint?" (use `ToQueryString()` in EF Core 5+)
+- "What does the query plan look like on the production table size?"
+- "Is this endpoint protected by a `.Take()` limit?"
+
+```csharp
+// Quick way to inspect generated SQL in code review / local testing
+var query = _db.Orders.Where(o => o.Status == "Pending").Take(100);
+Console.WriteLine(query.ToQueryString()); // prints the SQL
+```
+
+> **Why this matters:** Query performance issues rarely appear in unit tests and often slip into production. A reviewer who only reads C# logic without asking "what SQL does this produce?" will miss the most common class of EF Core bugs.
+
+**💡 Production Example:**
+A LINQ query used `.Where()` after `.ToList()`, which pulled the entire table into memory before filtering. The staging dataset had 200 rows so all tests passed with sub-millisecond response. Production had 8 million rows — the endpoint pulled the entire Orders table into application memory, exhausted the container's heap, and caused an OOM crash. The fix was a one-line reorder: move `.Where()` before `.ToListAsync()`.
+

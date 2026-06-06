@@ -3077,3 +3077,277 @@ flowchart TD
 > 📚 Azure Traffic Manager: https://learn.microsoft.com/en-us/azure/traffic-manager/traffic-manager-overview
 
 ---
+
+# 20. Architecture & Design — Senior Engineer Questions
+
+> This section covers senior-level design and architecture questions drawn from real interview guides. Each question tests judgment, tradeoff literacy, and production experience.
+
+---
+
+## 20.1 Project Structure & Monolith vs Microservices
+
+### Q102. How do you structure a .NET project? Walk me through your decisions.
+
+**Answer:**
+Choose structure based on team size, domain complexity, and change patterns. Clear boundaries and feature-oriented organization reduce accidental coupling.
+
+> **Why this matters:** Project structure determines how easy it is to add features, find code, and maintain clear boundaries.
+
+**💡 Production Example:**
+A monolith organized by layer (Controllers/Services/Repositories) had every feature spanning all four layers. Switching to feature-sliced folders reduced the scope of most features to a single folder and made ownership clear.
+
+---
+
+### Q103. When would you break a monolith into microservices?
+
+**Answer:**
+Only when scaling, deployment independence, or team autonomy needs justify operational complexity. Premature decomposition often slows delivery.
+
+> **Why this matters:** Premature microservice decomposition is one of the most costly architectural mistakes.
+
+**💡 Production Example:**
+A team decomposed prematurely, now managing 15 services with one engineer. Deployment time tripled and debugging became nightmarish. Consolidating back to a modular monolith restored velocity.
+
+---
+
+## 20.2 API Resilience & Graceful Degradation
+
+### Q104. How do you design an API to be resilient to downstream failures?
+
+**Answer:**
+Use timeouts, retries, circuit breakers, fallbacks, and bulkhead isolation with explicit SLAs.
+
+> **Why this matters:** Resilience must be designed in from the start — retrofitting after the first outage is much more expensive.
+
+**💡 Production Example:**
+A checkout service called three downstream APIs without timeout or retry. When a loyalty service had a 30-second outage, all checkout requests stacked up and the service exhausted its thread pool. Adding Polly-based timeouts and circuit breakers per downstream call isolated the failure.
+
+```csharp
+// Polly resilience pipeline per downstream dependency
+services.AddHttpClient<ILoyaltyClient, LoyaltyClient>()
+    .AddResilienceHandler("loyalty", builder =>
+    {
+        builder.AddTimeout(TimeSpan.FromSeconds(2));
+        builder.AddRetry(new HttpRetryStrategyOptions { MaxRetryAttempts = 2 });
+        builder.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30)
+        });
+    });
+```
+
+---
+
+### Q108. How do you design for graceful degradation when a non-critical dependency fails?
+
+**Answer:**
+Identify critical user paths, define fallback behavior, and communicate partial availability clearly.
+
+> **Why this matters:** Non-critical dependency failures should never cascade into full service failures.
+
+**💡 Production Example:**
+A product detail page called a recommendation service for 'related items'. When that service was slow, the entire page timed out. Wrapping the call with a 200ms timeout and returning empty recommendations on failure ensured the critical product data was never affected.
+
+```csharp
+public async Task<IReadOnlyList<Product>> GetRecommendationsAsync(int productId)
+{
+    try
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        return await _recommendationClient.GetAsync(productId, cts.Token);
+    }
+    catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
+    {
+        _logger.LogWarning("Recommendations unavailable for product {Id}, returning empty", productId);
+        return Array.Empty<Product>(); // graceful fallback
+    }
+}
+```
+
+---
+
+## 20.3 Feature Delivery & Domain Modeling
+
+### Q105. A product manager asks you to build a feature. Walk me through your process.
+
+**Answer:**
+Clarify outcomes, align scope, design thin vertical slices, ship incrementally, and validate with telemetry.
+
+> **Why this matters:** The process from requirements to shipping determines delivery quality and speed.
+
+**💡 Production Example:**
+A PM requested a 'bulk discount' feature. Success metrics were clarified (increase in average order value), API contract sketched, thin vertical slice built for a single discount type, shipped behind a feature flag to 10% of users, and iterated based on conversion data before expanding.
+
+---
+
+### Q106. What's the most important architectural decision you've made, and what tradeoffs did you consider?
+
+**Answer:**
+Explain context, options, decision criteria, downside acceptance, and retrospective learning.
+
+> **Why this matters:** Architectural decisions have long-term consequences. Tradeoff literacy scales.
+
+**💡 Production Example:**
+Event sourcing was chosen for an audit-critical compliance system. The tradeoff was increased query complexity and a steeper learning curve. After six months, most queries needed current state, so CQRS projections were added. Lesson: event sourcing's audit benefits are real but read-side cost must be planned upfront.
+
+---
+
+### Q107. How do you decide bounded contexts in a domain with overlapping business terms?
+
+**Answer:**
+Model by ownership of invariants and change cadence, not by database tables. Shared vocabulary can hide different business meanings.
+
+> **Why this matters:** Bounded contexts are the primary design tool for keeping microservices independent.
+
+**💡 Production Example:**
+In an e-commerce platform, 'Product' meant different things in catalog (description, pricing) and inventory (quantity, location). Modeled as separate bounded contexts with explicit translation at integration points, letting each team evolve their model independently.
+
+```mermaid
+flowchart LR
+    subgraph CAT["Catalog Context"]
+        CP["Product\n• Name\n• Description\n• Price"]
+    end
+    subgraph INV["Inventory Context"]
+        IP["Product\n• SKU\n• Quantity\n• Location"]
+    end
+    CAT -->|"ProductId (shared key)\nAnti-Corruption Layer"| INV
+
+    style CAT fill:#2196F3,color:#fff
+    style INV fill:#4CAF50,color:#fff
+```
+
+---
+
+### Q109. How do you decide where domain logic should live in a layered or slice-based architecture?
+
+**Answer:**
+Domain rules belong near the domain model and use cases, not buried in controllers or data access code.
+
+> **Why this matters:** Domain logic scattered across controllers, services, and database queries is the most common source of duplication and inconsistency.
+
+**💡 Production Example:**
+A controller had 200 lines of pricing logic. Adding a discount type required changing the controller and its test. Extracting into a PricingEngine domain service made it independently testable and reusable across batch and API paths.
+
+---
+
+### Q114. How would you model a complex domain so business rules stay explicit and maintainable?
+
+**Answer:**
+Start with business invariants and language from domain experts, then shape aggregates and value objects around those invariants. Keep transactional consistency inside aggregate boundaries.
+
+> **Why this matters:** Weak domain modeling leads to duplicated rules, data corruption, and fragile change velocity.
+
+**💡 Production Example:**
+In a subscription platform, plan, entitlement, and billing-cycle rules were modeled as explicit value objects and policies. That reduced conditional sprawl in controllers and made rule changes safer to test.
+
+---
+
+## 20.4 Legacy Migration & Team Standards
+
+### Q110. How do you design migration paths when replacing a legacy subsystem?
+
+**Answer:**
+Use strangler patterns, dual-read or dual-write only when necessary, and clear cutover milestones with rollback options.
+
+> **Why this matters:** Replacing legacy subsystems is one of the highest-risk activities in software engineering.
+
+**💡 Production Example:**
+A legacy invoicing module replaced over 18 months. Old and new ran side by side for 6 months, outputs compared daily, cutover only when discrepancy rates hit zero. Strangler pattern let them ship incrementally without a big-bang migration.
+
+```mermaid
+flowchart TD
+    REQ([Incoming Request]) --> ROUTER{Feature Flag\nor % Rollout}
+    ROUTER -->|Legacy path| OLD[Legacy Invoicing\nModule]
+    ROUTER -->|New path| NEW[New Invoicing\nService]
+    OLD --> COMPARE[Output Comparator\n(shadow mode)]
+    NEW --> COMPARE
+    COMPARE -->|Discrepancy| ALERT([Alert / Log])
+    COMPARE -->|Match| CUTOVER([Increase rollout %])
+
+    style OLD fill:#d62828,color:#fff
+    style NEW fill:#2d6a4f,color:#fff
+    style ROUTER fill:#FF9800,color:#fff
+```
+
+---
+
+### Q111. How do you balance local team autonomy with enterprise-wide standards?
+
+**Answer:**
+Set non-negotiable guardrails for security and reliability, then allow flexibility in implementation details.
+
+> **Why this matters:** Both extremes — full autonomy and complete standardization — create problems.
+
+**💡 Production Example:**
+A security team mandated JWT validation libraries across all teams. One team diverged and used a homegrown parser that missed the exp claim check. Audit caught it 3 months in. Made the standard library a NuGet package and added a CI check rejecting homegrown parsers.
+
+---
+
+## 20.5 Microservice Communication & Platform Design
+
+### Q112. How do you choose between synchronous HTTP and asynchronous messaging for microservice communication?
+
+**Answer:**
+Use synchronous calls when the caller needs an immediate result and latency budgets are predictable. Use asynchronous messaging when workflows can tolerate eventual consistency, need resilience to spikes, or must decouple service availability.
+
+> **Why this matters:** Communication style is a fundamental architectural decision that affects failure modes, consistency guarantees, and system coupling.
+
+**💡 Production Example:**
+Checkout used synchronous calls for fraud scoring required before payment capture, but order confirmation and email fan-out moved to asynchronous events so downstream outages did not block purchases.
+
+```mermaid
+flowchart TD
+    Q["New integration point"] --> NeedResult{"Caller needs\nimmediate result?"}
+    NeedResult -->|Yes| Latency{"Latency budget\npredictable?"}
+    Latency -->|Yes| SYNC["Synchronous HTTP\n(REST / gRPC)"]
+    Latency -->|No| ASYNC["Async Messaging\n+ timeout fallback"]
+    NeedResult -->|No| ASYNC2["Async Messaging\n(Service Bus / Kafka)"]
+
+    style SYNC fill:#4CAF50,color:#fff
+    style ASYNC fill:#FF9800,color:#fff
+    style ASYNC2 fill:#FF9800,color:#fff
+```
+
+---
+
+### Q113. What role should an API gateway and service mesh play in a .NET microservices platform?
+
+**Answer:**
+API gateway for north-south concerns (authentication, routing, rate limits, request shaping). Service mesh for east-west concerns (mTLS, retries, traffic policy, service-level observability). Avoid introducing both unless scale and operational maturity justify the complexity.
+
+> **Why this matters:** Senior engineers should explain capability boundaries and the operational cost of each layer.
+
+**💡 Production Example:**
+Started with only an API gateway during early growth, then added mesh capabilities later when service count and security requirements made centralized east-west policy worthwhile.
+
+```mermaid
+flowchart TD
+    CLIENT([External Client]) --> GW["API Gateway\n(APIM / Ocelot)\nAuth · Rate Limit · SSL · Routing\nnorth-south traffic"]
+    GW --> SVC_A[Service A]
+    GW --> SVC_B[Service B]
+    SVC_A <-->|"Service Mesh\n(Dapr / Linkerd)\nmTLS · retries · observability\neast-west traffic"| SVC_B
+    SVC_B <--> SVC_C[Service C]
+
+    style GW fill:#FF9800,color:#fff
+    style SVC_A fill:#2196F3,color:#fff
+    style SVC_B fill:#2196F3,color:#fff
+    style SVC_C fill:#2196F3,color:#fff
+```
+
+---
+
+## 20.6 Code Reviews & Team Leadership
+
+### Q115. How do you run effective code reviews as a senior engineer and mentor the team?
+
+**Answer:**
+Review for correctness, security, performance risk, and long-term maintainability. Prioritize high-impact feedback, explain the why behind comments, and use patterns and examples so the same issue does not repeat.
+
+> **Why this matters:** Senior developers are expected to raise team output, not only ship their own tickets.
+
+**💡 Production Example:**
+A lightweight review checklist was introduced for API contracts, telemetry, and failure handling. Review quality improved, rework dropped, and newer engineers ramped faster because expectations were clearer.
+
+---

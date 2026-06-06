@@ -1719,6 +1719,616 @@ var connStr = container.GetConnectionString();
 
 ---
 
+# 🎯 Senior Engineer Interview Questions — Testing (Q92–Q101)
+
+---
+
+### Q92: What's your testing strategy for a .NET API?
+
+**Answer:**
+A layered strategy aligned to the testing pyramid: unit tests for decision-heavy business logic (fast, run on every save), integration tests for boundary interactions with real infrastructure (run on every CI push), and a small set of end-to-end contract or smoke tests (run pre-release). Coverage follows risk — not line count.
+
+```mermaid
+flowchart TD
+    subgraph Unit["Unit Tests — 60–70%"]
+        U1[Business logic\nValidation rules\nDomain calculations]
+    end
+    subgraph Integration["Integration Tests — 20–30%"]
+        I1[API endpoints with real DB\nTestcontainers\nWebApplicationFactory]
+    end
+    subgraph E2E["E2E / Contract — 5–10%"]
+        E1[Consumer-driven\ncontract tests\nSmoke tests]
+    end
+
+    Unit --> Integration --> E2E
+
+    style Unit fill:#51cf66,color:#fff
+    style Integration fill:#ffa94d,color:#fff
+    style E2E fill:#ff6b6b,color:#fff
+```
+
+> **Why this matters:** Without a deliberate strategy, teams drift toward either no tests or heavy E2E suites that take 20 minutes and break on every infrastructure change. The pyramid shape keeps feedback fast where it matters most.
+
+**💡 Production Example:**
+A team with no strategy had a 20-minute CI pipeline consisting almost entirely of Selenium E2E tests. Introducing unit tests for business logic and Testcontainers-based integration tests for the API layer brought critical feedback to under 3 minutes, while E2E tests were kept only for the two most critical user journeys.
+
+---
+
+### Q93: How do you write integration tests for an API that depends on a database?
+
+**Answer:**
+Run the real app pipeline with a real ephemeral database via Testcontainers. Override the connection string in `WebApplicationFactory`, run migrations against the container, seed data per test class, and use transaction rollback between tests for isolation. This catches mapping, migration, and query issues that mocks miss.
+
+```csharp
+// Install: Testcontainers.MsSql + Microsoft.AspNetCore.Mvc.Testing
+public class ApiIntegrationFixture : IAsyncLifetime
+{
+    private MsSqlContainer _db = new MsSqlBuilder()
+        .WithPassword("Strong_Pwd_123!")
+        .Build();
+
+    public string ConnectionString => _db.GetConnectionString();
+    public HttpClient Client { get; private set; } = null!;
+    private WebApplicationFactory<Program> _factory = null!;
+
+    public async Task InitializeAsync()
+    {
+        await _db.StartAsync();
+
+        _factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+                builder.ConfigureServices(services =>
+                {
+                    // Replace real DB with Testcontainers instance
+                    var desc = services.Single(d => d.ServiceType == typeof(DbContextOptions<AppDbContext>));
+                    services.Remove(desc);
+                    services.AddDbContext<AppDbContext>(opts =>
+                        opts.UseSqlServer(ConnectionString));
+                }));
+
+        Client = _factory.CreateClient();
+
+        // Run migrations against the container
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.MigrateAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _factory.DisposeAsync();
+        await _db.DisposeAsync();
+    }
+}
+
+public class OrderApiTests : IClassFixture<ApiIntegrationFixture>
+{
+    private readonly HttpClient _client;
+
+    public OrderApiTests(ApiIntegrationFixture fixture) => _client = fixture.Client;
+
+    [Fact]
+    public async Task CreateOrder_ReturnsCreatedWithId()
+    {
+        var response = await _client.PostAsJsonAsync("/api/orders",
+            new { customerName = "Alice", amount = 99.99m });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var body = await response.Content.ReadFromJsonAsync<OrderDto>();
+        body!.Id.Should().NotBe(Guid.Empty);
+    }
+}
+```
+
+> **Why this matters:** Integration tests that mock the database miss the most common class of production failures — EF query translation bugs, schema mismatches, constraint violations, and migration regressions.
+
+**💡 Production Example:**
+An API was fully tested with unit tests using mocked repositories. During a migration from SQL Server to PostgreSQL, date handling broke silently — `DateTime` comparisons behaved differently between providers. Unit tests mocked the DB and passed. Testcontainers integration tests against real PostgreSQL caught the incompatibility before production deployment.
+
+---
+
+### Q94: When would you mock a dependency vs use the real thing?
+
+**Answer:**
+Mock unstable external dependencies (third-party APIs, email providers, payment gateways) and use real internal infrastructure where feasible (database, cache, message bus via containers). Over-mocking increases false confidence; under-mocking makes tests slow and fragile.
+
+| Dependency type | Strategy | Reason |
+|----------------|---------|--------|
+| External third-party API | Mock (`ITaxProvider`) | Not controllable, costs money, rate-limited |
+| Database | Real via Testcontainers | Catches real query bugs; SQLite misses SQL Server nuances |
+| In-process logic | No mock — call directly | Mocking pure logic is testing the mock |
+| Email / SMS | Mock or fake SMTP | Side effects must not reach real users |
+| Message bus | Real via Testcontainers | Catches serialization and routing bugs |
+| File system | Real temp dir or VFS | File I/O is fast and predictable enough |
+
+```csharp
+// Unit test — mock external, use real logic
+public class PricingServiceTests
+{
+    [Fact]
+    public async Task CalculateTotal_WithTax_CallsTaxProvider()
+    {
+        var mockTax = new Mock<ITaxProvider>();
+        mockTax.Setup(t => t.GetRateAsync("US")).ReturnsAsync(0.08m);
+
+        var svc = new PricingService(mockTax.Object);
+        var total = await svc.CalculateTotalAsync(100m, "US");
+
+        total.Should().Be(108m);
+        mockTax.Verify(t => t.GetRateAsync("US"), Times.Once);
+    }
+}
+
+// Integration test — real DB, mock only the external payment gateway
+public class CheckoutTests : IClassFixture<ApiIntegrationFixture>
+{
+    [Fact]
+    public async Task Checkout_WithValidCart_PersistsOrder()
+    {
+        // Payment gateway mocked — but DB is real Testcontainers instance
+        var response = await _client.PostAsJsonAsync("/api/checkout", _validCart);
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        // Verify it actually persisted — not just returned 201
+        var getResponse = await _client.GetAsync($"/api/orders/{orderId}");
+        getResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+}
+```
+
+> **Why this matters:** Over-mocking produces tests that pass even when the code is broken because the mock defines the expected behavior. Under-mocking creates slow tests that break on infrastructure changes. The distinction keeps unit tests fast and integration tests meaningful.
+
+**💡 Production Example:**
+A pricing service called an external tax API. Unit tests mocked `ITaxProvider` for deterministic values and ran in milliseconds. Integration tests ran against a real tax sandbox. The distinction kept unit tests fast at 2ms each and caught an integration contract bug — the tax API changed its response shape from `{ "rate": 0.08 }` to `{ "taxRate": 0.08 }` — before it reached production.
+
+---
+
+### Q95: How do you test background services or scheduled jobs?
+
+**Answer:**
+Control time and side effects through abstractions (inject `TimeProvider`, `IClock`), run deterministic loops by triggering the job directly instead of waiting for the scheduler, and assert on durable outcomes (database state, outbox messages, emitted events) rather than internal variables.
+
+```csharp
+// Production background service — uses injected TimeProvider
+public class ReportGeneratorJob : BackgroundService
+{
+    private readonly TimeProvider _time;
+    private readonly IReportRepository _repo;
+
+    public ReportGeneratorJob(TimeProvider time, IReportRepository repo)
+    { _time = time; _repo = repo; }
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var now = _time.GetUtcNow();
+            await GenerateReportAsync(now, ct);
+            await Task.Delay(TimeSpan.FromHours(24), _time, ct); // uses TimeProvider
+        }
+    }
+}
+
+// Test — inject fake time, trigger execution directly
+[Fact]
+public async Task GenerateReport_AtMidnight_CreatesReportForPreviousDay()
+{
+    var fakeTime   = new FakeTimeProvider(new DateTimeOffset(2026, 3, 10, 0, 0, 0, TimeSpan.Zero));
+    var mockRepo   = new Mock<IReportRepository>();
+
+    var job = new ReportGeneratorJob(fakeTime, mockRepo.Object);
+    using var cts = new CancellationTokenSource();
+
+    // Execute one iteration directly — don't start the background loop
+    await job.GenerateReportAsync(fakeTime.GetUtcNow(), cts.Token);
+
+    mockRepo.Verify(r => r.SaveReportAsync(
+        It.Is<Report>(rep => rep.Date == new DateOnly(2026, 3, 9))), // yesterday
+        Times.Once);
+}
+
+// Test DST boundary bug
+[Fact]
+public async Task GenerateReport_AcrossDSTBoundary_RunsExactlyOnce()
+{
+    // March 8 2026 2:00 AM clocks spring forward — potential double-run
+    var fakeTime = new FakeTimeProvider(new DateTimeOffset(2026, 3, 8, 1, 59, 0, TimeSpan.Zero));
+    var mockRepo = new Mock<IReportRepository>();
+    var job      = new ReportGeneratorJob(fakeTime, mockRepo.Object);
+
+    fakeTime.Advance(TimeSpan.FromHours(2)); // advance past DST boundary
+    await job.GenerateReportAsync(fakeTime.GetUtcNow(), CancellationToken.None);
+
+    mockRepo.Verify(r => r.SaveReportAsync(It.IsAny<Report>()), Times.Once); // not twice
+}
+```
+
+> **Why this matters:** Background jobs often carry critical side effects — sending emails, generating invoices, processing payments. Untested worker behavior is a common source of production data integrity issues, especially around time boundaries.
+
+**💡 Production Example:**
+A nightly report generator had no tests. A timezone bug caused reports to run twice at DST boundaries — once at the old midnight and once at the new midnight. Adding an integration test that used `FakeTimeProvider` to simulate a DST transition caught the bug. The fix was using UTC exclusively inside the job with only a timezone conversion at the display layer.
+
+---
+
+### Q96: What makes a test valuable vs just adding to the test count?
+
+**Answer:**
+A valuable test: protects important behavior, fails for real regressions (not false positives), is readable enough to diagnose failures quickly, and is stable (not flaky). Test count and code coverage percentage are vanity metrics — mutation score and regression detection rate are the real measures.
+
+```csharp
+// ❌ Not valuable — asserts nothing meaningful
+[Fact]
+public async Task CreateOrder_DoesNotThrow()
+{
+    var result = await _svc.CreateOrderAsync(new CreateOrderDto { CustomerName = "Alice" });
+    Assert.NotNull(result);  // passes even if result is a garbage object
+}
+
+// ✅ Valuable — asserts specific behavior and edge cases
+[Theory]
+[InlineData("")]
+[InlineData(null)]
+[InlineData("   ")]
+public async Task CreateOrder_WithInvalidCustomerName_ThrowsArgumentException(string? name)
+{
+    Func<Task> act = () => _svc.CreateOrderAsync(new CreateOrderDto { CustomerName = name! });
+    await act.Should().ThrowAsync<ArgumentException>()
+             .WithParameterName("customerName")
+             .WithMessage("*must not be empty*");
+}
+
+[Fact]
+public async Task CreateOrder_WithValidData_SetsStatusToPendingAndPersists()
+{
+    var result = await _svc.CreateOrderAsync(new CreateOrderDto { CustomerName = "Alice", Amount = 99m });
+
+    result.Status.Should().Be(OrderStatus.Pending);
+    result.CreatedAt.Should().BeCloseTo(DateTimeOffset.UtcNow, 5.Seconds());
+
+    // Verify it actually persisted
+    var saved = await _db.Orders.FindAsync(result.Id);
+    saved.Should().NotBeNull();
+    saved!.CustomerName.Should().Be("Alice");
+}
+```
+
+**Using mutation testing to find meaningless tests:**
+```bash
+# Stryker.NET — mutates your production code and checks if tests catch the mutations
+dotnet tool install -g dotnet-stryker
+dotnet stryker
+
+# Result: "40 of 100 mutants survived" → tests don't catch 40% of possible bugs
+# A mutation like: return amount * 0.08m → return amount * 0.1m should fail a tax test
+# If it doesn't → your test isn't actually asserting the right value
+```
+
+> **Why this matters:** Test count is a vanity metric. A team with 95% coverage but 40% mutation survival rate has tests that run but don't protect against bugs. Tests that don't catch regressions give false confidence and slow down the team without delivering safety.
+
+**💡 Production Example:**
+A team had 95% code coverage and green CI. After running Stryker.NET, 40% of mutants survived — tests ran but asserted nothing meaningful (mostly `Assert.NotNull` checks). Adding real assertions to existing tests surfaced three bugs that had been silently present for months and would have been caught by anyone reading the spec carefully.
+
+---
+
+### Q97: Walk me through your contract testing approach for APIs consumed by other teams.
+
+**Answer:**
+Define consumer contracts describing what the consumer expects (fields, types, status codes), validate them against the provider in CI on both sides, and version carefully. Pact is the most common .NET implementation. This prevents breaking changes from reaching integration environments where they are expensive to diagnose.
+
+```mermaid
+sequenceDiagram
+    participant C as Consumer Team
+    participant PACT as Pact Broker
+    participant P as Provider Team
+
+    C->>C: Write consumer test\n(what we expect from the API)
+    C->>PACT: Publish contract (pact file)
+
+    P->>PACT: Fetch consumer contracts
+    P->>P: Run provider verification\nagainst real provider code
+    P->>PACT: Publish verification result
+
+    PACT-->>C: "Can I deploy?" check\n✅ provider verified this contract
+    PACT-->>P: "Can I deploy?" check\n✅ no consumers broken
+```
+
+```csharp
+// Consumer test — defines what the consumer expects
+public class OrderApiConsumerTests : IAsyncLifetime
+{
+    private IPactBuilder _pact = null!;
+
+    public async Task InitializeAsync()
+    {
+        _pact = Pact.V3("OrderConsumer", "OrderProvider", new PactConfig
+            { PactDir = "./pacts" });
+    }
+
+    [Fact]
+    public async Task GetOrder_Returns200WithId()
+    {
+        var orderId = Guid.NewGuid();
+
+        await _pact
+            .UponReceiving("a request for an existing order")
+                .WithRequest(HttpMethod.Get, $"/api/orders/{orderId}")
+            .WillRespond()
+                .WithStatus(HttpStatusCode.OK)
+                .WithJsonBody(new { id = orderId, status = "Pending", amount = 99.99m })
+            .ExecuteAsync(async mockClient =>
+            {
+                var response = await mockClient.GetAsync($"/api/orders/{orderId}");
+                response.StatusCode.Should().Be(HttpStatusCode.OK);
+                var order = await response.Content.ReadFromJsonAsync<OrderDto>();
+                order!.Id.Should().Be(orderId);
+            });
+    }
+}
+```
+
+> **Why this matters:** Contract tests prevent broken integrations from reaching production without requiring full end-to-end environments. They catch API shape regressions the moment a provider changes a field name or response structure.
+
+**💡 Production Example:**
+Two teams integrated via HTTP API. The consumer team tested against a mock server and deployed confidently. The provider team changed a field from `orderId` to `id` without coordinating. Contract tests using Pact detected the breaking change in the provider's CI pipeline before deployment and triggered an API versioning discussion. The fix was adding an `api/v2/` prefix rather than breaking the existing contract.
+
+---
+
+### Q98: How do you avoid integration tests that are too slow for daily use?
+
+**Answer:**
+Scope setup tightly (shared container per test class, not per test), parallelize safely, use transaction rollback for isolation instead of full DB recreation, and separate fast integration suites (run on every push) from deep nightly suites. Target under 2 minutes for the integration suite that runs in CI.
+
+```csharp
+// ❌ Slow — new container per test class, full DB recreation
+public class OrderTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    public OrderTests(WebApplicationFactory<Program> factory)
+    {
+        // Container started + migrations run for EVERY test class = 12+ minutes in CI
+    }
+}
+
+// ✅ Fast — shared container across test classes + transaction rollback per test
+public class SharedContainerFixture : IAsyncLifetime
+{
+    public MsSqlContainer Container { get; } = new MsSqlBuilder()
+        .WithPassword("Strong_Pwd_123!").Build();
+
+    public async Task InitializeAsync()
+    {
+        await Container.StartAsync();
+        // Run migrations ONCE for the entire test session
+        await RunMigrationsAsync(Container.GetConnectionString());
+    }
+
+    public async Task DisposeAsync() => await Container.DisposeAsync();
+}
+
+// Each test wraps in a transaction and rolls back — no data leaks between tests
+public class OrderRepositoryTests : IClassFixture<SharedContainerFixture>, IAsyncLifetime
+{
+    private IDbTransaction _tx = null!;
+
+    public async Task InitializeAsync()
+    {
+        _tx = await _db.Database.BeginTransactionAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _tx.RollbackAsync(); // each test reverts — shared DB stays clean
+        _tx.Dispose();
+    }
+
+    [Fact]
+    public async Task SaveOrder_PersistsCorrectly() { /* ... */ }
+}
+```
+
+> **Why this matters:** Integration tests that take 12 minutes get skipped during development or moved to nightly runs, removing fast feedback precisely when it matters most — right after a change is made.
+
+**💡 Production Example:**
+A test suite spinning up a real SQL Server container for every test class took 12 minutes in CI. Switching to a single shared container per test session with transaction rollback between tests brought CI integration test time to 90 seconds without losing isolation. Developer adoption of integration tests went from "run on push" to "run on every save" locally.
+
+---
+
+### Q99: How do you test resiliency features like retries and circuit breakers?
+
+**Answer:**
+Inject controlled faults and deterministic timing using Polly's `Simmy` chaos library or manual fault injection. Assert behavior at policy boundaries — verify retry count, backoff timing, and fallback behavior. Normal integration tests cannot validate these policies.
+
+```csharp
+// ❌ Cannot test retry behavior with a real HTTP call — too unpredictable
+[Fact]
+public async Task CallExternalApi_RetriesOnFailure()
+{
+    var response = await _httpClient.GetAsync("https://real-api.com/data");
+    // How do you make the real API fail exactly 2 times then succeed?
+}
+
+// ✅ Inject faults via Polly Simmy (chaos engineering in tests)
+[Fact]
+public async Task HttpPipeline_WhenServiceFails3Times_RetriesAndSucceeds()
+{
+    var callCount = 0;
+
+    var mockHandler = new MockHttpMessageHandler();
+    mockHandler.When("*").Respond(async () =>
+    {
+        callCount++;
+        if (callCount <= 3)
+            throw new HttpRequestException("Service unavailable");
+        return new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("{\"result\": \"ok\"}") };
+    });
+
+    var httpClient = new HttpClient(mockHandler);
+    var pipeline   = ResiliencePolicies.BuildHttpPipeline(NullLogger.Instance);
+
+    var result = await pipeline.ExecuteAsync(
+        ct => httpClient.GetAsync("https://service.internal/data", ct));
+
+    result.StatusCode.Should().Be(HttpStatusCode.OK);
+    callCount.Should().Be(4); // 3 failures + 1 success
+}
+
+// ✅ Test circuit breaker opens after threshold
+[Fact]
+public async Task CircuitBreaker_After5Failures_OpensAndFailsFast()
+{
+    var callCount = 0;
+    var mockHandler = new MockHttpMessageHandler();
+    mockHandler.When("*").Respond(() =>
+    {
+        callCount++;
+        return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+    });
+
+    var pipeline = ResiliencePolicies.BuildHttpPipeline(NullLogger.Instance);
+
+    // Trigger failures to open the circuit
+    for (int i = 0; i < 5; i++)
+    {
+        try { await pipeline.ExecuteAsync(ct => httpClient.GetAsync("...", ct)); } catch { }
+    }
+
+    int callsBeforeFastFail = callCount;
+
+    // Circuit should now be open — next call fails fast without reaching the handler
+    await Assert.ThrowsAsync<BrokenCircuitException>(
+        () => pipeline.ExecuteAsync(ct => httpClient.GetAsync("...", ct)));
+
+    callCount.Should().Be(callsBeforeFastFail); // no new HTTP call made
+}
+```
+
+> **Why this matters:** Resilience features are the hardest to test with normal approaches. Retry policies with misconfigured backoff can cause retry storms that amplify failures instead of absorbing them. Chaos and simulation techniques are the only way to validate policies actually work as configured.
+
+**💡 Production Example:**
+In a checkout service using Polly for retries, a configuration bug set retry count to 10 with no backoff and no jitter. Under a simulated downstream failure with Polly Simmy, the test revealed the retry storm — 10 immediate retries per request × 100 concurrent users = 1000 requests hammering the already-failing service. Fixing to exponential backoff with jitter and max 3 attempts prevented the production equivalent during a real payment provider outage.
+
+---
+
+### Q100: How do you decide what should be covered by unit tests vs integration tests in a new feature?
+
+**Answer:**
+Unit-test decision-heavy logic and integration-test boundary interactions and wiring. Coverage follows risk concentration — put unit tests where the most branching business logic lives, and integration tests where the most surprising bugs appear (query translation, serialization, middleware pipelines). Do not duplicate the same assertions in both layers.
+
+```mermaid
+flowchart LR
+    FEATURE[New Feature\n"Discount Calculator\nwith DB persistence"] --> Q1{Complex\nbusiness logic?}
+    Q1 -->|YES\n15 discount rules| UNIT[Unit test\neach rule combination\nno DB needed]
+    Q1 -->|NO\nsimple CRUD| SKIP[Skip unit test\nintegration covers it]
+
+    FEATURE --> Q2{DB / HTTP / Queue\nboundary?}
+    Q2 -->|YES| INT[Integration test\nfull endpoint with\nreal Testcontainers DB]
+    Q2 -->|NO| SKIP2[No integration test needed]
+
+    style UNIT fill:#51cf66,color:#fff
+    style INT fill:#ffa94d,color:#fff
+```
+
+```csharp
+// Decision: Discount calculation has 15 rules → unit test all combinations
+[Theory]
+[InlineData("PREMIUM", 3, 1000, 150)]   // premium + bulk + large order
+[InlineData("STANDARD", 1, 50, 0)]       // no discount
+[InlineData("PREMIUM", 1, 200, 30)]      // premium only
+// ... 12 more cases
+public void CalculateDiscount_AppliesRulesCorrectly(
+    string tier, int qty, decimal price, decimal expectedDiscount)
+{
+    var result = _calculator.Calculate(new Order { Tier = tier, Qty = qty, Price = price });
+    result.Discount.Should().Be(expectedDiscount);
+}
+
+// Integration test: verify the endpoint wires correctly and persists to DB
+// — does NOT duplicate the 15 rule assertions, just tests the happy path + edge case
+[Fact]
+public async Task PostDiscount_ValidOrder_Returns200AndPersistsToDB()
+{
+    var response = await _client.PostAsJsonAsync("/api/discounts",
+        new { tier = "PREMIUM", qty = 3, price = 1000m });
+
+    response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+    // Check persistence — not the discount amount (already unit tested)
+    var saved = await _db.DiscountLogs.LastAsync();
+    saved.Should().NotBeNull();
+    saved.CustomerId.Should().NotBeEmpty();
+}
+```
+
+> **Why this matters:** Coverage distribution determines both test confidence and test speed. Duplicating business logic assertions in integration tests makes the suite slower without adding safety. Missing integration tests for boundaries means real bugs in DB queries or HTTP serialization go undetected until production.
+
+**💡 Production Example:**
+For a discount calculation feature, 15 rule combinations were unit-tested in isolation — fast, exhaustive, readable. Integration tests verified the full endpoint with a real Testcontainers database to catch EF query translation issues. During the integration test phase, a subtle bug was found: the EF query for "active discounts" included expired ones due to a `>=` vs `>` comparison that behaved identically on SQLite but differently on SQL Server.
+
+---
+
+### Q101: How do you test eventual consistency workflows without flaky sleeps?
+
+**Answer:**
+Use polling with bounded timeouts and observable state transitions instead of `Thread.Sleep` or `Task.Delay`. Observable state means the workflow exposes a queryable status (outbox table, saga state, order status) that the test can poll until the expected state is reached or a timeout expires.
+
+```csharp
+// ❌ Flaky — fixed sleep, fails on slow CI, passes on fast dev machine
+[Fact]
+public async Task PlaceOrder_EventuallyUpdatesInventory()
+{
+    await _client.PostAsJsonAsync("/api/orders", _newOrder);
+    await Task.Delay(3000); // hope inventory is updated by now...
+
+    var inventory = await _client.GetFromJsonAsync<InventoryDto>("/api/inventory/SKU-1");
+    inventory!.Reserved.Should().Be(1); // FLAKY — 3s may not be enough on slow CI
+}
+
+// ✅ Poll with bounded timeout — deterministic
+[Fact]
+public async Task PlaceOrder_EventuallyUpdatesInventory()
+{
+    var response = await _client.PostAsJsonAsync("/api/orders", _newOrder);
+    var orderId  = (await response.Content.ReadFromJsonAsync<OrderDto>())!.Id;
+
+    // Poll the order status endpoint until saga completes or timeout
+    var completed = await WaitForConditionAsync(
+        condition: async () =>
+        {
+            var order = await _client.GetFromJsonAsync<OrderDto>($"/api/orders/{orderId}");
+            return order?.Status == "InventoryReserved";
+        },
+        timeout:    TimeSpan.FromSeconds(10),
+        pollInterval: TimeSpan.FromMilliseconds(200));
+
+    completed.Should().BeTrue("order saga should complete within 10 seconds");
+
+    var inventory = await _client.GetFromJsonAsync<InventoryDto>("/api/inventory/SKU-1");
+    inventory!.Reserved.Should().Be(1);
+}
+
+// Reusable polling helper
+private static async Task<bool> WaitForConditionAsync(
+    Func<Task<bool>> condition,
+    TimeSpan timeout,
+    TimeSpan pollInterval)
+{
+    var deadline = DateTimeOffset.UtcNow + timeout;
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        if (await condition()) return true;
+        await Task.Delay(pollInterval);
+    }
+    return false;
+}
+```
+
+> **Why this matters:** Eventual consistency workflows are a common source of flaky tests. `Thread.Sleep(3000)` is an arbitrary guess that fails on slow CI runners and wastes time on fast machines. Polling with a bounded timeout is both faster (exits as soon as ready) and more reliable (waits up to a real boundary).
+
+**💡 Production Example:**
+For a saga placing orders across inventory, payment, and shipping services using Testcontainers, the initial tests used `Task.Delay(5000)` and were flaky in CI — passing locally but failing 30% of the time on the CI runner. Replacing with polled assertion against an outbox status endpoint brought flakiness to zero and reduced average test time from 5s to 800ms (the saga completed faster than the fixed sleep).
+
+---
+
 ## TEST-C7 — `Setup` vs `SetupSequence` vs `Callback` vs `Returns` in Moq
 
 | | `Returns` | `ReturnsAsync` | `SetupSequence` | `Callback` | `Throws` |

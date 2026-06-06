@@ -962,6 +962,270 @@ public class OrdersController : ControllerBase
 
 ---
 
+## 14. Azure Hosting Platform Selection
+
+---
+
+### Q: How do you choose between App Service, Container Apps, and AKS in Azure?
+
+**Answer:**
+Pick the simplest platform that meets scaling and operational needs. App Service is the quickest path for web apps and APIs with no container expertise required. Container Apps balances flexibility with low operational overhead — it handles Kubernetes internals for you and supports scale-to-zero natively. AKS is for teams ready to own Kubernetes complexity: custom networking, advanced scheduling, and cluster-level control.
+
+| | App Service | Container Apps | AKS |
+|-|-------------|----------------|-----|
+| Ops overhead | Low | Low–Medium | High |
+| Scale-to-zero | ❌ (consumption plan only) | ✅ | ✅ (KEDA) |
+| Custom networking | Limited | ✅ | ✅ Full |
+| Multi-container pods | ❌ | ✅ | ✅ |
+| When to use | REST API, simple web app | Event-driven workloads, microservices | Teams owning full K8s lifecycle |
+
+> **Why this matters:** Picking the wrong hosting platform creates operational overhead that doesn't match team capability. An AKS cluster maintained by a team of three without Kubernetes expertise becomes a reliability risk, not an asset.
+
+**💡 Production Example:**
+For a team of three running a straightforward REST API, App Service was chosen — deployed in minutes with zero container knowledge. When a separate event-processing workload needed scale-to-zero, Container Apps was introduced for that service alone. AKS was only considered when another team needed custom CNI networking and pod security policies.
+
+```mermaid
+flowchart TD
+    Q1{Does the team own\nKubernetes operations?} -- No --> Q2{Need scale-to-zero\nor event-driven scaling?}
+    Q1 -- Yes --> AKS[AKS\nFull Kubernetes control]
+    Q2 -- Yes --> CA[Container Apps\nManaged KEDA + Dapr]
+    Q2 -- No --> AS[App Service\nSimplest path, built-in scaling]
+
+    style AKS fill:#1565C0,color:#fff
+    style CA fill:#2E7D32,color:#fff
+    style AS fill:#FF9800,color:#fff
+```
+
+---
+
+### Q: Walk me through your first 30 days hardening a new cloud environment.
+
+**Answer:**
+Establish identity boundaries, network segmentation, secret handling, baseline monitoring, and backup policies in that order. Identity first — everything else depends on who can do what. Network segmentation second — limits blast radius. Secrets and monitoring follow so you can see what is happening. Backups last to establish recovery baseline before any workloads go live.
+
+```
+Day 1–7:   Identity — AAD with MFA + conditional access, RBAC with least privilege
+Day 8–14:  Network — VNet, NSGs per tier, private endpoints, no public DB exposure
+Day 15–21: Secrets — Key Vault, managed identity for all apps, zero connection strings
+Day 22–28: Monitoring — Diagnostic settings → Log Analytics, alerts on key events
+Day 29–30: Backup — Backup policy per data tier, first restore drill scheduled
+```
+
+> **Why this matters:** Cloud environments that aren't hardened from the start accumulate security exposure that's expensive and disruptive to fix retroactively.
+
+**💡 Production Example:**
+On a new Azure subscription for a fintech client: Azure AD with conditional access, VNet with NSGs isolating app and data tiers, Key Vault with managed identity, and diagnostic settings to Log Analytics all configured on day 1. On day 3, a review of NSG flow logs caught an overly permissive inbound rule allowing 0.0.0.0/0 on port 1433 — caught before any data landed in the database.
+
+---
+
+### Q: How do you manage secrets in your application from local dev to production?
+
+**Answer:**
+Local development uses user secrets or `.env` files excluded from source control. CI/CD uses the platform's encrypted secret store (GitHub Actions encrypted secrets, Azure DevOps variable groups linked to Key Vault). Production uses Key Vault with managed identity — no credentials in config files or environment variables. The same `IConfiguration` abstraction keeps application code identical across environments.
+
+```csharp
+// ❌ Hardcoded in appsettings.json — committed to Git
+{
+  "ConnectionStrings": {
+    "Default": "Server=prod-sql;Password=MyP@ssword;"
+  }
+}
+
+// ✅ Locally: dotnet user-secrets
+// dotnet user-secrets set "ConnectionStrings:Default" "Server=local;..."
+
+// ✅ Production: Key Vault via managed identity
+builder.Configuration.AddAzureKeyVault(
+    new Uri("https://myvault.vault.azure.net/"),
+    new DefaultAzureCredential());  // uses managed identity in Azure, dev creds locally
+```
+
+> **Why this matters:** Secrets scattered across config files and environment variables create security incidents and painful rotation processes. A single committed password can expose every environment.
+
+**💡 Production Example:**
+Locally, developers used `dotnet user-secrets`. In CI, secrets came from GitHub Actions encrypted secrets. In production, the API pulled from Azure Key Vault via managed identity. The same `IConfiguration` abstraction meant zero code changes between environments. When a rotation was needed, updating Key Vault was the only step required — no redeploys, no config changes.
+
+---
+
+### Q: What are managed identities and how do they work?
+
+**Answer:**
+Managed identities let Azure resources authenticate to other Azure services without any embedded credentials. Azure AD issues a token to the resource (VM, App Service, Container App) at runtime. The application calls `DefaultAzureCredential` which automatically uses the managed identity token in Azure environments and falls back to developer credentials locally. System-assigned identities are tied to the resource lifecycle; user-assigned identities can be shared across multiple resources.
+
+```csharp
+// Before: connection string with embedded password
+"Server=tcp:myserver.database.windows.net;Authentication=SQL Password;Password=secret;"
+
+// After: managed identity — no password anywhere
+var credential = new DefaultAzureCredential();
+var token = await credential.GetTokenAsync(
+    new TokenRequestContext(new[] { "https://database.windows.net/.default" }));
+
+// For Azure SDK clients — credential is passed directly
+var blobClient = new BlobServiceClient(
+    new Uri("https://mystorage.blob.core.windows.net"),
+    new DefaultAzureCredential());
+```
+
+> **Why this matters:** Managed identities eliminate the most common class of credential-related incidents — hardcoded passwords, rotated credentials breaking apps, secrets in Git history.
+
+**💡 Production Example:**
+Migrating from connection strings with embedded credentials to managed identity for Azure SQL and Service Bus eliminated 12 stored secrets across three environments. The entire secret rotation process disappeared — Azure handles token issuance and expiry automatically.
+
+---
+
+### Q: How do you design reliable background job execution with transient failures?
+
+**Answer:**
+Use idempotent handlers, durable queues with visibility timeout, bounded retries with exponential backoff, and dead-letter workflows with alerting. The key principle: any job must be safe to execute twice with the same outcome. Retry handles transient errors; dead-letter queues capture persistent failures for human review.
+
+```csharp
+// ✅ Idempotent handler with outbox-style deduplication
+public async Task ProcessOrderAsync(string messageId, Guid orderId)
+{
+    // Check idempotency key — skip if already processed
+    if (await _processedStore.ExistsAsync(messageId)) return;
+
+    await _orderService.FulfillAsync(orderId);
+
+    // Mark as processed only after successful completion
+    await _processedStore.AddAsync(messageId, expiry: TimeSpan.FromDays(7));
+}
+
+// Azure Service Bus retry policy
+var options = new ServiceBusClientOptions
+{
+    RetryOptions = new ServiceBusRetryOptions
+    {
+        Mode = ServiceBusRetryMode.Exponential,
+        MaxRetries = 3,
+        Delay = TimeSpan.FromSeconds(2),
+        MaxDelay = TimeSpan.FromSeconds(30)
+    }
+};
+```
+
+> **Why this matters:** Background jobs that fail silently or don't recover from transient errors cause data loss or stuck workflows — often without any visible error.
+
+**💡 Production Example:**
+An email-sending background job failed silently when the SMTP provider had transient outages. Messages were lost with no visibility. Moved to Azure Service Bus queue with 3 retries and exponential backoff, dead-lettered persistent failures, and added an alert on dead-letter queue depth. The next outage was visible in under two minutes and all messages were replayed after recovery.
+
+---
+
+### Q: How do you design for multi-region availability without doubling complexity?
+
+**Answer:**
+Start with active-passive, not active-active. Active-passive (primary + standby in a second region) provides disaster recovery without the distributed-write complexity of active-active. Use Azure Traffic Manager or Front Door for DNS failover. Database replication (geo-replication for Azure SQL, read replicas for Cosmos DB) handles data redundancy. Only move to active-active when RTO/RPO requirements demand it and the team can handle split-brain scenarios.
+
+```
+Active-Passive (DR focus):
+  Primary region handles all traffic
+  Secondary region has warm standby
+  Traffic Manager monitors health → fails over DNS in < 60s
+  RTO: ~5-10 minutes | RPO: minutes (async replication lag)
+
+Active-Active (HA focus):
+  Both regions handle traffic
+  Front Door routes by latency
+  Write conflicts require resolution strategy
+  RTO: seconds | RPO: near-zero
+  Cost: ~2x + significant complexity
+```
+
+> **Why this matters:** Teams that jump straight to active-active often underestimate distributed write complexity. A well-designed active-passive architecture recovers from most failure scenarios at a fraction of the operational cost.
+
+**💡 Production Example:**
+An e-commerce platform targeted 99.9% SLA. Active-passive was implemented with Azure SQL geo-replication (East US primary, West US secondary) and Traffic Manager health-based failover. During a zone outage in East US, Traffic Manager rerouted DNS within 45 seconds. Active-active was never needed — the 99.95% uptime requirement was met with the simpler approach.
+
+---
+
+### Q: How do you set SLOs and error budgets for a .NET service?
+
+**Answer:**
+Define user-centric reliability metrics (success rate, latency percentiles), agree on an acceptable error rate (the SLO), and calculate the monthly error budget from that SLO. Track budget burn rate — if a deployment burns too much budget too fast, pause further releases until the budget recovers. This creates a principled mechanism to balance reliability investment against feature velocity.
+
+```
+SLO: 99.95% success rate for checkout API
+Monthly error budget: 0.05% × 43,200 minutes = ~21.6 minutes of downtime/failures
+
+Budget burn rate tracking:
+  Normal: 0.01% burn/day → budget lasts months
+  Incident: 0.5% burn in 1 hour → 40% of monthly budget consumed → release freeze
+  
+Alert thresholds:
+  5× burn rate for 1h  → warning
+  14× burn rate for 5m → page
+```
+
+> **Why this matters:** Without defined SLOs and error budgets, teams have no principled way to balance reliability investment against feature delivery. Arguments become subjective; error budgets make them mathematical.
+
+**💡 Production Example:**
+SLO of 99.95% success rate and p99 latency under 500ms for the checkout API. A deployment that caused a latency regression burned 40% of the monthly error budget in one day. The error budget policy automatically paused further deployments to that service until the budget recovered. The team fixed the regression and resumed — no manual governance needed.
+
+---
+
+### Q: Walk me through cost optimization steps that do not compromise reliability.
+
+**Answer:**
+Right-size compute first (easiest wins), then schedule non-critical workloads, then optimize storage tiers, then remove idle resources. Always protect production redundancy — never remove a standby instance or replicated region to save costs. Measure before cutting: use Azure Cost Analysis and Advisor recommendations to identify waste.
+
+```
+Step 1: Right-size — Advisor shows "CPU < 5% for 14 days" → downsize
+Step 2: Schedule — dev/test auto-shutdown at 7pm, restart at 8am
+Step 3: Storage tiers — blobs not accessed in 30d → Cool tier; 90d → Archive
+Step 4: Remove idle — unattached disks, unused public IPs, orphaned snapshots
+Step 5: Reserved instances — commit 1yr for stable production workloads (-40% cost)
+
+Never cut:
+  ❌ Removing standby slots (rollback requires them)
+  ❌ Reducing backup retention below RTO/RPO requirements
+  ❌ Eliminating redundancy in critical data paths
+```
+
+> **Why this matters:** Cloud costs grow with usage unless actively managed. Unchecked environments often run at 2–3× the necessary cost with no reliability benefit.
+
+**💡 Production Example:**
+Dev/test environments running 24/7 on premium SKUs were costing as much as production. Scheduling auto-shutdown, downsizing to burstable B-series VMs, and moving cold storage to Cool tier saved 35% monthly — roughly $2,400/month. Production redundancy was not touched.
+
+---
+
+### Q: What is your strategy for backups, restore drills, and data recovery confidence?
+
+**Answer:**
+Backups are useless if restore has never been tested. Schedule automated restore drills to an isolated environment, verify integrity with row counts and checksums, and track actual recovery time against your RTO. A backup that can't be restored in time is not a backup — it's a false sense of security.
+
+```
+Backup strategy:
+  SQL: Azure automated backups (full weekly, diff daily, log every 5-15min)
+  Blob storage: soft delete + versioning + cross-region redundancy
+  Key Vault: backup on change events via Event Grid
+
+Restore drill cadence:
+  Monthly: restore last backup to isolated environment
+  Verify: row count, checksum, application smoke test
+  Measure: actual RTO vs target RTO
+  Document: findings, any permission gaps, process improvements
+```
+
+> **Why this matters:** Untested backups provide false confidence. The worst time to discover your restore process doesn't work is during an actual data loss incident.
+
+**💡 Production Example:**
+After a database corruption incident, automated backups had never been tested for restore. Monthly restore drills to an isolated environment with row count and checksum verification were implemented. The first drill revealed a missing `db_datareader` permission on the restore target. The second drill completed in 14 minutes — within the 20-minute RTO.
+
+---
+
+### Q: What cloud architecture tradeoff did you regret, and what did you change?
+
+**Answer:**
+Describe the decision, why it seemed reasonable at the time, the operational pain it caused, and the corrective move. The best answers show architectural judgment — understanding that decisions made under time pressure accumulate as operational debt.
+
+> **Why this matters:** Architecture decisions made under time pressure often turn into long-term operational pain. Interviewers use this question to assess whether you reflect, learn, and improve rather than repeat patterns.
+
+**💡 Production Example:**
+Azure Functions were chosen for an order processing pipeline expecting simple event handling. The serverless model seemed ideal for the initial workload. As business logic grew — multi-step orchestration, 10-minute processing windows, stateful workflows — cold starts and execution time limits caused cascading failures under load. Migrated to Container Apps with KEDA scaling triggered by Service Bus queue depth. Processing time became predictable, cold starts disappeared, and the team could debug locally with Docker Compose. The lesson: serverless is excellent for stateless, short-lived, event-triggered tasks. Complex orchestration needs a persistent runtime.
+
+---
+
 *Last updated: 2026 | .NET 8 / Kubernetes 1.29 / Docker 25*
 
 ---

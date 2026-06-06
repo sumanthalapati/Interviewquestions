@@ -1284,3 +1284,544 @@ flowchart TD
     style PV fill:#FF9800,color:#fff
 ```
 
+---
+
+# 🎯 Senior Engineer Interview Questions — Observability & Debugging (Q82–Q91)
+
+---
+
+### Q82: Tell me about a production issue you debugged. How did you find the root cause?
+
+**Answer:**
+Systematic debugging follows a process: detection (alert or user report), triage (scope and severity), hypothesis testing (narrow candidates using telemetry), root-cause validation (reproduce and confirm), and prevention (fix + add test + add alert). Disciplined process beats heroic guessing.
+
+```mermaid
+flowchart TD
+    DETECT[Alert fires / user reports] --> TRIAGE[Triage:\nWhat is broken?\nHow many users?\nSince when?]
+    TRIAGE --> TELEMETRY[Check telemetry:\nLogs → Traces → Metrics]
+    TELEMETRY --> HYPOTHESIS[Form hypothesis:\nWhere is the boundary?]
+    HYPOTHESIS --> VALIDATE[Validate:\nCorrelate logs, reproduce locally\nor in staging]
+    VALIDATE --> FIX[Fix + deploy + verify metrics]
+    FIX --> PREVENT[Prevention:\nTest + Alert + Postmortem]
+
+    style DETECT fill:#f44336,color:#fff
+    style FIX fill:#4CAF50,color:#fff
+    style PREVENT fill:#2196F3,color:#fff
+```
+
+> **Why this matters:** Interviewers want a disciplined process, not heroic guesses. The ability to articulate a structured approach — detection, triage, hypothesis, validation, prevention — demonstrates production readiness.
+
+**💡 Production Example:**
+A checkout API started timing out intermittently. Detection: p99 latency alert at 8s threshold. Triage: only checkout affected, 15% of requests, started 40 minutes ago (recent deploy). Telemetry: distributed traces showed API latency was normal but a downstream payment provider call spiked to 10+ seconds. Logs revealed the provider had deployed a change affecting specific card types. Action: added a 5-second timeout with a graceful fallback (queue for retry), worked with the provider to roll back their change. Prevention: added a circuit breaker, provider-specific timeout alert, and a test for timeout behavior.
+
+---
+
+### Q83: What is structured logging and why does it matter?
+
+**Answer:**
+Structured logging emits log entries as machine-parseable key-value pairs (JSON) rather than freeform strings. This makes logs queryable, filterable, and correlatable in log aggregation systems. You can query `WHERE statusCode == 500 AND userId == 'alice'` — impossible with string logs.
+
+```csharp
+// ❌ String interpolation — unstructured, not queryable
+_logger.LogInformation($"Order {orderId} placed by {userId} for {amount:C}");
+// Logs as: "Order 3f2c... placed by alice@... for $99.99"
+// Cannot filter by orderId without regex — slow, error-prone
+
+// ✅ Structured logging — named properties preserved as fields
+_logger.LogInformation(
+    "Order {OrderId} placed by {UserId} for {Amount}",
+    orderId, userId, amount);
+// Logs as JSON: { "OrderId": "3f2c...", "UserId": "alice@...", "Amount": 99.99, "Level": "Information" }
+// Queryable: SELECT * WHERE OrderId = '3f2c...' — instant
+
+// Serilog with enrichers — add context automatically
+Log.Logger = new LoggerConfiguration()
+    .Enrich.FromLogContext()
+    .Enrich.WithCorrelationId()          // adds CorrelationId to every log
+    .Enrich.WithProperty("Service", "checkout-api")
+    .WriteTo.ApplicationInsights(telemetry, TelemetryConverter.Traces)
+    .WriteTo.Console(new JsonFormatter()) // structured JSON to stdout
+    .CreateLogger();
+
+// Scope enrichment — add request context to all logs within a scope
+using (_logger.BeginScope(new Dictionary<string, object>
+{
+    ["OrderId"] = orderId,
+    ["TenantId"] = tenantId
+}))
+{
+    _logger.LogInformation("Validating order");   // OrderId + TenantId in scope
+    _logger.LogInformation("Charging payment");   // OrderId + TenantId in scope
+}
+```
+
+> **Why this matters:** Structured logs reduce mean time to resolution (MTTR) dramatically. Finding a specific user's request in an unstructured 10GB log file is hours of grep. In a structured log store (Application Insights, Seq, Datadog), it is a 2-second query.
+
+**💡 Production Example:**
+A support ticket came in: "User alice@company.com says her order from last Tuesday is missing." With unstructured logs, this required grep over 3 days of log files and took 2 hours. After migrating to structured logging with Serilog and Application Insights, the same investigation was: `traces | where Properties.Email == "alice@company.com" and timestamp > ago(7d)` — answered in 30 seconds.
+
+---
+
+### Q84: How do you trace a request that touches multiple services?
+
+**Answer:**
+Propagate trace context (W3C TraceContext headers) across all service calls and emit spans with relevant attributes. The trace ID follows the request through every service boundary and lets you reconstruct the full timeline in a distributed trace viewer like Application Insights or Jaeger.
+
+```csharp
+// ASP.NET Core — W3C trace context propagation is automatic with OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()    // traces every incoming HTTP request
+        .AddHttpClientInstrumentation()    // propagates context in outgoing HTTP calls
+        .AddEntityFrameworkCoreInstrumentation() // traces DB queries
+        .AddAzureMonitorTraceExporter(opts =>
+            opts.ConnectionString = _config["ApplicationInsights:ConnectionString"]));
+
+// Manual span for custom operations
+using var activity = Activity.Current?.Source.StartActivity("ProcessPayment");
+activity?.SetTag("payment.provider", "stripe");
+activity?.SetTag("payment.amount", amount);
+activity?.SetTag("order.id", orderId.ToString());
+
+try
+{
+    var result = await _paymentClient.ChargeAsync(amount);
+    activity?.SetStatus(ActivityStatusCode.Ok);
+    return result;
+}
+catch (Exception ex)
+{
+    activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+    activity?.RecordException(ex);
+    throw;
+}
+
+// Headers automatically propagated by HttpClientInstrumentation:
+// traceparent: 00-{traceId}-{spanId}-01
+// Every service receiving this header continues the same trace
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as Checkout API
+    participant INV as Inventory Service
+    participant PAY as Payment Service
+
+    C->>API: POST /checkout\ntraceparent: 00-abc123-001-01
+    API->>INV: POST /reserve\ntraceparent: 00-abc123-002-01 (same traceId)
+    INV-->>API: 200 Reserved
+    API->>PAY: POST /charge\ntraceparent: 00-abc123-003-01 (same traceId)
+    PAY-->>API: 200 Charged
+    API-->>C: 201 Created
+
+    note over API,PAY: All spans share traceId abc123\nVisible as one timeline in Application Insights
+```
+
+> **Why this matters:** Distributed traces are the only way to reconstruct a request timeline across service boundaries. Without them, a 10-second checkout request becomes a detective story across 5 separate log streams.
+
+**💡 Production Example:**
+A checkout request occasionally took 10 seconds with no obvious cause. Distributed tracing revealed a specific downstream inventory service adding 8 seconds on cold cache misses — a span with `db.query.slow = true` that was invisible when looking at logs from any single service. Warming the cache on startup eliminated the spike. Without the distributed trace, the issue would have required coordinated log correlation across three teams.
+
+---
+
+### Q85: Your API is slow. Walk me through how you'd diagnose it.
+
+**Answer:**
+Start with high-level metrics, isolate affected endpoints, inspect dependencies, then profile hot paths. Average latency hides p99 issues; always look at percentiles. Work from the outside in — metrics → traces → profiler — rather than jumping straight to code.
+
+```mermaid
+flowchart TD
+    A[P99 latency alert] --> B[Check metrics:\nWhich endpoints? Which percentiles?]
+    B --> C{Affects all\nendpoints?}
+    C -->|YES| D[Check shared resources:\nDB connection pool\nExternal dependencies\nGarbage collection]
+    C -->|NO| E[Isolate endpoint:\nCheck traces for that route]
+    E --> F{DB slow?}
+    F -->|YES| G[Check query plans\nN+1 queries\nMissing indexes]
+    F -->|NO| H{External call slow?}
+    H -->|YES| I[Check provider status\nAdd circuit breaker / timeout]
+    H -->|NO| J[CPU profile:\ndotnet-trace\nVisual Studio Profiler]
+    J --> K[Find hot path:\nlock contention\nstring allocations\nregex backtracking]
+
+    style A fill:#f44336,color:#fff
+    style G fill:#FF9800,color:#fff
+    style K fill:#4CAF50,color:#fff
+```
+
+```bash
+# Step 1: Check p99 in Application Insights or Prometheus
+requests | summarize percentiles(duration, 50, 90, 95, 99) by name
+
+# Step 2: Identify slow traces
+traces | where duration > 2000 | project timestamp, id, operation_Name, duration
+
+# Step 3: Profile CPU on live pod (Linux)
+dotnet-trace collect -p <pid> --duration 00:00:30
+dotnet-trace convert trace.nettrace --format speedscope
+
+# Step 4: Check for N+1 (EF Core)
+services.AddDbContextFactory<AppDbContext>(opts =>
+    opts.UseSqlServer(connStr)
+        .LogTo(Console.WriteLine, LogLevel.Information)  // logs every query
+        .EnableSensitiveDataLogging());  // shows parameter values
+
+# Step 5: Memory pressure / GC pauses
+dotnet-counters monitor -p <pid> -- System.Runtime
+# Watch: gen0-gc-count, gc-pause-time, threadpool-queue-length
+```
+
+> **Why this matters:** API latency issues rarely come from a single obvious source. Systematic profiling skills separate engineers who can actually fix production performance from those who guess and hope. The diagnostic ladder — metrics → traces → profiler — prevents wasted effort.
+
+**💡 Production Example:**
+A product listing API had good average latency (200ms) but terrible p99 (4 seconds). Standard profiling showed nothing obvious. `dotnet-dump` analysis revealed a lock in a singleton cache wrapper under concurrent reads — every read acquired an exclusive lock, serializing all concurrent requests. Switching from `lock` to `ReaderWriterLockSlim` reduced p99 from 4 seconds to under 200ms at peak traffic. The bug was invisible under sequential testing.
+
+---
+
+### Q86: How do you design correlation IDs so support teams can debug customer tickets quickly?
+
+**Answer:**
+Generate a unique correlation ID per request at the gateway, propagate it in all downstream calls and log entries, and return it to the client in the response headers. Support teams include the correlation ID in tickets, which turns a multi-service investigation into a single log query.
+
+```csharp
+// Middleware — generate or propagate correlation ID
+public class CorrelationIdMiddleware
+{
+    private const string Header = "X-Correlation-Id";
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Accept from client (useful for end-to-end tracing) or generate new
+        var correlationId = context.Request.Headers[Header].FirstOrDefault()
+                         ?? Activity.Current?.TraceId.ToString()
+                         ?? Guid.NewGuid().ToString("N");
+
+        context.Items[Header] = correlationId;
+
+        // Add to response so client/support can reference it
+        context.Response.Headers[Header] = correlationId;
+
+        // Add to all log entries for this request
+        using (_logger.BeginScope(new Dictionary<string, object>
+            { [Header] = correlationId }))
+        {
+            await _next(context);
+        }
+    }
+}
+
+// Propagate to downstream services via HttpClient
+services.AddHttpClient("PaymentService")
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
+
+public class CorrelationIdForwardingHandler : DelegatingHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken ct)
+    {
+        if (Activity.Current?.TraceId is { } traceId)
+            request.Headers.TryAddWithoutValidation("X-Correlation-Id", traceId.ToString());
+        return base.SendAsync(request, ct);
+    }
+}
+```
+
+**Support ticket flow:**
+```
+User reports: "My payment failed at 14:32 today"
+Support team: includes X-Correlation-Id: abc123 from the error page / app
+Developer runs: traces | where customDimensions["X-Correlation-Id"] == "abc123"
+Result: full request timeline across all services in < 30 seconds
+```
+
+> **Why this matters:** Without correlation IDs, debugging a customer's failed request means guessing which log entry corresponds to their request based on timestamp and user ID — slow and error-prone in high-traffic systems. With correlation IDs, a single query reconstructs the entire journey.
+
+**💡 Production Example:**
+A financial services team was spending 2+ hours per support ticket correlating logs manually using timestamps and user IDs. After adding correlation ID propagation through 6 microservices and returning the ID in error responses (displayed to users as a "reference number"), investigation time dropped to under 5 minutes. The support team could hand engineers a single reference number that retrieved the complete picture.
+
+---
+
+### Q87: Walk me through reducing alert fatigue in a mature platform.
+
+**Answer:**
+Remove non-actionable alerts, tune thresholds to user impact rather than technical thresholds, enforce ownership (every alert has a named team and runbook), and use composite/multi-window alerts to eliminate transient noise. The goal is that every page requires a human decision, not just acknowledgment.
+
+```yaml
+# ❌ Noisy alert — fires on every spike, not user-impacting
+- alert: ApiErrorRate
+  expr: rate(http_requests_total{status=~"5.."}[1m]) > 0.01
+  # Fires constantly during deployments, causes alert fatigue
+
+# ✅ Composite alert — sustained user-impacting error rate
+- alert: CheckoutErrorRateSustained
+  expr: |
+    sum(rate(http_requests_total{job="checkout",status=~"5.."}[5m]))
+    /
+    sum(rate(http_requests_total{job="checkout"}[5m])) > 0.05
+  for: 5m  # must sustain for 5 minutes — filters transient spikes
+  labels:
+    severity: critical
+    team: checkout
+  annotations:
+    summary: "Checkout error rate > 5% sustained for 5 minutes"
+    runbook: "https://wiki.internal/runbooks/checkout-errors"
+    # Every alert must have a runbook — if you can't write one, the alert shouldn't exist
+```
+
+**Alert quality checklist:**
+- Every alert is actionable — there is a human decision required
+- Every alert has a runbook with clear steps
+- Alert threshold correlates to user impact, not technical metric
+- Flapping alerts use multi-window evaluation (sustained, not instantaneous)
+- Each alert has a clear owner team
+
+> **Why this matters:** Alert fatigue is as dangerous as no alerts. Engineers who get paged 50 times a week for non-critical events learn to dismiss alerts — including the one that matters. Reducing noise restores the trust that makes on-call sustainable.
+
+**💡 Production Example:**
+A service emitted hundreds of alerts on every deployment because thresholds were too tight (any error rate > 0.1%). On-call engineers learned to ignore pagerduty notifications during deploy windows. During one incident, a real outage alert was missed for 18 minutes because engineers assumed it was another deploy-time false positive. Switching to composite 5-minute sustained alerts and removing all alerts without runbooks reduced weekly alert volume by 90% and restored on-call confidence.
+
+---
+
+### Q88: How do you instrument business metrics alongside technical telemetry?
+
+**Answer:**
+Track domain KPIs (checkout conversion rate, cart abandonment, order success rate) using the same telemetry pipeline as technical metrics. Emit them as custom events or metrics tied to trace context. Business and technical signals together reveal whether a technical regression actually affects users.
+
+```csharp
+// Emit business metrics as Application Insights custom events
+public class CheckoutService
+{
+    private readonly TelemetryClient _telemetry;
+
+    public async Task<OrderResult> CheckoutAsync(Cart cart, CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            var order = await ProcessOrderAsync(cart, ct);
+
+            // Technical metric — latency
+            _telemetry.TrackMetric("checkout.latency_ms", stopwatch.ElapsedMilliseconds);
+
+            // Business metric — conversion
+            _telemetry.TrackEvent("checkout.completed", new Dictionary<string, string>
+            {
+                ["CustomerId"]  = cart.CustomerId.ToString(),
+                ["CartValue"]   = cart.TotalAmount.ToString("F2"),
+                ["ItemCount"]   = cart.Items.Count.ToString(),
+                ["PaymentType"] = cart.PaymentMethod
+            });
+
+            return order;
+        }
+        catch (Exception ex)
+        {
+            // Business metric — failure with context
+            _telemetry.TrackEvent("checkout.failed", new Dictionary<string, string>
+            {
+                ["FailureReason"] = ex.GetType().Name,
+                ["CartValue"]     = cart.TotalAmount.ToString("F2")
+            });
+            throw;
+        }
+    }
+}
+
+// Cart abandonment tracking — when user leaves without checking out
+_telemetry.TrackEvent("cart.abandoned", new Dictionary<string, string>
+{
+    ["SessionDuration"] = elapsed.TotalSeconds.ToString("F0"),
+    ["LastStep"]        = lastCompletedStep,
+    ["CartValue"]       = cart.TotalAmount.ToString("F2")
+});
+```
+
+> **Why this matters:** Technical metrics alone don't tell the full story. A latency regression below the alerting threshold (300ms → 600ms) might not trigger any technical alert but could cause a measurable conversion drop. Business metrics provide the context that clarifies whether a technical issue is actually affecting users.
+
+**💡 Production Example:**
+A checkout API had a latency regression (p99 went from 300ms to 600ms) that was below the 1s alerting threshold. No technical alerts fired. However, a business metric dashboard showed checkout conversion rate dropped 8% in the same time window. That correlation was the evidence needed to prioritize a fix that would otherwise have been deprioritized as "below SLA." The latency was traced to an N+1 query on the product catalog endpoint called during checkout.
+
+---
+
+### Q89: How do you debug intermittent failures that you cannot reproduce locally?
+
+**Answer:**
+Increase targeted telemetry (add spans, log intermediate state, capture execution context), reproduce in a production-like environment with realistic load, and use distributed tracing to correlate intermittent failures with concurrency patterns, request context, and timing.
+
+```csharp
+// ❌ Insufficient telemetry — only logs success/failure
+public async Task<PaymentResult> ProcessPaymentAsync(PaymentRequest request)
+{
+    try
+    {
+        var result = await _provider.ChargeAsync(request.Amount);
+        _logger.LogInformation("Payment succeeded");
+        return result;
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Payment failed");
+        throw;
+    }
+}
+
+// ✅ Rich telemetry — captures context needed to diagnose intermittent failures
+public async Task<PaymentResult> ProcessPaymentAsync(PaymentRequest request)
+{
+    using var activity = _activitySource.StartActivity("ProcessPayment");
+    activity?.SetTag("payment.provider", _provider.Name);
+    activity?.SetTag("payment.amount", request.Amount);
+    activity?.SetTag("payment.currency", request.Currency);
+    activity?.SetTag("thread.id", Environment.CurrentManagedThreadId);
+
+    _logger.LogInformation(
+        "Processing payment {PaymentId} via {Provider} on thread {ThreadId}",
+        request.PaymentId, _provider.Name, Environment.CurrentManagedThreadId);
+
+    try
+    {
+        var sw = Stopwatch.StartNew();
+        var result = await _provider.ChargeAsync(request.Amount);
+        _logger.LogInformation(
+            "Payment {PaymentId} succeeded in {Ms}ms on attempt {Attempt}",
+            request.PaymentId, sw.ElapsedMilliseconds, request.RetryCount);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        activity?.RecordException(ex);
+        activity?.SetTag("payment.retry_count", request.RetryCount);
+        _logger.LogError(ex,
+            "Payment {PaymentId} failed after {Ms}ms. Provider: {Provider}. RetryCount: {Retry}",
+            request.PaymentId, sw.ElapsedMilliseconds, _provider.Name, request.RetryCount);
+        throw;
+    }
+}
+```
+
+> **Why this matters:** Intermittent failures that cannot be reproduced locally are the hardest class of production bugs. They often involve concurrency, timing, environment-specific configuration, or load patterns. Rich telemetry is the only way to see what the code was doing when the failure occurred.
+
+**💡 Production Example:**
+A payment service had occasional transaction failures appearing only under concurrent load in production (roughly 1 in 500 requests). Adding distributed tracing with activity IDs and capturing thread IDs during failures revealed that failures always occurred when two requests with the same customer ID were processed simultaneously — a race condition in a shared lock-free queue that was keyed by customer ID. The bug was invisible in single-threaded and low-concurrency testing but immediately obvious in the trace data.
+
+---
+
+### Q90: How do you perform post-incident reviews that actually improve systems?
+
+**Answer:**
+Focus on system conditions and decision quality rather than individual blame. Every action item must have an owner and a deadline. Track completion in the sprint board — untracked items decay. The measure of a good postmortem is recurrence rate for the same class of incident.
+
+```markdown
+## Postmortem Template
+
+**Incident:** Checkout API 503s — 2026-06-01 14:32 UTC — 47 minutes
+
+### Timeline
+- 14:32 — Alert fires: checkout error rate > 5% sustained 5 min
+- 14:35 — On-call acknowledges, begins triage
+- 14:40 — Root cause identified: missing readiness probe caused traffic to route to pods mid-startup
+- 14:55 — Readiness probe added, deployed to staging, validated
+- 15:19 — Deployed to production, error rate returns to baseline
+
+### Root Cause
+Pods started receiving traffic 30 seconds before they were ready (DB connection pool not warmed).
+Missing readiness probe — Kubernetes had no signal to delay traffic.
+
+### Contributing Factors
+- No readiness probe in the deployment spec (gap in deployment checklist)
+- Recent pod count increase amplified the issue (more pods starting = more unready traffic)
+
+### Action Items
+| Item | Owner | Due | Status |
+|------|-------|-----|--------|
+| Add readiness probe to checkout deployment | @alice | 2026-06-03 | ✅ Done |
+| Add readiness probe to deploy checklist | @bob | 2026-06-05 | In progress |
+| Alert on pod readiness ratio < 80% | @carol | 2026-06-07 | Planned |
+| Integration test for cold-start behavior | @alice | 2026-06-10 | Planned |
+
+### What went well
+- Fast detection (alert fired within 5 minutes of issue start)
+- Clean rollback path (no data mutation — stateless API)
+```
+
+> **Why this matters:** Postmortems are only useful if they change behavior. A postmortem that results in a document nobody reads changes nothing. Action items tracked in the sprint board with owners and deadlines drive actual systemic improvement.
+
+**💡 Production Example:**
+After a checkout outage caused by a missing readiness probe, a blameless postmortem identified the root cause and added four action items with owners and sprint-tracked deadlines. All four were completed within two weeks. The same class of issue (unready pod receiving traffic) has not recurred in the 12 months since. The postmortem also resulted in a deploy checklist that now includes probe verification as a required step.
+
+---
+
+### Q91: What is your approach to debugging memory leaks in long-running .NET services?
+
+**Answer:**
+Use memory dumps, allocation profiles, and object retention analysis to find the root. Then validate fixes under endurance testing — short test runs cannot reveal leaks that manifest over hours. Typical culprits: event handler subscriptions, static caches, captured closures, and unmanaged resources.
+
+```csharp
+// Common leak patterns and fixes
+
+// ❌ Leak 1: Event handler subscription never unsubscribed
+public class OrderNotificationService
+{
+    public OrderNotificationService(IEventBus bus)
+    {
+        bus.OrderPlaced += OnOrderPlaced; // ❌ bus holds reference to this service forever
+        // Garbage collector cannot collect this service as long as bus is alive
+    }
+}
+
+// ✅ Fix: IDisposable pattern
+public class OrderNotificationService : IDisposable
+{
+    private readonly IEventBus _bus;
+    public OrderNotificationService(IEventBus bus)
+    {
+        _bus = bus;
+        _bus.OrderPlaced += OnOrderPlaced;
+    }
+    public void Dispose() => _bus.OrderPlaced -= OnOrderPlaced;
+}
+
+// ❌ Leak 2: Captured HttpContext in async background work
+public IActionResult StartExport()
+{
+    var userId = HttpContext.User.FindFirstValue("sub"); // ❌ captures HttpContext
+    _ = Task.Run(async () =>
+    {
+        await Task.Delay(5000);
+        await ProcessExportAsync(userId); // HttpContext is disposed by now — access violation
+    });
+    return Accepted();
+}
+
+// ✅ Fix: extract values before async boundary
+public IActionResult StartExport()
+{
+    var userId = HttpContext.User.FindFirstValue("sub"); // ✅ extract value, not reference
+    _ = Task.Run(async () => await ProcessExportAsync(userId));
+    return Accepted();
+}
+```
+
+```bash
+# Diagnosing a leak in production (.NET on Linux)
+
+# Step 1: Monitor memory over time
+dotnet-counters monitor -p <pid> --counters System.Runtime[gen-2-size,gc-heap-size]
+# Watch: gen-2-size growing without recovery = likely leak
+
+# Step 2: Capture memory dump
+dotnet-gcdump collect -p <pid>
+dotnet-gcdump report <file>.gcdump -rt
+
+# Step 3: Analyze with dotnet-dump (or Visual Studio for Windows)
+dotnet-dump analyze <dump-file>
+> dumpheap -stat         # objects by type, sorted by total size
+> dumpheap -type OrderService  # all instances of OrderService
+> gcroot <address>       # what is keeping this object alive?
+```
+
+> **Why this matters:** Memory leaks in long-running services cause gradual degradation — the service slows down and eventually OOM-crashes after hours or days. The insidious nature (slow onset, not immediately reproducible) makes them one of the most damaging production issues.
+
+**💡 Production Example:**
+A background processing service was being restarted every 6 hours by the ops team because memory climbed steadily until OOM. Profiling with `dotnet-gcdump` showed the handler chain on a static `EventAggregator` growing on every service restart within the pod. Each time the BackgroundService was constructed (DI-registered as Scoped, accidentally instantiated multiple times due to a factory bug), it subscribed to the event without ever unsubscribing. Implementing `IDisposable` to unsubscribe on service stop, combined with fixing the factory to return a singleton, eliminated the leak. Endurance testing over 4 hours confirmed stable memory usage.
+

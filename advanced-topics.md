@@ -805,6 +805,352 @@ redis.conf:
 
 ---
 
+## 11. Messaging & Async Processing
+
+> Azure Service Bus · Outbox pattern · Idempotency · Schema evolution · Retry storms · Background jobs
+
+---
+
+### Q: What's the difference between a message queue and pub/sub?
+
+**Answer:**
+A message queue distributes work to exactly one consumer. Pub/sub broadcasts events to every subscriber. The choice depends on ownership of outcome: if exactly one service must process a message (order fulfillment, payment processing), use a queue. If multiple independent services must react to the same event (analytics, notifications, inventory all responding to OrderPlaced), use pub/sub.
+
+```
+Message Queue:
+  Producer → [Queue] → Consumer A processes message → message deleted
+  One consumer "owns" the outcome
+  Use for: task distribution, work queues, command processing
+
+Pub/Sub:
+  Producer → [Topic/Exchange]
+                     ├──► Subscriber A (inventory service)
+                     ├──► Subscriber B (analytics service)
+                     └──► Subscriber C (notification service)
+  All subscribers receive a copy independently
+  Use for: event broadcasting, domain events, decoupled fan-out
+```
+
+```mermaid
+flowchart LR
+    subgraph Queue["Message Queue (one consumer wins)"]
+        P1[Order Service] -->|send command| Q1[Queue]
+        Q1 -->|one consumer processes| C1[Fulfillment Service]
+    end
+
+    subgraph PubSub["Pub/Sub (all subscribers notified)"]
+        P2[Order Service] -->|publish event| T1[Topic]
+        T1 -->|copy 1| S1[Inventory Service]
+        T1 -->|copy 2| S2[Analytics Service]
+        T1 -->|copy 3| S3[Notification Service]
+    end
+
+    style Q1 fill:#2196F3,color:#fff
+    style T1 fill:#9C27B0,color:#fff
+```
+
+> **Why this matters:** Using a queue when you need pub/sub forces artificial fan-out wiring. Using pub/sub when you need a queue creates ownership confusion — every subscriber thinks someone else will handle the outcome.
+
+**💡 Production Example:**
+Order placement used an Azure Service Bus queue so exactly one fulfillment worker processed each order — no double fulfillment. Order domain events (OrderPlaced, OrderShipped, OrderDelivered) used a Service Bus topic with subscriptions so inventory, analytics, and notification services each received every event independently without coupling to each other.
+
+---
+
+### Q: How do you handle a message that keeps failing?
+
+**Answer:**
+Retry transient failures with bounded exponential backoff, then dead-letter persistent failures with full diagnostics. Isolate poison messages quickly — a single bad message must never permanently block consumer progress. Set up alerting on dead-letter queue depth so persistent failures become visible rather than silent.
+
+```csharp
+// Azure Service Bus — bounded retry then dead-letter
+var processor = client.CreateProcessor(queueName, new ServiceBusProcessorOptions
+{
+    MaxConcurrentCalls = 4,
+    AutoCompleteMessages = false
+});
+
+processor.ProcessMessageAsync += async args =>
+{
+    try
+    {
+        await ProcessOrderAsync(args.Message);
+        await args.CompleteMessageAsync(args.Message); // ack success
+    }
+    catch (TransientException)
+    {
+        // Abandon — message returns to queue, retry count increments
+        await args.AbandonMessageAsync(args.Message);
+    }
+    catch (PoisonMessageException)
+    {
+        // Dead-letter immediately — don't waste retries
+        await args.DeadLetterMessageAsync(args.Message,
+            deadLetterReason: "PoisonMessage",
+            deadLetterErrorDescription: "Deserialization failed — bad payload");
+    }
+};
+
+// In Azure DevOps/Portal: alert when deadLetterMessageCount > 5
+// metric: ServiceBusMetrics/DeadLetteredMessages
+```
+
+```
+Message lifecycle:
+  Received → Processing failed → Abandoned → Retry (up to MaxDeliveryCount, default 10)
+                                             ↓ (after MaxDeliveryCount exhausted)
+                                          Dead-letter queue
+                                             ↓
+                                   Alert fires → human review → replay or discard
+```
+
+> **Why this matters:** Poison message handling prevents one bad message from permanently blocking consumer progress. Without dead-lettering, consumers get stuck in infinite retry loops consuming resources while delivering nothing.
+
+**💡 Production Example:**
+A consumer processing invoice events got stuck on a single malformed message for 6 hours, processing the same message and failing, blocking all subsequent invoices. Adding bounded retry (3 attempts) with dead-lettering on the third failure, combined with an alert on dead-letter depth, meant the next malformed message was isolated in under 2 minutes and the queue continued processing.
+
+---
+
+### Q: What is the Outbox pattern and why would you use it?
+
+**Answer:**
+The Outbox pattern solves the dual-write problem: writing to a database and publishing a message in a single atomic operation. Without it, a process crash between the database write and the message publish leaves state and messages out of sync. With Outbox, both writes happen in the same database transaction; a background relay process publishes the outbox entries to the message broker afterward.
+
+```csharp
+// ❌ Dual-write without Outbox — crash between steps causes inconsistency
+public async Task CreateOrderAsync(CreateOrderCommand cmd)
+{
+    await _db.Orders.AddAsync(order);
+    await _db.SaveChangesAsync();   // DB write succeeds
+    // CRASH HERE → message never published → inventory never updated
+    await _bus.PublishAsync(new OrderCreatedEvent(order.Id));
+}
+
+// ✅ Outbox pattern — atomic write to DB + outbox table
+public async Task CreateOrderAsync(CreateOrderCommand cmd)
+{
+    await _db.Orders.AddAsync(order);
+
+    // Write event to outbox table IN SAME TRANSACTION
+    await _db.OutboxMessages.AddAsync(new OutboxMessage
+    {
+        Id        = Guid.NewGuid(),
+        Type      = nameof(OrderCreatedEvent),
+        Payload   = JsonSerializer.Serialize(new OrderCreatedEvent(order.Id)),
+        CreatedAt = DateTime.UtcNow,
+        Published = false
+    });
+
+    await _db.SaveChangesAsync(); // both order + outbox entry committed together
+    // Background relay picks up unpublished outbox entries and publishes them
+}
+
+// Background relay (IHostedService or Hangfire recurring job)
+public class OutboxRelay : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var pending = await _db.OutboxMessages
+                .Where(m => !m.Published)
+                .OrderBy(m => m.CreatedAt)
+                .Take(100)
+                .ToListAsync(ct);
+
+            foreach (var msg in pending)
+            {
+                await _bus.PublishAsync(msg.Type, msg.Payload, ct);
+                msg.Published = true;
+            }
+
+            await _db.SaveChangesAsync(ct);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+}
+```
+
+```mermaid
+flowchart LR
+    CMD[CreateOrder Command] --> TXN{DB Transaction}
+    TXN --> ORDER[(Orders table\nINSERT)]
+    TXN --> OUTBOX[(Outbox table\nINSERT)]
+    TXN --> COMMIT[COMMIT]
+    RELAY[Background Relay\nIHostedService] -->|polls every 5s| OUTBOX
+    RELAY -->|publishes| BUS[[Message Bus]]
+    BUS --> CONSUMER[Inventory Service\nNotification Service]
+
+    style TXN fill:#2196F3,color:#fff
+    style RELAY fill:#FF9800,color:#fff
+    style BUS fill:#9C27B0,color:#fff
+```
+
+> **Why this matters:** The Outbox pattern is the standard solution for "exactly-once" message publishing in distributed systems. Without it, network failures between DB writes and message publishes cause data inconsistencies that are hard to detect and painful to fix.
+
+---
+
+### Q: How do you run schema changes for event payloads when old consumers still exist?
+
+**Answer:**
+Ship additive schema updates only: add fields as optional with defaults, never remove or rename required fields in a single deployment. Track consumer adoption via health endpoints or metrics. Only remove deprecated fields after all consumers have upgraded. This requires a defined compatibility window — producers must support old schema for N deployment cycles.
+
+```csharp
+// ❌ Breaking change — removes field old consumers depend on
+public record OrderCreatedEvent(
+    Guid OrderId,
+    decimal Total
+    // CustomerId removed — consumers reading this field now fail
+);
+
+// ✅ Additive change — new field is optional, old consumers ignore it
+public record OrderCreatedEvent(
+    Guid OrderId,
+    decimal Total,
+    Guid? CustomerId = null,          // new field: nullable with default
+    decimal? ShippingEstimate = null   // another new field: optional
+);
+// Old consumers deserialise fine — unknown fields ignored (use JsonExtensionData if needed)
+// New consumers can use the new fields immediately
+
+// Consumer version tracking (health endpoint)
+app.MapGet("/health/schema-version", () => new {
+    EventType = nameof(OrderCreatedEvent),
+    SchemaVersion = "2.1",
+    SupportedFields = new[] { "OrderId", "Total", "CustomerId", "ShippingEstimate" }
+});
+```
+
+```
+Schema evolution lifecycle:
+  v1: { OrderId, Total }
+  v2: { OrderId, Total, CustomerId? }        ← additive, safe
+  v3: { OrderId, Total, CustomerId?, ShippingEstimate? } ← additive, safe
+  
+  Only after ALL consumers on v3:
+  v4: { OrderId, Total, CustomerId, ShippingEstimate }   ← make field required
+```
+
+> **Why this matters:** Event schema changes break consumers silently if compatibility isn't managed. A producer removing a field can cause deserialization failures in downstream services hours or days later when those consumers finally receive a new event.
+
+**💡 Production Example:**
+Adding a `ShippingEstimate` field to `OrderPlaced` was made optional with a null default. Old consumers ignored it safely. Consumer schema versions were tracked via health endpoints. Deprecated fields were only removed after all consumers had upgraded — verified by checking the health endpoint responses across all deployed instances before the removal PR was merged.
+
+---
+
+### Q: How do you design a retry policy that avoids retry storms?
+
+**Answer:**
+Use exponential backoff with jitter to spread retry attempts across time. Add a maximum retry count and circuit breaker to prevent indefinite retries overwhelming a struggling downstream service. Jitter is critical — without it, all retrying clients synchronise their retry attempts and create thundering herd bursts.
+
+```csharp
+// ❌ Fixed interval retry — all clients retry at same time
+var policy = Policy
+    .Handle<HttpRequestException>()
+    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(5));
+// All 1000 failed clients retry at T+5s, T+10s, T+15s simultaneously → storm
+
+// ✅ Exponential backoff with jitter — using Polly
+var jitter = new Random();
+var policy = Policy
+    .Handle<HttpRequestException>()
+    .WaitAndRetryAsync(
+        retryCount: 4,
+        sleepDurationProvider: attempt =>
+        {
+            var baseDelay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // 2s, 4s, 8s, 16s
+            var jitterMs  = jitter.Next(0, 1000);                       // 0-1000ms random
+            return baseDelay + TimeSpan.FromMilliseconds(jitterMs);
+        },
+        onRetry: (exception, delay, attempt, context) =>
+            _logger.LogWarning("Retry {Attempt} after {Delay}ms: {Error}",
+                attempt, delay.TotalMilliseconds, exception.Message));
+
+// Circuit breaker — stop retrying entirely when service is clearly down
+var circuitBreaker = Policy
+    .Handle<HttpRequestException>()
+    .CircuitBreakerAsync(
+        exceptionsAllowedBeforeBreaking: 5,
+        durationOfBreak: TimeSpan.FromSeconds(30));
+
+// Combined: retry + circuit breaker
+var combined = Policy.WrapAsync(policy, circuitBreaker);
+```
+
+```
+Without jitter (storm):          With jitter (spread):
+T+5s:  ████████████ 1000 retries  T+5s:  ██ ~100 retries
+T+10s: ████████████ 1000 retries  T+6s:  ██ ~100 retries
+                                   T+7s:  ██ ~100 retries
+→ hammers downstream              → spreads load safely
+```
+
+> **Why this matters:** Retry storms are a common cause of cascading failures. A service degradation that could self-heal under normal load can be pushed into full outage when thousands of clients retry simultaneously without jitter.
+
+---
+
+### Q: How do you design reliable background processing with IHostedService or Hangfire?
+
+**Answer:**
+Treat jobs as idempotent units with explicit retry policies, concurrency limits, and durable state. `IHostedService`/`BackgroundService` is best for service-owned recurring workflows tightly coupled to the service lifecycle. Hangfire is better when you need persistent scheduling, operational dashboards, retries that survive service restarts, and the ability to replay failed jobs manually.
+
+```csharp
+// Option 1: BackgroundService (IHostedService) — recurring, in-process
+public class InvoiceExportJob : BackgroundService
+{
+    private static readonly TimeSpan Interval = TimeSpan.FromMinutes(15);
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _invoiceService.ExportPendingAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "InvoiceExport failed — will retry on next interval");
+                // Don't throw — let the loop continue
+            }
+            await Task.Delay(Interval, ct);
+        }
+    }
+}
+
+// Option 2: Hangfire — persistent, dashboardable, recoverable
+// Registration
+builder.Services.AddHangfire(config =>
+    config.UseSqlServerStorage(connectionString));
+builder.Services.AddHangfireServer(options =>
+    options.WorkerCount = 4);  // limit concurrency
+
+// Schedule recurring job
+RecurringJob.AddOrUpdate<InvoiceExportJob>(
+    "invoice-export",
+    job => job.ExportPendingAsync(CancellationToken.None),
+    Cron.MinuteParts(15));  // every 15 minutes
+
+// Enqueue one-off job with idempotency key
+BackgroundJob.Enqueue<OrderFulfillmentJob>(
+    job => job.FulfillAsync(orderId, CancellationToken.None));
+```
+
+| | BackgroundService | Hangfire |
+|-|------------------|---------|
+| Persistence | ❌ Lost on restart | ✅ Stored in DB |
+| Dashboard | ❌ | ✅ Built-in |
+| Retry on crash | ❌ | ✅ Resumes from DB |
+| Manual replay | ❌ | ✅ One click |
+| Complexity | Low | Medium |
+| Use for | Simple recurring tasks | Critical jobs needing operational control |
+
+> **Why this matters:** Background work often carries critical side effects like billing, email, and data sync. Losing jobs on restart or having no visibility into failures is a production reliability risk.
+
+**💡 Production Example:**
+Fragile cron scripts were moved into Hangfire with explicit queues (critical vs standard) and idempotency keys on each job. Failed jobs flowed to a dead-letter state visible in the Hangfire dashboard with full exception details. Operators could replay safely after fixes — no code changes or manual SQL required. Job reliability improved from ~94% to 99.8%.
+
+---
+
 > ✅ **10 advanced topics** — the ones that get highlighted in interview feedback.
 >
 > 💡 **How to use tradeoffs in interviews:**

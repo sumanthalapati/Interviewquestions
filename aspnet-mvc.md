@@ -246,6 +246,11 @@ public async Task<ActionResult<ProductDto>> Create([FromBody] CreateProductDto d
 }
 ```
 
+> **Why this matters:** Weak validation shifts errors downstream, wastes compute on bad requests, and makes APIs frustrating to integrate with.
+
+**💡 Production Example:**
+In a checkout API, FluentValidation was used for request shape checks returning all validation errors at once in a Problem Details response, so clients could fix multiple issues in one round-trip.
+
 ---
 
 # 4. Filters
@@ -362,6 +367,11 @@ public class ProductCache : IProductCache {
 }
 ```
 
+> **Why this matters:** Wrong DI lifetimes are a common source of silent data corruption under concurrent load.
+
+**💡 Production Example:**
+A notification service registered a `DbContext` as singleton accidentally. Under concurrent requests, EF Core threw tracking errors and occasionally returned another user's data. Fixing the lifetime to scoped resolved both bugs.
+
 ---
 
 # 6. Middleware
@@ -412,6 +422,11 @@ flowchart TD
     style EP fill:#51cf66,color:#fff
     style R401 fill:#ff6b6b,color:#fff
 ```
+
+> **Why this matters:** One misplaced middleware can silently disable security checks or observability for entire routes.
+
+**💡 Production Example:**
+`UseAuthorization` was configured before `UseAuthentication`, causing all requests to appear unauthenticated. Reordering the pipeline fixed intermittent 403 responses.
 
 ---
 
@@ -642,6 +657,11 @@ public async Task<IActionResult> GetProducts([FromQuery] string? category, int p
     return Ok(products);
 }
 ```
+
+> **Why this matters:** Caching failures usually become correctness incidents, not just performance issues.
+
+**💡 Production Example:**
+Product catalog reads were cached in Redis with short TTL plus event-driven invalidation on price updates. Database load reduced significantly while stale windows stayed bounded.
 
 ---
 
@@ -983,6 +1003,11 @@ public class ProductsController : ControllerBase {
 public class ProductsV2Controller : ControllerBase { ... }
 ```
 
+> **Why this matters:** Breaking API changes without a versioning strategy force coordinated deployments with all clients simultaneously, which is often impossible with mobile integrations.
+
+**💡 Production Example:**
+A mobile banking API used URL path versioning (`/v1/`, `/v2/`) and maintained v1 for 12 months after v2 launched. Usage telemetry per version let them email partners with migration timelines before deprecation.
+
 ---
 
 # 15. CORS & Rate Limiting
@@ -1072,6 +1097,11 @@ app.MapPost("/api/auth/login", LoginHandler)
 app.MapGet("/api/products", GetProducts)
    .RequireRateLimiting("per-user");
 ```
+
+> **Why this matters:** Rate limiting is both a reliability and security control. Without it, one noisy client can degrade service for everyone.
+
+**💡 Production Example:**
+A login endpoint was protected from credential-stuffing with per-IP and per-user token bucket limits, plus exponential backoff hints. Auth service saturation during attack windows dropped sharply.
 
 ---
 
@@ -1822,4 +1852,495 @@ app.Run();
 | Full replace | PUT | `/api/products/{id}` | 204 No Content |
 | Partial update | PATCH | `/api/products/{id}` | 204 No Content |
 | Delete | DELETE | `/api/products/{id}` | 204 No Content |
+
+---
+
+# 20. Production API Design — Deep Dive Questions
+
+> These questions test real-world decision-making, not just API knowledge.
+
+---
+
+## 20.1 Request Pipeline
+
+### Q: Walk me through what happens when an HTTP request hits your ASP.NET Core API.
+
+**Answer:**
+Kestrel receives the request, middleware executes in registration order, routing resolves an endpoint, endpoint logic runs, and the response flows back through middleware in reverse. Order matters because middleware can short-circuit the pipeline — returning a response without calling `_next`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant K as Kestrel
+    participant M1 as ExceptionHandler
+    participant M2 as Auth Middleware
+    participant R as Routing
+    participant A as Controller Action
+    C->>K: HTTP Request
+    K->>M1: Forward request
+    M1->>M2: next()
+    M2->>R: next() (authenticated)
+    R->>A: Resolve & invoke endpoint
+    A-->>R: ActionResult
+    R-->>M2: Response
+    M2-->>M1: Response
+    M1-->>K: Response
+    K-->>C: HTTP Response
+```
+
+> **Why this matters:** Every performance issue in ASP.NET Core traces back to middleware order, Kestrel behavior, or endpoint resolution.
+
+**💡 Production Example:**
+A logging middleware placed after `UseRouting` but before `UseAuthorization` was doing synchronous I/O on every request. Moving it earlier and making it async cut p95 latency by 40ms.
+
+❌ **Anti-pattern:**
+```csharp
+app.UseRouting();
+app.Use(async (ctx, next) => {
+    // Synchronous blocking I/O inside middleware — blocks thread pool
+    File.AppendAllText("requests.log", ctx.Request.Path);
+    await next();
+});
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+```
+
+✅ **Best practice:**
+```csharp
+app.UseExceptionHandler();       // catch all errors first
+app.UseHttpsRedirection();
+app.UseStaticFiles();
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+// Custom middleware uses async I/O and OnStarting hooks for headers
+app.MapControllers();
+```
+
+---
+
+## 20.2 Centralized Error Handling
+
+### Q: How do you handle errors in a production API? Walk me through your strategy.
+
+**Answer:**
+Use centralized exception handling (`UseExceptionHandler` / `IExceptionHandler`), return consistent RFC 7807 Problem Details, and log rich internal context with correlation IDs. Don't assume unhandled exceptions automatically become Problem Details without explicitly configuring the exception pipeline.
+
+> **Why this matters:** Inconsistent error handling creates noisy alerts, confuses clients, and makes incidents harder to diagnose.
+
+**💡 Production Example:**
+In a checkout API, `IExceptionHandler` was implemented to catch domain exceptions and map them to Problem Details with correlation IDs. Support could trace any customer complaint to the exact failed call within seconds.
+
+❌ **Anti-pattern:**
+```csharp
+// Scattered try/catch returning different shapes across controllers
+try { ... }
+catch (NotFoundException) { return NotFound("Not found"); }        // plain string
+catch (Exception) { return StatusCode(500, new { error = "oops" }); } // ad-hoc object
+```
+
+✅ **Best practice:**
+```csharp
+// Program.cs
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+app.UseExceptionHandler();
+
+public class GlobalExceptionHandler : IExceptionHandler {
+    private readonly ILogger<GlobalExceptionHandler> _logger;
+    public GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger) => _logger = logger;
+
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext ctx, Exception ex, CancellationToken ct) {
+        var correlationId = ctx.TraceIdentifier;
+        _logger.LogError(ex, "Unhandled exception. CorrelationId: {CorrelationId}", correlationId);
+
+        var (status, title) = ex switch {
+            NotFoundException  => (404, "Resource not found"),
+            ValidationException => (400, "Validation failed"),
+            ConflictException  => (409, "Conflict"),
+            _                  => (500, "An unexpected error occurred")
+        };
+
+        ctx.Response.StatusCode = status;
+        await ctx.Response.WriteAsJsonAsync(new ProblemDetails {
+            Status   = status,
+            Title    = title,
+            Detail   = ex.Message,
+            Extensions = { ["correlationId"] = correlationId }
+        }, ct);
+        return true;
+    }
+}
+```
+
+---
+
+## 20.3 4xx vs 5xx Classification
+
+### Q: How do you decide which failures should return 4xx vs 5xx in complex business flows?
+
+**Answer:**
+4xx means the client can correct the request — the problem is on the client side. 5xx means server or dependency failure — the problem is on the server side. Classify by responsibility and actionability. Business rule violations are usually 4xx; infrastructure failures are 5xx.
+
+| Scenario | Code | Reason |
+|---|---|---|
+| Missing required field | 400 | Client sent bad data |
+| Invalid auth token | 401 | Client must re-authenticate |
+| Forbidden resource | 403 | Client lacks permission |
+| Resource not found | 404 | Client referenced wrong ID |
+| Conflict (duplicate, out of stock) | 409 | Client must resolve the conflict |
+| Upstream service down | 502/503 | Server dependency failed |
+| Unhandled exception | 500 | Server bug |
+
+> **Why this matters:** Wrong status codes break client retry logic, inflate on-call alerts, and obscure whether an issue is a product problem or a platform failure.
+
+**💡 Production Example:**
+Inventory reservation failures were initially returned as 500s. After analysis, "out of stock" was reclassified as 409 Conflict. Alert noise dropped 70% because monitors could distinguish real server errors from expected business rejections.
+
+❌ **Anti-pattern:**
+```csharp
+// Returning 500 for a known business condition
+if (product.Stock == 0)
+    return StatusCode(500, "Product unavailable");
+// Clients can't distinguish this from a real server crash
+```
+
+✅ **Best practice:**
+```csharp
+if (product.Stock == 0)
+    return Conflict(new ProblemDetails {
+        Status = 409,
+        Title  = "Product unavailable",
+        Detail = $"Product '{product.Name}' is currently out of stock."
+    });
+```
+
+---
+
+## 20.4 Over-Posting & Mass Assignment
+
+### Q: How do you prevent over-posting and mass assignment vulnerabilities in API endpoints?
+
+**Answer:**
+Bind to explicit request DTOs, map only allowed fields, and keep domain mutations behind application logic. Never bind directly to domain entities or EF Core models — the client can set any property the model exposes.
+
+> **Why this matters:** Over-posting vulnerabilities let clients modify fields they should never control, leading to privilege escalation or data corruption.
+
+**💡 Production Example:**
+An endpoint bound directly to the `User` entity. An attacker set `IsAdmin: true` in the JSON body and escalated their privileges. A `UpdateProfileRequest` DTO with only `DisplayName` and `Email` fields fixed it.
+
+❌ **Anti-pattern:**
+```csharp
+[HttpPut("{id}")]
+public async Task<IActionResult> UpdateUser(int id, [FromBody] User user) {
+    // User entity has IsAdmin, CreatedAt, PasswordHash — all bindable!
+    await _db.Users.Where(u => u.Id == id).ExecuteUpdateAsync(u => u
+        .SetProperty(x => x.DisplayName, user.DisplayName)
+        .SetProperty(x => x.IsAdmin, user.IsAdmin)); // attacker controls this
+    return NoContent();
+}
+```
+
+✅ **Best practice:**
+```csharp
+// DTO exposes only what the client is allowed to change
+public record UpdateProfileRequest(
+    [Required, MaxLength(100)] string DisplayName,
+    [Required, EmailAddress]   string Email
+);
+
+[HttpPut("{id:int}")]
+[Authorize]
+public async Task<IActionResult> UpdateProfile(int id, [FromBody] UpdateProfileRequest req) {
+    var user = await _userService.GetByIdAsync(id);
+    if (user is null) return NotFound();
+
+    user.DisplayName = req.DisplayName;  // only allowed fields — IsAdmin untouched
+    user.Email       = req.Email;
+    await _userService.SaveAsync(user);
+    return NoContent();
+}
+```
+
+---
+
+## 20.5 Cursor-Based Pagination
+
+### Q: How would you implement pagination for an endpoint that returns thousands of records?
+
+**Answer:**
+Prefer cursor pagination for large mutable datasets — it scales better and avoids page drift. Cursor pagination uses an opaque token (e.g., encoded `CreatedAt + Id`) as the starting point. Enforce a maximum page size and return a next-cursor in the response metadata.
+
+> **Why this matters:** Offset-based pagination breaks under concurrent writes and becomes slower as data grows because `OFFSET N` scans and discards N rows every time.
+
+**💡 Production Example:**
+A product search endpoint using offset pagination had users report duplicate or missing items as new products were added. Switching to cursor-based pagination keyed on `CreatedAt + Id` eliminated drift completely.
+
+❌ **Anti-pattern — offset pagination:**
+```csharp
+[HttpGet]
+public async Task<IActionResult> GetProducts(int page = 1, int pageSize = 20) {
+    var skip = (page - 1) * pageSize;
+    var products = await _db.Products
+        .OrderBy(p => p.CreatedAt)
+        .Skip(skip)        // SQL OFFSET — slow on large tables, causes drift
+        .Take(pageSize)
+        .ToListAsync();
+    return Ok(products);
+}
+```
+
+✅ **Best practice — cursor pagination:**
+```csharp
+public record PagedResult<T>(List<T> Items, string? NextCursor, bool HasMore);
+
+[HttpGet]
+public async Task<ActionResult<PagedResult<ProductDto>>> GetProducts(
+    [FromQuery] string? cursor, [FromQuery] int limit = 20) {
+
+    limit = Math.Min(limit, 100); // enforce max page size
+
+    IQueryable<Product> query = _db.Products.OrderBy(p => p.CreatedAt).ThenBy(p => p.Id);
+
+    if (cursor is not null) {
+        var (cursorDate, cursorId) = DecodeCursor(cursor);
+        query = query.Where(p => p.CreatedAt > cursorDate ||
+                                 (p.CreatedAt == cursorDate && p.Id > cursorId));
+    }
+
+    var items    = await query.Take(limit + 1).ToListAsync();
+    var hasMore  = items.Count > limit;
+    var page     = items.Take(limit).Select(ToDto).ToList();
+    var next     = hasMore ? EncodeCursor(items[limit - 1]) : null;
+
+    return Ok(new PagedResult<ProductDto>(page, next, hasMore));
+}
+```
+
+---
+
+## 20.6 Idempotent Write Endpoints
+
+### Q: How do you design idempotent write endpoints for retry-heavy clients?
+
+**Answer:**
+Use idempotency keys for create operations — clients generate a unique key per logical operation, send it in a header, and the server stores the response. On retry with the same key, return the cached response without re-executing side effects.
+
+> **Why this matters:** Retry-heavy clients are normal in distributed systems. Without idempotency, retries cause duplicate charges, double-sent emails, or duplicate records.
+
+**💡 Production Example:**
+Mobile clients retried payment requests on network timeouts. Without idempotency keys, customers were charged twice. A client-generated `Idempotency-Key` stored in Redis with 24-hour TTL fixed it.
+
+❌ **Anti-pattern:**
+```csharp
+[HttpPost("payments")]
+public async Task<IActionResult> CreatePayment([FromBody] PaymentRequest req) {
+    // No idempotency — every retry creates a new charge
+    var charge = await _paymentService.ChargeAsync(req);
+    return Ok(charge);
+}
+```
+
+✅ **Best practice:**
+```csharp
+[HttpPost("payments")]
+public async Task<IActionResult> CreatePayment(
+    [FromBody] PaymentRequest req,
+    [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey) {
+
+    if (string.IsNullOrEmpty(idempotencyKey))
+        return BadRequest(new ProblemDetails { Title = "Idempotency-Key header is required" });
+
+    var cacheKey = $"idem:{idempotencyKey}";
+
+    // Return cached response if key already seen
+    var cached = await _cache.GetStringAsync(cacheKey);
+    if (cached is not null)
+        return new ContentResult {
+            Content = cached, ContentType = "application/json", StatusCode = 200
+        };
+
+    var charge = await _paymentService.ChargeAsync(req);
+    var json   = JsonSerializer.Serialize(charge);
+
+    // Store result for 24 hours
+    await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions {
+        AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+    });
+
+    return Ok(charge);
+}
+```
+
+---
+
+## 20.7 File Upload Security
+
+### Q: Walk me through securing file upload endpoints in ASP.NET Core.
+
+**Answer:**
+Validate size, content type, and extension; scan content when possible; store outside the web root; and use randomized file names. Never trust client-supplied content type or file name.
+
+> **Why this matters:** File upload endpoints are a common attack surface for malware injection, server-side execution, and path traversal attacks.
+
+**💡 Production Example:**
+An attacker uploaded a `.aspx` file disguised as a PDF. Server-side content-type sniffing, extension allowlisting, virus scanning via ClamAV, and storage in Azure Blob Storage with randomized names blocked the attack vector.
+
+❌ **Anti-pattern:**
+```csharp
+[HttpPost("upload")]
+public async Task<IActionResult> Upload(IFormFile file) {
+    var path = Path.Combine("wwwroot/uploads", file.FileName); // predictable path, web-accessible
+    using var stream = System.IO.File.Create(path);
+    await file.CopyToAsync(stream);                           // no validation at all
+    return Ok(new { path });
+}
+```
+
+✅ **Best practice:**
+```csharp
+private static readonly HashSet<string> AllowedExtensions = [".jpg", ".jpeg", ".png", ".pdf"];
+private const long MaxFileSizeBytes = 10 * 1024 * 1024; // 10 MB
+
+[HttpPost("upload")]
+public async Task<IActionResult> Upload(IFormFile file) {
+    // 1. Size check
+    if (file.Length > MaxFileSizeBytes)
+        return BadRequest("File exceeds maximum allowed size of 10 MB.");
+
+    // 2. Extension allowlist
+    var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+    if (!AllowedExtensions.Contains(ext))
+        return BadRequest($"File type '{ext}' is not allowed.");
+
+    // 3. Content sniffing (read magic bytes)
+    using var ms = new MemoryStream();
+    await file.CopyToAsync(ms);
+    if (!IsAllowedMimeType(ms.ToArray(), ext))
+        return BadRequest("File content does not match its declared type.");
+
+    // 4. Randomize file name — never use client-supplied name
+    var storedName = $"{Guid.NewGuid()}{ext}";
+
+    // 5. Store outside web root (Azure Blob or secure path)
+    await _blobService.UploadAsync(storedName, ms.ToArray(), file.ContentType);
+
+    return Ok(new { fileId = storedName });
+}
+```
+
+---
+
+## 20.8 Content Negotiation
+
+### Q: How do you apply content negotiation in ASP.NET Core APIs, and when do you reject a request with 406?
+
+**Answer:**
+Keep JSON as the default representation, explicitly support additional media types only when there is a real consumer need, and document accepted `Accept` headers. If the client requests an unsupported format and strict negotiation is required, return 406 Not Acceptable.
+
+> **Why this matters:** Weak content negotiation creates ambiguous API behavior across clients and can silently return data in the wrong format.
+
+**💡 Production Example:**
+A partner API required both JSON and CSV exports. Explicit output formatters and negotiation tests were implemented, returning 406 for unsupported `Accept` values to prevent silent fallback bugs.
+
+❌ **Anti-pattern:**
+```csharp
+// Ignores Accept header entirely — always returns JSON even when client asks for CSV
+[HttpGet("export")]
+public async Task<IActionResult> Export() {
+    var data = await _service.GetAllAsync();
+    return Ok(data); // always JSON
+}
+```
+
+✅ **Best practice:**
+```csharp
+// Program.cs — register formatters explicitly
+builder.Services.AddControllers(options => {
+    options.RespectBrowserAcceptHeader = true;
+    options.ReturnHttpNotAcceptable    = true;  // return 406 for unsupported types
+})
+.AddXmlSerializerFormatters()  // add XML if needed
+.AddCsvFormatters();            // custom formatter for CSV
+
+// Endpoint — framework handles negotiation based on Accept header
+[HttpGet("export")]
+[Produces("application/json", "text/csv", "application/xml")]
+public async Task<IActionResult> Export() {
+    var data = await _service.GetAllAsync();
+    return Ok(data); // content-type resolved by Accept negotiation
+}
+```
+
+---
+
+## 20.9 IHttpClientFactory — Dedicated Deep Dive
+
+### Q: Why use IHttpClientFactory instead of new HttpClient() per request?
+
+**Answer:**
+`IHttpClientFactory` manages underlying `HttpMessageHandler` lifetimes, reduces socket exhaustion risk, supports DNS refresh, and centralizes resilience policies per named or typed client. Creating `new HttpClient()` repeatedly is a common source of socket exhaustion because the underlying `HttpMessageHandler` (which holds the TCP connections) is not reused.
+
+> **Why this matters:** Outbound HTTP reliability is a core production concern in microservice architectures where each service makes many downstream calls.
+
+**💡 Production Example:**
+Per-request `new HttpClient()` caused intermittent connection failures during peak traffic because all ephemeral TCP ports were exhausted. Moving to typed clients with `IHttpClientFactory` and Polly retry policies stabilized success rate to 99.9%.
+
+❌ **Anti-pattern:**
+```csharp
+// New HttpClient per request — port exhaustion at scale
+public class PaymentService {
+    public async Task<PaymentResult> ChargeAsync(PaymentRequest req) {
+        using var client = new HttpClient();          // disposable but handlers leak
+        client.BaseAddress = new Uri("https://pay.api/");
+        var response = await client.PostAsJsonAsync("/charge", req);
+        return await response.Content.ReadFromJsonAsync<PaymentResult>()!;
+    }
+}
+```
+
+✅ **Best practice — typed client with Polly:**
+```csharp
+// Program.cs
+builder.Services.AddHttpClient<PaymentApiClient>(client => {
+    client.BaseAddress = new Uri(builder.Configuration["PaymentApi:BaseUrl"]!);
+    client.Timeout     = TimeSpan.FromSeconds(10);
+})
+.AddStandardResilienceHandler(); // Polly retry + circuit breaker via Microsoft.Extensions.Http.Resilience
+
+// Typed client
+public class PaymentApiClient {
+    private readonly HttpClient _client;
+    public PaymentApiClient(HttpClient client) => _client = client;
+
+    public async Task<PaymentResult> ChargeAsync(PaymentRequest req, CancellationToken ct = default) {
+        var response = await _client.PostAsJsonAsync("/charge", req, ct);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<PaymentResult>(cancellationToken: ct)
+               ?? throw new InvalidOperationException("Empty response from payment API");
+    }
+}
+
+// Usage — inject typed client normally
+public class OrderService(PaymentApiClient paymentClient) {
+    public async Task ProcessOrderAsync(Order order) {
+        var result = await paymentClient.ChargeAsync(new PaymentRequest(order.Total, order.Currency));
+        // ...
+    }
+}
+```
+
+```mermaid
+flowchart LR
+    SVC["OrderService"] -->|"inject"| TC["PaymentApiClient\n(Typed Client)"]
+    TC -->|"HttpClient"| FACTORY["IHttpClientFactory\n(manages handler pool)"]
+    FACTORY -->|"reuse handler"| POOL["HttpMessageHandler Pool\n(DNS refreshed every 2min)"]
+    POOL --> REMOTE["Payment API\nhttps://pay.api/"]
+
+    style FACTORY fill:#ffa94d,color:#fff
+    style POOL fill:#51cf66,color:#fff
+    style REMOTE fill:#4dabf7,color:#fff
+```
 

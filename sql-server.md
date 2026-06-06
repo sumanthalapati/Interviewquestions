@@ -4594,3 +4594,497 @@ flowchart TD
 > 📚 RCSI: https://learn.microsoft.com/en-us/sql/relational-databases/databases/database-properties-options-page
 
 ---
+
+### Q: How do you handle database migrations in a production environment?
+
+**Answer:**
+
+Migrations in production require discipline: they must be versioned, reviewed like code, tested against realistic data volumes, and executed through a controlled deployment pipeline — not by running `dotnet ef database update` directly against production.
+
+**Key principles:**
+
+| Principle | Practice |
+|-----------|---------|
+| Versioned | Each migration is a numbered, immutable file in source control |
+| Reviewed | Migration SQL reviewed in PR alongside code changes |
+| Tested | Applied to a staging database with production-scale data before prod |
+| Pipeline-executed | CI/CD applies migrations, not manual developer commands |
+| Reversible | Always have a tested rollback (down migration or backfill plan) |
+
+**Zero-downtime migrations — expand-and-contract pattern:**
+
+For large tables under live traffic, never add a non-nullable column in one step. Use three phases:
+
+```mermaid
+flowchart LR
+    A["Phase 1: EXPAND\nAdd column as nullable\n(no default, no table lock)"] -->
+    B["Phase 2: BACKFILL\nBatch-update existing rows\nin off-peak windows"] -->
+    C["Phase 3: CONTRACT\nSet NOT NULL + default\napplication no longer writes NULL"]
+```
+
+❌ **Bad — single-step non-nullable column on large table:**
+```sql
+-- Acquires a schema modification lock on a 50-million-row table
+-- Online traffic blocked for the duration of the ALTER
+ALTER TABLE Orders ADD ProcessedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE();
+-- Can lock the table for minutes on large tables
+```
+
+✅ **Good — expand-and-contract, zero downtime:**
+```sql
+-- Phase 1: Add nullable (instant schema change, no row updates)
+ALTER TABLE Orders ADD ProcessedAt DATETIME2 NULL;
+
+-- Phase 2: Backfill in batches during off-peak (no lock escalation)
+DECLARE @BatchSize INT = 10000;
+WHILE 1 = 1
+BEGIN
+    UPDATE TOP (@BatchSize) Orders
+    SET ProcessedAt = CreatedAt
+    WHERE ProcessedAt IS NULL;
+
+    IF @@ROWCOUNT < @BatchSize BREAK;
+    WAITFOR DELAY '00:00:01'; -- small pause to reduce I/O pressure
+END;
+
+-- Phase 3: Apply constraint after backfill completes
+ALTER TABLE Orders ALTER COLUMN ProcessedAt DATETIME2 NOT NULL;
+ALTER TABLE Orders ADD DEFAULT GETUTCDATE() FOR ProcessedAt;
+```
+
+> **Why this matters:** Migration mistakes under live traffic can lock tables, cause outages, or leave data inconsistent. Every production incident involving a migration usually traces back to skipping the expand-and-contract pattern.
+
+**💡 Production Example:**
+Adding a non-nullable column to a table with 50 million rows used expand-and-contract: first added as nullable, backfilled in batches of 10,000 rows during off-peak hours, then set the default and made it non-nullable only after all rows were populated. Zero downtime, no lock escalation, and the entire operation ran over two deployment cycles rather than one.
+
+---
+
+### Q: How do you decide when to denormalize data for read performance, and how do you keep it correct?
+
+**Answer:**
+
+Denormalization is a deliberate trade-off: you accept write complexity and consistency risk in exchange for read performance. The decision should always follow measurement, not instinct.
+
+**Decision framework:**
+
+```mermaid
+flowchart TD
+    A[Identify read bottleneck via profiling] --> B{Is the bottleneck\na JOIN?}
+    B -->|No| C[Optimize indexes first]
+    B -->|Yes| D{Is the JOIN on\nhot read path?}
+    D -->|No| E[Keep normalized]
+    D -->|Yes| F{Can an index\nor covering query fix it?}
+    F -->|Yes| G[Add covering index]
+    F -->|No| H[Denormalize with\nconsistency strategy]
+    H --> I{How often\ndoes source change?}
+    I -->|Rarely| J[Sync via scheduled job\nor background event handler]
+    I -->|Frequently| K[Sync in same transaction\nor via domain events]
+```
+
+❌ **Bad — denormalize without consistency strategy:**
+```sql
+-- CategoryName copied onto Products, but never updated when Category changes
+CREATE TABLE Products (
+    Id           INT PRIMARY KEY,
+    Name         NVARCHAR(200),
+    CategoryId   INT REFERENCES Categories(Id),
+    CategoryName NVARCHAR(100)  -- stale after category rename
+);
+-- After UPDATE Categories SET Name = 'Electronics' WHERE Id = 5:
+-- Products.CategoryName still shows the old name → silent data inconsistency
+```
+
+✅ **Good — denormalize with explicit sync strategy:**
+```sql
+CREATE TABLE Products (
+    Id           INT PRIMARY KEY,
+    Name         NVARCHAR(200),
+    CategoryId   INT REFERENCES Categories(Id),
+    CategoryName NVARCHAR(100)  -- denormalized for read performance
+);
+
+-- Keep in sync via an AFTER UPDATE trigger on Categories:
+CREATE TRIGGER trg_Categories_SyncProducts
+ON Categories
+AFTER UPDATE
+AS
+BEGIN
+    IF UPDATE(Name)
+    BEGIN
+        UPDATE p
+        SET    p.CategoryName = i.Name
+        FROM   Products p
+        JOIN   inserted i ON i.Id = p.CategoryId;
+    END
+END;
+```
+
+> **Why this matters:** Premature denormalization creates hidden consistency bugs that are only discovered in production. Avoiding it entirely limits read performance for high-throughput read paths.
+
+**💡 Production Example:**
+A product listing API fetching category names required a JOIN across three tables for every request, and at peak load this added 40ms per request. `CategoryName` was denormalized onto the product read model and updated via a background event handler that fired whenever a category was renamed. The event handler updated all affected products asynchronously within seconds. Read latency dropped 60% and category renames — rare events — were handled transparently.
+
+---
+
+### Q: Walk me through a safe rollback plan when a migration causes unexpected load.
+
+**Answer:**
+
+Having a rollback plan before applying a migration is non-negotiable. The plan must be tested before the deployment window — not improvised during an incident.
+
+**Rollback decision tree:**
+
+```mermaid
+flowchart TD
+    A[Migration applied to production] --> B{Unexpected\nload or errors?}
+    B -->|No| C[Monitor for 15 min\nClose incident]
+    B -->|Yes| D{Is a forward-fix\nfaster and safer?}
+    D -->|Yes| E[Apply forward-fix migration\nAnnounce ETA to stakeholders]
+    D -->|No| F{Is down migration\npre-tested and ready?}
+    F -->|Yes| G[Apply down migration\nVerify data integrity]
+    F -->|No| H[Scale up or throttle traffic\nPrep rollback now under pressure]
+    G --> I[Confirm load normalised]
+    H --> G
+```
+
+**Preparation checklist before any production migration:**
+
+| Step | Action |
+|------|--------|
+| Pre-test down script | Apply down migration on staging copy of prod data |
+| Backup | Take a verified backup or snapshot before applying |
+| Traffic control | Identify how to reduce traffic (feature flags, rate limits) |
+| Monitoring alerts | Set query duration and error rate alerts for the migration window |
+| Time limit | Define a rollback trigger: "if error rate > X% after Y minutes, rollback" |
+
+❌ **Bad — no rollback plan, improvised under pressure:**
+```sql
+-- Migration applied to prod causes lock contention
+-- No down migration was written or tested
+-- Team improvises a manual rollback under incident pressure
+-- High risk of data loss or leaving DB in inconsistent state
+```
+
+✅ **Good — pre-tested down migration and controlled rollback:**
+```sql
+-- Up migration: add index to large table
+CREATE INDEX IX_Orders_CustomerId_Status
+ON Orders (CustomerId, Status)
+INCLUDE (TotalAmount, CreatedAt);
+
+-- Down migration: pre-written and tested on staging BEFORE prod deployment
+DROP INDEX IF EXISTS IX_Orders_CustomerId_Status ON Orders;
+```
+
+> **Why this matters:** A failed migration rollback during an incident can escalate a bad situation into a full outage. Teams that skip pre-testing the down migration often discover it fails on production data for reasons not present in staging.
+
+**💡 Production Example:**
+A migration adding an index to a 100-million-row Orders table caused lock contention that spiked response times 10x during the deployment window. The on-call engineer ran the pre-tested down migration (`DROP INDEX`), which completed in milliseconds and immediately restored normal latency. The migration was re-applied the following week using `CREATE INDEX ... WITH (ONLINE = ON)` during a maintenance window, which allowed reads and writes to continue while the index was built.
+
+---
+
+### Q: How do you decide transaction boundaries in a service that touches multiple aggregates?
+
+**Answer:**
+
+The core rule: **one transaction per aggregate**. Transactions should protect the invariants of a single aggregate — not span multiple aggregates or multiple services.
+
+**Why cross-aggregate transactions cause problems:**
+- Locks are held across aggregate boundaries, blocking unrelated operations
+- Shared transactions across services creates tight coupling
+- Deadlocks increase when transaction scope grows
+
+```mermaid
+sequenceDiagram
+    participant API
+    participant OrderService
+    participant OrdersDB
+    participant EventBus
+    participant InventoryService
+    participant PaymentService
+
+    API->>OrderService: PlaceOrder(request)
+    OrderService->>OrdersDB: BEGIN TRANSACTION
+    OrderService->>OrdersDB: INSERT Order (status=Pending)
+    OrderService->>OrdersDB: INSERT OutboxEvent (OrderPlaced)
+    OrderService->>OrdersDB: COMMIT
+    Note over OrdersDB: Transaction scoped to Order aggregate only
+
+    OrdersDB-->>EventBus: Relay publishes OrderPlaced
+    EventBus->>InventoryService: Handle OrderPlaced - reserve stock (own transaction)
+    EventBus->>PaymentService: Handle InventoryReserved - charge card (own transaction)
+```
+
+❌ **Bad — spanning transaction across aggregates:**
+```csharp
+using var tx = await _db.Database.BeginTransactionAsync();
+
+var order = new Order(request.CustomerId, request.Items);
+_db.Orders.Add(order);
+await _db.SaveChangesAsync();
+
+await _inventoryService.ReserveAsync(request.Items, tx); // shares tx!
+await _paymentService.ChargeAsync(request.PaymentDetails, tx); // shares tx!
+
+await tx.CommitAsync();
+// Under load: locks held across all three tables → deadlocks at high concurrency
+```
+
+✅ **Good — local transaction + outbox pattern:**
+```csharp
+using var tx = await _db.Database.BeginTransactionAsync();
+
+var order = new Order(request.CustomerId, request.Items);
+_db.Orders.Add(order);
+
+_db.OutboxEvents.Add(new OutboxEvent
+{
+    EventType = "OrderPlaced",
+    Payload   = JsonSerializer.Serialize(new OrderPlacedEvent(order.Id, request.Items)),
+    CreatedAt = DateTime.UtcNow
+});
+
+await _db.SaveChangesAsync();
+await tx.CommitAsync();
+// Transaction covers only the Order aggregate
+
+// Outbox relay publishes event; downstream services handle in their own transactions
+```
+
+> **Why this matters:** Spanning transactions across aggregates creates deadlocks and reduces throughput. Interviewers probe this to check whether you understand DDD boundaries and can distinguish strong consistency needs from eventual consistency use cases.
+
+**💡 Production Example:**
+An order service initially wrapped order creation, inventory reservation, and payment capture in one transaction spanning two databases. Under sustained load, deadlocks appeared at ~5/minute because the lock ordering varied between concurrent requests. Scoping the transaction to order creation only, and using domain events with the outbox pattern for inventory and payment, eliminated all deadlocks and improved throughput by 40%.
+
+---
+
+### Q: How do you choose between optimistic and pessimistic concurrency control?
+
+**Answer:**
+
+The choice depends on conflict frequency and the cost of a retry.
+
+| | Optimistic | Pessimistic |
+|-|-----------|------------|
+| Mechanism | Row version / timestamp check on write | Row-level lock held from read to write |
+| Conflict handling | Retry on conflict (no lock held during read) | Wait for lock; no conflict possible |
+| Scalability | ✅ High — no blocking reads | ❌ Lower — readers and writers queue |
+| Best for | Low-contention data (profiles, settings, orders) | High-contention critical resources (seats, inventory) |
+| Risk | Retry storms under high contention | Lock waits / timeouts under high load |
+
+❌ **Bad — optimistic concurrency on high-contention resource:**
+```csharp
+// 500 users simultaneously try to reserve seat 23A → 499 get conflict → retry storm
+public async Task<bool> ReserveSeatAsync(int flightId, string seatId, int userId)
+{
+    var seat = await _db.Seats.FindAsync(flightId, seatId);
+    if (seat!.IsReserved) return false;
+
+    seat.IsReserved = true;
+    seat.UserId = userId;
+
+    try
+    {
+        await _db.SaveChangesAsync();
+        return true;
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return false; // 499 concurrent retries exhaust connection pool
+    }
+}
+```
+
+✅ **Good — pessimistic lock for high-contention seat reservation:**
+```sql
+-- UPDLOCK acquires exclusive lock at read time → only one session at a time
+BEGIN TRANSACTION;
+
+    SELECT SeatId, IsReserved
+    FROM   Seats WITH (UPDLOCK, ROWLOCK)
+    WHERE  FlightId = @FlightId AND SeatId = @SeatId;
+
+    IF (SELECT IsReserved FROM Seats
+        WHERE FlightId = @FlightId AND SeatId = @SeatId) = 0
+    BEGIN
+        UPDATE Seats SET IsReserved = 1, UserId = @UserId
+        WHERE  FlightId = @FlightId AND SeatId = @SeatId;
+        COMMIT;
+        SELECT 'Reserved' AS Result;
+    END
+    ELSE
+    BEGIN
+        ROLLBACK;
+        SELECT 'Already taken' AS Result;
+    END
+```
+
+✅ **Good — optimistic concurrency for low-contention profile updates:**
+```csharp
+public async Task UpdateProfileAsync(UserProfileDto dto)
+{
+    var profile = await _db.UserProfiles
+        .Where(p => p.Id == dto.Id && p.RowVersion == dto.RowVersion)
+        .FirstOrDefaultAsync()
+        ?? throw new ConcurrencyException("Profile was updated by another session. Please refresh.");
+
+    profile.DisplayName = dto.DisplayName;
+    profile.Bio = dto.Bio;
+    await _db.SaveChangesAsync();
+}
+```
+
+> **Why this matters:** Choosing the wrong concurrency strategy causes either excessive retry storms (optimistic on high-contention) or unnecessary locking overhead (pessimistic on low-contention). Interviewers use this question to test whether you understand the trade-off rather than memorizing a rule.
+
+**💡 Production Example:**
+A seat reservation system for popular events used optimistic concurrency throughout. When tickets for a high-demand concert went on sale, 200 concurrent users hit the same 20 remaining seats. The retry storms consumed 80% of available database connections and caused 15-second response times. Switching to pessimistic row-level locks (`UPDLOCK`) for `ReserveSeat` specifically — while keeping optimistic concurrency for low-contention profile updates — resolved the issue entirely.
+
+---
+
+### Q: Walk me through index strategy for a rapidly growing table.
+
+**Answer:**
+
+Index strategy for a growing table must balance read performance against write overhead. Every index speeds up reads but slows inserts and updates on that table.
+
+**Process:**
+
+```mermaid
+flowchart TD
+    A[Profile top 5 queries\nby execution count x duration] --> B[Identify missing indexes\nvia sys.dm_db_missing_index_details]
+    B --> C[Design composite indexes\nbased on WHERE + ORDER BY columns]
+    C --> D[Add INCLUDE columns\nto eliminate key lookups]
+    D --> E[Measure write overhead\non insert/update benchmarks]
+    E --> F{Write overhead\nacceptable?}
+    F -->|Yes| G[Deploy index]
+    F -->|No| H[Consider filtered index\nor partitioning]
+    G --> I[Monitor fragmentation monthly]
+```
+
+**Composite index column order rule:**
+`(Equality columns first) + (Range/ORDER BY columns last) + INCLUDE (non-key columns)`
+
+❌ **Bad — no indexes beyond primary key on growing table:**
+```sql
+CREATE TABLE AuditLog (
+    Id        BIGINT IDENTITY PRIMARY KEY,
+    UserId    INT NOT NULL,
+    Action    NVARCHAR(100),
+    CreatedAt DATETIME2 NOT NULL
+);
+
+-- Support query: find all actions for a user in the last 30 days
+SELECT Action, CreatedAt FROM AuditLog
+WHERE UserId = @UserId AND CreatedAt >= DATEADD(DAY, -30, GETDATE())
+ORDER BY CreatedAt DESC;
+-- TABLE SCAN → 30+ seconds at 150 million rows
+```
+
+✅ **Good — composite covering index for the top query pattern:**
+```sql
+-- Equality on UserId, range on CreatedAt, INCLUDE avoids key lookup
+CREATE INDEX IX_AuditLog_UserId_CreatedAt
+ON AuditLog (UserId, CreatedAt DESC)
+INCLUDE (Action)
+WITH (ONLINE = ON);  -- non-blocking on SQL Server Enterprise
+-- Index seek → under 100ms at 150 million rows
+
+-- Monthly partitioning for archival without locking live data
+CREATE PARTITION FUNCTION pf_AuditLogMonth (DATETIME2)
+AS RANGE RIGHT FOR VALUES ('2025-01-01', '2025-02-01', '2025-03-01');
+```
+
+**Monitor index health:**
+```sql
+-- Missing indexes suggested by the optimizer
+SELECT TOP 10
+    mid.statement AS TableName,
+    migs.avg_user_impact AS EstimatedImpact,
+    mid.equality_columns,
+    mid.inequality_columns,
+    mid.included_columns
+FROM sys.dm_db_missing_index_details mid
+JOIN sys.dm_db_missing_index_groups mig ON mig.index_handle = mid.index_handle
+JOIN sys.dm_db_missing_index_group_stats migs ON migs.group_handle = mig.index_group_handle
+ORDER BY migs.avg_user_impact DESC;
+```
+
+> **Why this matters:** Under-indexed tables are one of the most common causes of production database slowdowns, and over-indexed tables slow down writes and increase storage. Interviewers want to see a deliberate, measurement-driven approach rather than "add an index on every column."
+
+**💡 Production Example:**
+An audit log table growing by 5 million rows per day had no indexes beyond the primary key. Support queries filtering by `UserId + Timestamp` took 30+ seconds. A composite index on `(UserId, CreatedAt DESC)` with `INCLUDE (Action, Details)` brought those queries under 100ms. Adding monthly range partitioning allowed old partitions to be archived without locking the live table.
+
+---
+
+### Q: A query is fast in staging but slow in production. How do you investigate?
+
+**Answer:**
+
+Staging and production differ in ways that directly affect query plan choices: data volume, data distribution (skew), index fragmentation, statistics freshness, and server configuration. A plan optimal for staging may be catastrophic for production.
+
+**Investigation checklist:**
+
+| Dimension | What to check |
+|-----------|--------------|
+| Data volume | Row counts in all involved tables |
+| Data skew | Distribution of the parameter values in production |
+| Execution plan | Actual plan in production — look for scans vs seeks |
+| Parameter sniffing | Is a bad plan cached from an atypical first execution? |
+| Statistics | When were statistics last updated? Accurate for production distribution? |
+| Index fragmentation | High fragmentation causes optimizer to choose scans over seeks |
+| Server config | MAXDOP, memory, cost threshold — may differ between envs |
+
+```mermaid
+flowchart TD
+    A[Query slow in prod only] --> B[Get ACTUAL execution plan\nfrom production session]
+    B --> C{Table scan\nor bad nested loop?}
+    C -->|Scan| D[Check index fragmentation\nand statistics age]
+    C -->|Bad nested loop| E[Check parameter sniffing\nClear plan cache for SP]
+    D --> F{Statistics stale?}
+    F -->|Yes| G[UPDATE STATISTICS TableName WITH FULLSCAN]
+    F -->|No| H[Check data skew\nIs the parameter value an outlier?]
+    E --> I{Plan cached with\nbad parameter values?}
+    I -->|Yes| J[Add OPTION RECOMPILE\nor OPTIMIZE FOR UNKNOWN]
+    I -->|No| K[Review join order\nand cardinality estimates]
+```
+
+❌ **Bad — ignoring parameter sniffing and data distribution differences:**
+```sql
+-- Procedure compiled with CustomerId=1 (10 orders) on first call
+-- Cached plan: index seek
+-- Called with CustomerId=9999 (500,000 orders)
+-- Same cached seek plan → 12 seconds in production
+CREATE PROCEDURE GetCustomerOrders @CustomerId INT AS
+    SELECT * FROM Orders WHERE CustomerId = @CustomerId;
+```
+
+✅ **Good — addressing parameter sniffing:**
+```sql
+-- OPTIMIZE FOR UNKNOWN: uses average statistics, not the sniffed value
+CREATE PROCEDURE GetCustomerOrders @CustomerId INT AS
+    SELECT * FROM Orders WHERE CustomerId = @CustomerId
+    OPTION (OPTIMIZE FOR (@CustomerId UNKNOWN));
+
+-- Update statistics after significant data growth
+UPDATE STATISTICS Orders WITH FULLSCAN;
+```
+
+**Retrieve the cached plan from production:**
+```sql
+SELECT TOP 1
+    qs.execution_count,
+    qs.total_elapsed_time / qs.execution_count AS avg_elapsed_ms,
+    qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+WHERE st.text LIKE '%GetCustomerOrders%'
+ORDER BY qs.total_elapsed_time DESC;
+```
+
+> **Why this matters:** Staging environments rarely reproduce production data distributions or query plan choices. A developer who only tests on staging will be blind to parameter sniffing, cardinality estimation errors, and fragmentation — the three most common causes of production query regressions.
+
+**💡 Production Example:**
+A search query ran in 50ms on staging (10,000 rows, uniform distribution) but took 12 seconds in production (50 million rows, 80% of rows sharing the same `Status` value). The execution plan showed a table scan caused by parameter sniffing — the optimizer had cached a plan based on an atypical parameter value. Adding `OPTION (OPTIMIZE FOR UNKNOWN)` and running `UPDATE STATISTICS` with a full scan fixed it. Response time dropped to 80ms in production.
+
+

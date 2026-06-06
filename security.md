@@ -1686,3 +1686,480 @@ services.AddAzureClients(builder =>
     builder.AddSecretClient(new Uri(keyVaultUri))
            .WithCredential(new DefaultAzureCredential()));
 ```
+
+---
+
+# 🎯 Senior Engineer Interview Questions — Security (Q64–Q73)
+
+---
+
+### Q64: How does authentication work in your API? Walk me through the flow.
+
+**Answer:**
+Clients obtain tokens from an identity provider, send them in the `Authorization` header, and middleware validates token integrity and claims before the request reaches your controller. APIs should trust tokens, not passwords — credentials are the IdP's concern.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant IDP as Identity Provider
+    participant API as Your API
+
+    C->>IDP: POST /token { client_id, client_secret, scope }
+    IDP-->>C: { access_token (JWT, 15 min), refresh_token }
+
+    C->>API: GET /orders\nAuthorization: Bearer eyJ...
+    API->>API: UseAuthentication:\nvalidate signature, exp, iss, aud
+    API->>API: Extract ClaimsPrincipal\n(sub, roles, tenant)
+    API->>API: UseAuthorization:\n[Authorize(Policy = "ReadOrders")]
+    API-->>C: 200 OK — order data
+```
+
+```csharp
+// Program.cs — JWT bearer setup
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = "https://login.microsoftonline.com/{tenantId}/v2.0";
+        options.Audience  = "api://my-api";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer           = true,
+            ValidateAudience         = true,
+            ValidateLifetime         = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew                = TimeSpan.FromSeconds(30)
+        };
+    });
+
+app.UseAuthentication();  // MUST come before UseAuthorization
+app.UseAuthorization();
+```
+
+> **Why this matters:** Authentication is the first line of defense and the most common place for misconfiguration. A missing audience validation or wrong algorithm whitelist can make your entire API forgeable.
+
+**💡 Production Example:**
+In a multi-tenant SaaS API, clients authenticated via OAuth2 with an external IdP. JWTs were validated in middleware and tenant claims extracted per request. Token audience validation was added after discovering a misconfiguration that allowed tokens issued for a different app registration to access the API. One `ValidateAudience = true` line stopped cross-app token reuse.
+
+---
+
+### Q65: What's the difference between a 401 and a 403?
+
+**Answer:**
+`401 Unauthorized` means authentication is missing or invalid — the API does not know who you are. `403 Forbidden` means you are authenticated but not permitted to perform the action — the API knows who you are and says no. Correct semantics improve client retry logic and debugging clarity.
+
+| Code | Meaning | When to use |
+|------|---------|-------------|
+| 401 | Missing or invalid token | No `Authorization` header, expired JWT, bad signature |
+| 403 | Authenticated but not permitted | Valid token, wrong role, policy failure |
+
+```csharp
+// ASP.NET Core sets these automatically based on:
+// 401 — no valid authentication (UseAuthentication fails)
+[Authorize]  // returns 401 if no token
+
+// 403 — authenticated but [Authorize(Roles = "Admin")] fails
+[Authorize(Roles = "Admin")]  // returns 403 if token valid but role missing
+
+// Custom middleware — be explicit
+if (!context.User.Identity?.IsAuthenticated ?? true)
+{
+    context.Response.StatusCode = 401;  // ← not 403
+    return;
+}
+if (!context.User.IsInRole("Admin"))
+{
+    context.Response.StatusCode = 403;  // ← not 401
+    return;
+}
+```
+
+> **Why this matters:** Returning 403 for unauthenticated requests breaks client retry logic. SDKs and browsers typically trigger re-login flows only on 401. Returning the wrong code causes confusing user experiences that are hard to trace.
+
+**💡 Production Example:**
+A mobile app was showing "Access Denied" for unauthenticated users because the API returned 403 instead of 401. The app's retry logic only triggered re-login on 401 — so unauthenticated users got stuck instead of being redirected to login. Fixing the status code in the middleware resolved the UX bug without any app-side changes.
+
+---
+
+### Q66: How do you implement role-based and policy-based authorization?
+
+**Answer:**
+Roles cover broad access groups (Admin, Manager, Viewer). Policies encode contextual business rules that roles alone cannot express. Use policies for nuanced control because real authorization is rarely role-only — you often need to combine role, resource ownership, environment, and other attributes.
+
+```csharp
+// Simple role check
+[Authorize(Roles = "Admin,Manager")]
+public IActionResult GetReports() { ... }
+
+// Policy — combines role + claim + custom assertion
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("ApproveHighValueOrders", policy =>
+        policy.RequireRole("Manager", "Admin")
+              .RequireClaim("department", "finance")
+              .RequireAssertion(ctx =>
+              {
+                  var limit = ctx.User.FindFirstValue("approval_limit");
+                  return limit != null && decimal.Parse(limit) >= 50_000;
+              }));
+});
+
+// Resource-based authorization — check ownership at the resource level
+public class DocumentAuthorizationHandler
+    : AuthorizationHandler<ReadDocumentRequirement, Document>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext ctx,
+        ReadDocumentRequirement req,
+        Document document)
+    {
+        var userId = ctx.User.FindFirstValue("sub");
+        // Check role OR explicit access grant on the resource
+        if (ctx.User.IsInRole("Admin") || document.AuthorizedUserIds.Contains(userId!))
+            ctx.Succeed(req);
+        return Task.CompletedTask;
+    }
+}
+```
+
+> **Why this matters:** Roles alone are insufficient for real-world authorization. Contextual policies prevent horizontal privilege escalation — where a user with the right role accesses a resource that belongs to a different user.
+
+**💡 Production Example:**
+In a healthcare platform, roles controlled broad access (Doctor/Admin/Patient), but viewing a specific patient's records required a policy checking the doctor-patient relationship stored in the database. Even valid Doctor role tokens were denied by the policy handler if no explicit doctor-patient assignment existed. This prevented one doctor from viewing another's patients even within the same role.
+
+---
+
+### Q67: How do you protect an API against common attacks?
+
+**Answer:**
+Layer defenses — no single control is sufficient. Core layers: input validation, rate limiting, secure headers, dependency patching, and robust authentication/authorization. Use CORS correctly for browser cross-origin policy but do not treat CORS as a server-side security boundary (it is browser-enforced only).
+
+```csharp
+// 1. Rate limiting (ASP.NET Core 7+ built-in)
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("login", o =>
+    {
+        o.PermitLimit    = 5;
+        o.Window         = TimeSpan.FromMinutes(1);
+        o.QueueLimit     = 0;
+        o.RejectionStatusCode = 429;
+    });
+});
+
+// 2. Input validation — reject malformed payloads early
+[HttpPost("login")]
+[EnableRateLimiting("login")]
+public IActionResult Login([FromBody] LoginRequest req)
+{
+    if (!ModelState.IsValid) return BadRequest(ModelState);  // reject before any DB call
+    // ...
+}
+
+// 3. Security headers on every response
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    ctx.Response.Headers["X-Frame-Options"]        = "DENY";
+    ctx.Response.Headers["Referrer-Policy"]        = "strict-origin-when-cross-origin";
+    ctx.Response.Headers["Content-Security-Policy"]= "default-src 'self'";
+    await next();
+});
+
+// 4. CORS — allow only known origins, never wildcard for authenticated endpoints
+builder.Services.AddCors(options =>
+    options.AddPolicy("Api", policy => policy
+        .WithOrigins("https://myapp.com", "https://staging.myapp.com")
+        .AllowAnyMethod()
+        .AllowAnyHeader()));
+// ❌ Never: .AllowAnyOrigin().AllowCredentials() — CORS spec blocks this, and it's a security hole
+```
+
+> **Why this matters:** APIs are attacked constantly and a single missing defense is enough for a breach. Layered controls ensure that even if one layer is bypassed, others limit the impact.
+
+**💡 Production Example:**
+A public-facing API was hit by a credential-stuffing attack on the login endpoint. Response: layered rate limiting per IP, input validation to reject malformed payloads before they reached the database, strict CORS to limit browser-originating requests, and patching a dependency with a known deserialization vulnerability discovered during the incident review. Each layer addressed a different attack vector simultaneously.
+
+---
+
+### Q68: How do you defend against IDOR (Insecure Direct Object Reference) in REST APIs?
+
+**Answer:**
+Never trust resource identifiers alone — always enforce per-resource authorization checks tied to the caller's identity. IDOR prevention is access control discipline, not obscurity. Switching to GUIDs makes IDs harder to guess but is not a substitute for ownership checks.
+
+```csharp
+// ❌ IDOR vulnerable — any authenticated user can access any document
+[HttpGet("documents/{id}")]
+[Authorize]
+public async Task<IActionResult> GetDocument(Guid id)
+{
+    var doc = await _db.Documents.FindAsync(id); // no ownership check!
+    return doc is null ? NotFound() : Ok(doc);
+}
+
+// ✅ IDOR safe — scope query to caller's identity
+[HttpGet("documents/{id}")]
+[Authorize]
+public async Task<IActionResult> GetDocument(Guid id)
+{
+    var userId = User.FindFirstValue("sub")!;
+    var doc = await _db.Documents
+        .FirstOrDefaultAsync(d => d.Id == id && d.AuthorizedUserIds.Contains(userId));
+    return doc is null ? NotFound() : Ok(doc); // 404 not 403 — don't reveal existence
+}
+
+// ✅ Resource-based policy — centralized ownership check
+[HttpDelete("documents/{id}")]
+[Authorize]
+public async Task<IActionResult> DeleteDocument(Guid id)
+{
+    var doc = await _db.Documents.FindAsync(id);
+    if (doc is null) return NotFound();
+
+    var authResult = await _authService.AuthorizeAsync(User, doc, "DocumentOwner");
+    if (!authResult.Succeeded) return Forbid();
+
+    _db.Documents.Remove(doc);
+    await _db.SaveChangesAsync();
+    return NoContent();
+}
+```
+
+> **Why this matters:** IDOR vulnerabilities consistently rank in the OWASP Top 10 and are frequently missed in code review because the code "looks correct" — the query works, the response is 200 — but the wrong user can access the wrong data.
+
+**💡 Production Example:**
+In a document sharing API, users could access any document by guessing sequential integer IDs. An authorization filter was added that verified the requesting user had explicit access to each document before returning it. The IDs were also migrated to GUIDs to reduce enumeration risk — but the access check was the actual fix. The GUID change alone would have been security theatre.
+
+---
+
+### Q69: Walk me through threat modeling for a new customer-facing API.
+
+**Answer:**
+Map assets, trust boundaries, attack paths, and abuse cases — then prioritize mitigations by impact and likelihood. STRIDE is a useful framework: Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege.
+
+```mermaid
+flowchart TD
+    A[1. Identify Assets\nWhat data/operations need protecting?] --> B
+    B[2. Map Trust Boundaries\nWhere do data and control cross security zones?] --> C
+    C[3. Enumerate Attack Paths\nSTRIDE — for each boundary, what can go wrong?] --> D
+    D[4. Assess Risk\nImpact × Likelihood] --> E
+    E[5. Define Mitigations\nFor each risk, what control reduces it?] --> F
+    F[6. Validate\nPen test, code review, red team]
+
+    style A fill:#4dabf7,color:#fff
+    style D fill:#ffa94d,color:#fff
+    style F fill:#51cf66,color:#fff
+```
+
+**Example — patient portal API threat model summary:**
+
+| Threat | STRIDE category | Mitigation |
+|--------|----------------|-----------|
+| Attacker spoofs another patient | Spoofing | mTLS + JWT audience validation |
+| PDF export reads arbitrary files | Tampering / Info Disclosure | Input validation + sandboxed service |
+| Bulk data export floods DB | Denial of Service | Rate limiting + pagination enforcement |
+| Doctor accesses wrong patient | Elevation of Privilege | Policy-based resource authorization |
+
+> **Why this matters:** Most security flaws are architectural, not just code bugs. Threat modeling before building is cheaper than finding vulnerabilities in production. A missing control in the design costs 10x more to fix post-launch.
+
+**💡 Production Example:**
+For a patient portal API, mapping trust boundaries revealed that the PDF export service had direct database access with no input validation on the document path parameter — a classic path traversal vulnerability. This was remediated before launch by sandboxing the export service, restricting its DB permissions to read-only on the reports table only, and adding strict input validation on document references.
+
+---
+
+### Q70: How do you implement least privilege in a microservice environment?
+
+**Answer:**
+Each service gets only the permissions it actually needs — no more. Use scoped OAuth2 tokens with explicit audience claims, managed identities for infrastructure access, and deny-by-default network policies. Audit access grants regularly and remove unused permissions.
+
+```csharp
+// Service A requests a token scoped ONLY to Service B
+// Not a generic token valid for every internal service
+var tokenRequest = new ClientCredentialsTokenRequest
+{
+    Address      = "https://idp.internal/connect/token",
+    ClientId     = "service-a",
+    ClientSecret = _config["ServiceA:Secret"], // better: managed identity
+    Scope        = "service-b:orders:read"     // explicit, narrow scope
+};
+
+// Service B validates the audience AND scope
+options.TokenValidationParameters = new TokenValidationParameters
+{
+    ValidAudience = "service-b",   // reject tokens issued for other services
+    ValidateAudience = true
+};
+
+// For Azure: managed identity — no secrets at all
+var credential = new DefaultAzureCredential();
+var token = await credential.GetTokenAsync(
+    new TokenRequestContext(["https://servicebus.azure.net/.default"]));
+// Service only gets access to Service Bus — not Storage, not SQL, etc.
+```
+
+**Infrastructure least privilege (Azure RBAC example):**
+
+```bash
+# ❌ Overly broad — production app as Contributor on entire subscription
+az role assignment create --role "Contributor" --scope /subscriptions/{sub-id}
+
+# ✅ Narrow — app only reads from one specific storage account
+az role assignment create \
+  --role "Storage Blob Data Reader" \
+  --scope /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{account}
+```
+
+> **Why this matters:** Least privilege limits blast radius when a service is compromised. An attacker who gains code execution on Service A should not automatically be able to access Service C's database or write to Service B's queue.
+
+**💡 Production Example:**
+When decomposing a monolith into microservices, internal HTTP calls initially used a single shared API key valid across all services. After migrating to managed identities with explicit audience claims per service, an audit revealed that the reporting service had been accessing the payment service API — an access path it had no legitimate reason to use. Scoping tokens to specific audiences removed that unintended access path.
+
+---
+
+### Q71: How do you handle authorization for resource ownership, not just user roles?
+
+**Answer:**
+Enforce ownership checks at application boundaries through resource-based authorization policies that include resource context. Role checks alone over-authorize because a role permits the action type but says nothing about which specific resource the user may act on.
+
+```csharp
+// ❌ Role check only — any project manager can edit ANY project
+[Authorize(Roles = "ProjectManager")]
+[HttpPut("projects/{id}")]
+public async Task<IActionResult> UpdateProject(Guid id, UpdateProjectDto dto)
+{
+    var project = await _db.Projects.FindAsync(id);
+    // missing: does this PM own/belong to this project?
+    _mapper.Map(dto, project);
+    await _db.SaveChangesAsync();
+    return Ok(project);
+}
+
+// ✅ Ownership policy — role + resource membership
+public class ProjectMembershipHandler
+    : AuthorizationHandler<EditProjectRequirement, Project>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext ctx,
+        EditProjectRequirement req,
+        Project project)
+    {
+        var userId = ctx.User.FindFirstValue("sub")!;
+
+        var isAdmin = ctx.User.IsInRole("Admin");
+        var isMember = project.Members.Any(m => m.UserId == userId
+                                                && m.Role is "Owner" or "Manager");
+        if (isAdmin || isMember)
+            ctx.Succeed(req);
+
+        return Task.CompletedTask;
+    }
+}
+
+// Controller — clean, policy handles ownership
+[HttpPut("projects/{id}")]
+public async Task<IActionResult> UpdateProject(Guid id, UpdateProjectDto dto)
+{
+    var project = await _db.Projects.Include(p => p.Members).FirstAsync(p => p.Id == id);
+    var auth = await _authService.AuthorizeAsync(User, project, "EditProject");
+    if (!auth.Succeeded) return Forbid();
+
+    _mapper.Map(dto, project);
+    await _db.SaveChangesAsync();
+    return Ok(project);
+}
+```
+
+> **Why this matters:** Role checks without resource ownership checks are a systemic gap. Horizontal privilege escalation (a user accessing another user's data within the same role) is often more damaging than vertical escalation (a user elevating to a higher role).
+
+**💡 Production Example:**
+In a project management tool, the API checked `role == 'ProjectManager'` but did not verify the user owned or was a member of that specific project. Any project manager could edit any project in the system. A resource-based authorization policy checking project membership fixed it — and the fix surfaced in the first security review once ownership checks were mandatory by convention.
+
+---
+
+### Q72: What is your incident response process when a secret is accidentally committed?
+
+**Answer:**
+Revoke immediately, rotate affected credentials, assess blast radius, and document timeline and corrective actions. Speed and completeness matter more than blame. Treat the secret as fully compromised from the moment of the commit — even if the repo was private.
+
+```mermaid
+flowchart TD
+    DETECT[Secret found in commit] --> REVOKE[1. Revoke immediately\nRotate the credential\nDo NOT just delete the commit]
+    REVOKE --> AUDIT[2. Audit access logs\nLook for unauthorized use\nin the window between commit and revoke]
+    AUDIT --> BLAST[3. Assess blast radius\nWhat could an attacker do\nwith this credential?]
+    BLAST --> REWRITE[4. Rewrite git history\ngit filter-repo or BFG\nto remove from all branches]
+    REWRITE --> PREVENT[5. Add pre-commit hook\ngitleaks / detect-secrets\nto block future commits]
+    PREVENT --> POSTMORTEM[6. Postmortem\nTimeline, corrective actions,\nsystemic fix]
+
+    style REVOKE fill:#f44336,color:#fff
+    style PREVENT fill:#4CAF50,color:#fff
+```
+
+```bash
+# Step 1 — Revoke the credential immediately (before anything else)
+# Azure: rotate the connection string / key in portal or CLI
+az keyvault secret set --vault-name myVault --name db-conn --value "NEW_CONN_STRING"
+
+# Step 4 — Remove from git history (AFTER rotating — history removal alone is insufficient)
+# Using BFG Repo-Cleaner
+java -jar bfg.jar --replace-text secrets.txt my-repo.git
+git push --force
+
+# Step 5 — Pre-commit hook to prevent recurrence
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+```
+
+> **Why this matters:** How quickly and completely you respond to a secret exposure determines whether it becomes a minor incident or a major breach. Deleting the commit is not enough — git history is cached by GitHub, bots scan public repos within seconds of a push, and private repos may have been cloned.
+
+**💡 Production Example:**
+A developer committed an Azure SQL connection string to a public GitHub repo. Within 30 minutes: the credential was rotated, access logs were audited for unauthorized queries (none found in the 12-minute exposure window), Key Vault references were enabled on the app to eliminate all inline secrets, and a `gitleaks` pre-commit hook was added to the repo. The postmortem added secret scanning to the CI pipeline as a required check on every PR.
+
+---
+
+### Q73: How do you secure internal service-to-service calls?
+
+**Answer:**
+Use strong service identity, short-lived credentials, and explicit audience restrictions. Internal networks are not trusted by default in a zero-trust model. In Azure, managed identities provide secretless authentication — the platform handles credential lifecycle with no secrets in config.
+
+```csharp
+// ❌ Shared API key — no per-service identity, can't audit, can't revoke per-service
+services.AddHttpClient("PaymentService", client =>
+    client.DefaultRequestHeaders.Add("X-API-Key", _config["SharedApiKey"]));
+
+// ✅ Option 1: OAuth2 Client Credentials — per-service token with audience restriction
+services.AddHttpClient("PaymentService")
+    .AddClientCredentialsTokenHandler("payment-service"); // token scoped to "payment-service" audience only
+
+// ✅ Option 2: Azure Managed Identity — no secrets at all
+services.AddHttpClient("OrderService", client =>
+    client.BaseAddress = new Uri("https://order-service.internal"));
+
+// In the handler — fetch a managed identity token for the specific resource
+var credential = new DefaultAzureCredential();
+var tokenResult = await credential.GetTokenAsync(
+    new TokenRequestContext(["https://order-service.internal/.default"]));
+request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenResult.Token);
+
+// ✅ Option 3: mTLS — certificate proves service identity at TLS layer
+var handler = new HttpClientHandler();
+handler.ClientCertificates.Add(_certStore.GetServiceCert("inventory-service"));
+// Server validates client cert's CN matches expected service name
+```
+
+```mermaid
+flowchart LR
+    A[Service A] -->|"OAuth2 token\naud=service-b\nexp=15min"| B[Service B]
+    A -->|"Managed Identity\nno secrets in config"| AZURE[(Azure Resource)]
+    A -->|"mTLS\nclient cert CN=service-a"| C[Service C]
+
+    B -->|validates aud=service-b| OK1[✅ Accepted]
+    B -->|rejects aud=service-c token| DENY1[❌ Rejected]
+```
+
+> **Why this matters:** Internal traffic is not inherently trusted. Service-to-service authentication prevents lateral movement — if Service A is compromised, it should not be able to impersonate Service A's identity to reach Service C, which Service A has no legitimate need to call.
+
+**💡 Production Example:**
+When decomposing a monolith, internal HTTP calls initially used shared API keys. After migrating to managed identity with explicit audience claims per service, an audit showed one service had previously had access to all internal APIs. After scoping, it was limited to the two services it actually called. When that service later had a vulnerability discovered in a dependency, the blast radius was contained to those two downstream services instead of the entire internal API surface.

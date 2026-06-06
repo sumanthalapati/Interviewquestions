@@ -167,6 +167,11 @@ flowchart TD
 
 ## 2. Dependency Injection Lifecycle Flow
 
+> **Why this matters:** DI lifetime mismatches are a leading cause of data bleed, stale state, and memory leaks in .NET services. The "captive dependency" bug — a singleton holding a scoped service — is subtle enough that many developers only discover it under concurrent load in production.
+
+**💡 Production Example:**
+A background job service accidentally registered a database context as a singleton instead of scoped. Under concurrent execution, two workers shared the same `DbContext` instance, causing intermittent `InvalidOperationException` ("A second operation was started on this context"). Correcting the lifetime to scoped (using `IServiceScopeFactory`) resolved the contention immediately.
+
 ```
 app.Run() → Request 1 arrives
 │
@@ -2458,6 +2463,11 @@ flowchart TD
 
 ## Q: What is SynchronizationContext and how does it interact with async/await?
 
+> **Why this matters:** Calling `.Result` or `.Wait()` on a Task inside a context-bearing runtime (WinForms, WPF, classic ASP.NET) is the most reliable way to create a deadlock that only appears in production. Knowing *why* it deadlocks — not just that it does — shows deep async understanding.
+
+**💡 Production Example:**
+A migration from WebForms to ASP.NET Core left one helper calling `GetDataAsync().Result` inside a synchronous property getter. It worked fine in unit tests (no SynchronizationContext) but deadlocked intermittently in the legacy WebForms layer that still ran alongside the new app. Fully awaiting the call chain resolved it.
+
 `SynchronizationContext` is a mechanism to marshal work back to a specific thread or context (e.g., the UI thread in WinForms/WPF, or the request thread in old ASP.NET).
 
 | Runtime | SynchronizationContext | Continuation behavior |
@@ -2706,6 +2716,11 @@ flowchart LR
 
 ## Q: How does CancellationToken work and why should you always support it?
 
+> **Why this matters:** Without cancellation token propagation, disconnected clients still consume CPU, database connections, and downstream service quota. In high-traffic APIs this translates directly to wasted infrastructure cost and increased tail latency for other requests.
+
+**💡 Production Example:**
+A mobile client had an aggressive 3-second timeout on search requests. The server had no cancellation support, so the underlying EF Core query and three downstream HTTP calls ran to completion even after the client had already given up. Adding `CancellationToken` propagation through every layer cut wasted DB query time by ~40% during peak load.
+
 ```csharp
 // ── Setup ────────────────────────────────────────────────────────────────
 
@@ -2789,6 +2804,11 @@ sequenceDiagram
 
 ## Q: What is the difference between IEnumerable, IQueryable, and IAsyncEnumerable?
 
+> **Why this matters:** The `IEnumerable` vs `IQueryable` distinction is one of the most common sources of N+1 queries and full-table scans in EF Core applications. Knowing where LINQ executes separates developers who write scalable data layers from those who accidentally load entire tables into memory.
+
+**💡 Production Example:**
+A product search endpoint filtered and sorted on the application side after calling `.ToList()` too early. Under load, the query pulled 500k rows into memory on every request. Keeping the query as `IQueryable<T>` until the final `.ToListAsync()` call pushed all filtering to SQL and cut response time from 4 s to 80 ms.
+
 | Interface | Where LINQ runs | When data loads | Use case |
 |-----------|----------------|----------------|----------|
 | `IEnumerable<T>` | CLR / in-memory | When iterated | In-memory collections |
@@ -2858,6 +2878,11 @@ flowchart TD
 ---
 
 ## Q: Explain .NET memory management — stack vs heap, GC generations, and LOH
+
+> **Why this matters:** GC pauses directly affect tail latency. Candidates who understand allocation patterns and object lifetimes can prevent p99 spikes without guessing — and can explain why ArrayPool and Span<T> exist.
+
+**💡 Production Example:**
+A reporting service allocated large `string[]` arrays inside a tight loop generating CSV exports. Gen 0 collections spiked and p99 latency doubled under load. Switching to `ArrayPool<char>` and pre-allocating with `StringBuilder` cut allocations by 80% and stabilised response times.
 
 ```
 Stack                              Managed Heap
@@ -2936,6 +2961,11 @@ flowchart TD
 ---
 
 ## Q: What is Span&lt;T&gt; and Memory&lt;T&gt; and when should you use them?
+
+> **Why this matters:** Span<T> and Memory<T> are the primary tools for eliminating hot-path allocations in .NET without unsafe code. Understanding them signals that you can write high-throughput parsers, serializers, and pipeline stages that don't hammer the GC.
+
+**💡 Production Example:**
+A CSV import service split each line with `string.Split(',')` allocating thousands of short-lived strings per file. Replacing the inner loop with `ReadOnlySpan<char>` slicing dropped Gen 0 collections to near zero during bulk imports and cut peak memory usage by over 60%.
 
 `Span<T>` is a **stack-only** ref struct that represents a contiguous slice of memory without copying it. `Memory<T>` is the heap-safe, async-compatible version.
 
@@ -3142,3 +3172,519 @@ flowchart LR
 ```
 
 ---
+
+# C# & .NET Fundamentals — Interview Q&A
+
+---
+
+## Q: What is the difference between a value type and a reference type?
+
+**Answer:**
+Value types (`struct`, `int`, `bool`, `DateTime`) are stored inline — on the stack when they are locals, or embedded inside the containing object when they are fields. Assigning one copies the entire value. Reference types (`class`, `string`, arrays, interfaces) store a reference (pointer) on the stack/field; the actual object lives on the managed heap. Assigning copies the reference, so multiple variables can point to the same instance. `string` is a reference type but behaves like a value type because it is immutable — every "modification" produces a new string object.
+
+> **Why this matters:** Value/reference confusion causes subtle bugs in caching, equality checks, and concurrent code. A developer who cannot explain this clearly will struggle with struct performance optimisation, defensive copy bugs, and unexpected aliasing.
+
+**💡 Production Example:**
+In a high-throughput order service a custom `struct` was passed between layers, creating a deep copy on every method call and causing invisible memory pressure under load. Switching to a `class` with explicit ownership semantics eliminated the hidden allocation regression.
+
+❌ **Anti-pattern:**
+```csharp
+// Struct aliasing surprise — modifying 'b' does NOT affect 'a'
+var a = new Point(1, 2);
+var b = a;          // full copy
+b.X = 99;
+Console.WriteLine(a.X); // still 1 — surprising if you expected reference semantics
+```
+
+✅ **Best practice:**
+```csharp
+// Be explicit: use struct for small, immutable value objects
+public readonly record struct Point(int X, int Y);
+
+// Use class when shared identity / mutation is needed
+public class Order { public Guid Id { get; init; } public decimal Total { get; set; } }
+```
+
+---
+
+## Q: Walk me through a production bug caused by mutable shared state and how you'd prevent it.
+
+**Answer:**
+Mutable shared state means multiple execution paths can read and write the same object without coordination. In a multi-threaded service, one request can partially mutate an object while another request is reading it, producing torn reads, data bleed, or `InvalidOperationException`. The prevention playbook: make objects immutable after construction, keep object lifetimes short (scoped, not singleton), avoid static mutable fields, and use thread-safe collections when sharing across threads is unavoidable.
+
+> **Why this matters:** Mutable shared state is one of the most common sources of production race conditions and data corruption in multi-threaded services. These bugs reproduce intermittently and are extremely hard to debug without understanding the root cause.
+
+**💡 Production Example:**
+A session cache service stored a mutable `Dictionary<string, object>` per user, but the instance was accidentally registered as a singleton in the DI container. Two concurrent requests from different users mutated the same dictionary, causing intermittent data bleed between sessions. Making the dictionary immutable after initialisation and using `ConcurrentDictionary` for any runtime updates fixed the bug.
+
+❌ **Anti-pattern:**
+```csharp
+// Singleton with mutable shared state — race condition waiting to happen
+public class RequestContext
+{
+    public Dictionary<string, string> Headers { get; set; } = new(); // mutated per request
+}
+// Registered as: builder.Services.AddSingleton<RequestContext>(); ← WRONG
+```
+
+✅ **Best practice:**
+```csharp
+// Immutable after construction; register as Scoped
+public class RequestContext
+{
+    public IReadOnlyDictionary<string, string> Headers { get; }
+    public RequestContext(IReadOnlyDictionary<string, string> headers) => Headers = headers;
+}
+// builder.Services.AddScoped<RequestContext>();
+```
+
+---
+
+## Q: When do you use string versus StringBuilder in C#?
+
+**Answer:**
+Use `string` for fixed or small concatenations — one or two joins, literal formatting, or interpolation on a single line. Use `StringBuilder` when concatenating repeatedly in a loop or building large dynamic text (reports, CSV, HTML templates). `string` is immutable: every `+=` allocates a new string object and copies the old content, so N concatenations in a loop produce O(N²) allocations. `StringBuilder` maintains an internal buffer and amortises the cost, growing it geometrically when needed.
+
+> **Why this matters:** Text handling appears everywhere — logging, serialisation, templating, report generation. Knowing when allocation spikes prevents avoidable latency and Gen 0 churn in batch workloads.
+
+**💡 Production Example:**
+A loop generating monthly invoice emails for 200 k customers used `+=` inside nested iterations, producing heavy Gen 0 churn and batch execution times well over acceptable limits. Switching to `StringBuilder` with a pre-allocated capacity cut allocations per email by ~90% and reduced total batch time significantly.
+
+❌ **Anti-pattern:**
+```csharp
+string result = "";
+foreach (var item in largeCollection)
+    result += item.Name + ", "; // O(N²) allocations
+```
+
+✅ **Best practice:**
+```csharp
+var sb = new StringBuilder(largeCollection.Count * 20); // pre-size estimate
+foreach (var item in largeCollection)
+    sb.Append(item.Name).Append(", ");
+string result = sb.ToString();
+```
+
+---
+
+## Q: What is the difference between ==, .Equals(), and ReferenceEquals() in C#?
+
+**Answer:**
+`==` is an operator that can be overloaded per type. For primitives and `string`, it compares values. For unsealed classes it defaults to reference equality unless overloaded. `.Equals()` is an instance method defined on `object`; types override it to provide value-based comparison semantics. `ReferenceEquals(a, b)` is a static method that always checks whether two variables point to the exact same heap object — it ignores all overloads and overrides, making it the definitive identity check.
+
+> **Why this matters:** Equality bugs leak into caching keys, deduplication logic, and security checks. A custom type that doesn't override `Equals`/`GetHashCode` will silently break dictionary lookups and LINQ `Distinct()` calls.
+
+**💡 Production Example:**
+In a pricing service, discount rules were cached by a custom `RuleKey` class that never overrode `Equals` or `GetHashCode`. Every lookup created a new instance so the cache hit rate was 0% — logically equal keys were treated as different objects. Implementing `Equals`/`GetHashCode` (or switching to a `record`) fixed both correctness and cache performance.
+
+❌ **Anti-pattern:**
+```csharp
+public class RuleKey { public string Region; public int Tier; }
+// RuleKey a = new("EU", 1);  RuleKey b = new("EU", 1);
+// dictionary[a] != dictionary[b] — different instances, no Equals override
+```
+
+✅ **Best practice:**
+```csharp
+// Option 1: record — value equality built in
+public record RuleKey(string Region, int Tier);
+
+// Option 2: manual override
+public class RuleKey
+{
+    public string Region { get; init; }
+    public int Tier { get; init; }
+    public override bool Equals(object? obj) =>
+        obj is RuleKey other && Region == other.Region && Tier == other.Tier;
+    public override int GetHashCode() => HashCode.Combine(Region, Tier);
+}
+```
+
+---
+
+## Q: When would you choose an abstract class over an interface in modern C#?
+
+**Answer:**
+Choose an **interface** when you need a contract that multiple unrelated types can implement — it keeps coupling loose and enables composability. Choose an **abstract class** when you need shared state, protected helper methods, or constructor-enforced invariants that all subtypes must initialise. Default interface methods (C# 8+) allow adding new members without breaking implementors, but they cannot carry instance state or enforce constructor logic.
+
+> **Why this matters:** Poor base-type decisions create rigid hierarchies or require duplicated logic across implementations. Getting this wrong early in a project is expensive to refactor.
+
+**💡 Production Example:**
+A payment gateway SDK used an interface (`IPaymentProvider`) for the public contract so any provider could be swapped. An abstract base class (`PaymentProviderBase`) held common retry logic, telemetry hooks, and request signature validation. New providers inherited the base class to stay consistent without copy-pasting infrastructure code.
+
+❌ **Anti-pattern:**
+```csharp
+// Fat abstract class with both contract AND all implementations tightly coupled
+public abstract class PaymentProvider
+{
+    public abstract Task<Result> ChargeAsync(decimal amount);
+    // forces ALL subclasses to inherit retry + logging even if they don't want it
+    public virtual async Task<Result> ChargeWithRetryAsync(decimal amount) { /* ... */ }
+}
+```
+
+✅ **Best practice:**
+```csharp
+// Public contract — loose coupling, mockable
+public interface IPaymentProvider
+{
+    Task<Result> ChargeAsync(decimal amount, CancellationToken ct = default);
+}
+
+// Shared infrastructure — opt-in via inheritance
+public abstract class PaymentProviderBase : IPaymentProvider
+{
+    public abstract Task<Result> ChargeAsync(decimal amount, CancellationToken ct = default);
+    protected Task<Result> WithRetryAsync(Func<Task<Result>> op) { /* shared retry */ }
+    protected void RecordTelemetry(string operation, TimeSpan elapsed) { /* shared metrics */ }
+}
+```
+
+---
+
+## Q: What is the difference between readonly and const, and what are common gotchas?
+
+**Answer:**
+`const` values are compile-time constants — the value is baked directly into every consuming assembly's IL at build time. `readonly` fields are assigned at declaration or in the constructor and resolved at runtime. The critical gotcha: if you change a `public const` in a library, consuming assemblies that were not recompiled still use the old baked-in value. `static readonly` fields are resolved at runtime on first access, so redeploying the library is sufficient.
+
+> **Why this matters:** `const` creates an invisible coupling between assemblies that only surfaces after partial deployments. This is a real operational risk in microservices and NuGet package versioning.
+
+**💡 Production Example:**
+An internal shared package exposed `public const int DefaultTimeoutSeconds = 30`. After updating it to 60 and deploying the package, one consuming service still timed out at 30 seconds because it had not been rebuilt against the new package version. Changing to `public static readonly int DefaultTimeoutSeconds = 60` ensured all consumers picked up the value at runtime without requiring a rebuild.
+
+❌ **Anti-pattern:**
+```csharp
+// In a shared library — dangerous for values that might ever change
+public static class Config
+{
+    public const int MaxRetries = 3;          // baked into every consumer's IL
+    public const string DefaultRegion = "EU"; // same problem
+}
+```
+
+✅ **Best practice:**
+```csharp
+public static class Config
+{
+    public static readonly int MaxRetries = 3;          // runtime resolution
+    public static readonly string DefaultRegion = "EU"; // safe to change and redeploy
+}
+// Reserve const for truly universal constants: Math.PI, "magic" protocol values
+```
+
+---
+
+## Q: Where does boxing/unboxing hurt in .NET, and how do you avoid it?
+
+**Answer:**
+Boxing wraps a value type in a heap-allocated `object`; unboxing extracts it back. Each box is a separate heap allocation, and accumulated boxing in hot paths generates significant GC pressure. Boxing sneaks in through: non-generic APIs (`ArrayList`, `Hashtable`), `string.Format` with value-type arguments before interpolation, interface calls on structs, `object`-typed collections, and older reflection paths.
+
+> **Why this matters:** The per-call overhead of boxing is tiny, but in hot code paths — tight loops, metrics pipelines, serialisation — it compounds into measurable GC activity and p95 latency spikes.
+
+**💡 Production Example:**
+A metrics pipeline used `ArrayList` and `object`-typed payloads to store integer counters. Under heavy traffic, boxing each `int` created constant Gen 0 pressure. Migrating to `List<int>` and `Dictionary<string, long>` (generic, no boxing) reduced GC collection frequency and stabilised p95 latency.
+
+❌ **Anti-pattern:**
+```csharp
+// Non-generic collection — every int is boxed on Add, unboxed on retrieval
+ArrayList counters = new();
+counters.Add(42);               // boxes int → object
+int val = (int)counters[0];     // unboxes object → int
+
+// string.Format boxes value-type args in older patterns
+string msg = string.Format("Count: {0}", count); // boxes 'count'
+```
+
+✅ **Best practice:**
+```csharp
+// Generic collections — zero boxing for value types
+List<int> counters = new();
+counters.Add(42);  // no boxing
+
+// String interpolation — compiler avoids boxing in most cases
+string msg = $"Count: {count}";
+
+// Avoid interface calls on structs in hot paths:
+// IComparable<T> on a generic constraint is fine; casting struct to interface boxes it
+```
+
+---
+
+## Q: When should you use a record instead of a class?
+
+**Answer:**
+Use `record` for immutable, data-centric models where value equality is the right semantic — DTOs, integration event contracts, configuration snapshots, query results. Records provide value-based `Equals`/`GetHashCode`/`ToString` and non-destructive mutation via `with` expressions for free. Use `class` for entities with identity, mutable lifecycle, or complex behaviour. `readonly record struct` is ideal for small value objects that benefit from stack allocation.
+
+> **Why this matters:** Choosing the wrong type semantics can silently break identity logic (two "equal" entities treated as different) or make unit tests noisy (having to override equality just to assert on data).
+
+**💡 Production Example:**
+In an event-driven order system, integration event contracts were defined as mutable classes. Tests required verbose custom comparers, and equality checks in idempotency guards were unreliable. Moving the contracts to `record` types eliminated all hand-written equality code and made contract tests one-liners.
+
+❌ **Anti-pattern:**
+```csharp
+// Mutable class for a DTO — equality broken, mutation dangerous
+public class OrderCreatedEvent
+{
+    public Guid OrderId { get; set; }
+    public decimal Total { get; set; }
+}
+// new OrderCreatedEvent { OrderId = id, Total = 99 }
+// == new OrderCreatedEvent { OrderId = id, Total = 99 }  → FALSE (reference equality)
+```
+
+✅ **Best practice:**
+```csharp
+// record — value equality, immutable by default, with-expression for copies
+public record OrderCreatedEvent(Guid OrderId, decimal Total, DateTimeOffset OccurredAt);
+
+// Non-destructive mutation:
+var updated = original with { Total = 110m };
+
+// Small value object — stack-allocated
+public readonly record struct Money(decimal Amount, string Currency);
+```
+
+---
+
+## Q: Why and when would you mark a class as sealed?
+
+**Answer:**
+Mark a class `sealed` when extension is not a supported design goal — particularly for security-sensitive validators, value-like helpers, and performance-critical types where the JIT can devirtualise method calls. `sealed` also makes the type's contract explicit: callers cannot subclass and override behaviour in unexpected ways.
+
+> **Why this matters:** Open inheritance is a long-term API commitment. Every public unsealed class is implicitly an extension point. Sealing by default and opening deliberately keeps surface area manageable and enables JIT optimisations.
+
+**💡 Production Example:**
+An authentication token validator that enforced strict signing and expiry invariants was left unsealed. A downstream team subclassed it and overrode the expiry check to "simplify testing", inadvertently disabling it in a staging environment that later received a production traffic shift. Sealing the class and providing a test-friendly interface (`ITokenValidator`) prevented the bypass.
+
+❌ **Anti-pattern:**
+```csharp
+// Open class with security-critical logic — anyone can override Validate()
+public class JwtTokenValidator
+{
+    public virtual bool Validate(string token) { /* strict logic */ return true; }
+}
+```
+
+✅ **Best practice:**
+```csharp
+// Sealed — no overrides possible; testable via interface
+public interface ITokenValidator { bool Validate(string token); }
+
+public sealed class JwtTokenValidator : ITokenValidator
+{
+    public bool Validate(string token) { /* strict logic */ return true; }
+}
+```
+
+---
+
+## Q: How do you decide between exceptions and result objects for error handling in domain code?
+
+**Answer:**
+Use **exceptions** for truly unexpected, unrecoverable failures: infrastructure outages, violated invariants the caller cannot anticipate, programming errors. Use **result objects** (`Result<T, TError>`, `OneOf`, discriminated unions) for expected business-rule outcomes where the caller is expected to handle each case explicitly. Result types make the error surface visible in the method signature and remove the need for try/catch in normal business flow.
+
+> **Why this matters:** Mixing exceptions and result types incorrectly makes control flow unpredictable and forces callers to read implementation details to understand which errors can occur. Exception-driven business logic also harms performance — exception handling is expensive when triggered frequently.
+
+**💡 Production Example:**
+In a loan approval service, early code threw a custom `CreditScoreTooLowException` for rejections. Performance profiling showed the exception was being thrown (and caught) thousands of times per minute during normal traffic. Replacing it with `Result<Approval, RejectionReason>` eliminated the exception overhead and made rejection handling explicit at every call site.
+
+❌ **Anti-pattern:**
+```csharp
+// Using exceptions for expected business outcomes
+public Approval Approve(LoanApplication app)
+{
+    if (app.CreditScore < 600)
+        throw new CreditScoreTooLowException(app.CreditScore); // expected outcome → not exceptional
+    return new Approval(app.Id);
+}
+```
+
+✅ **Best practice:**
+```csharp
+public Result<Approval, RejectionReason> Approve(LoanApplication app)
+{
+    if (app.CreditScore < 600)
+        return Result.Failure<Approval, RejectionReason>(RejectionReason.InsufficientCredit);
+    if (app.DebtToIncomeRatio > 0.43m)
+        return Result.Failure<Approval, RejectionReason>(RejectionReason.HighDebtRatio);
+    return Result.Success<Approval, RejectionReason>(new Approval(app.Id));
+}
+
+// Caller is forced to handle both paths explicitly
+var result = _service.Approve(application);
+if (result.IsSuccess) return Ok(result.Value);
+return BadRequest(result.Error.ToString());
+```
+
+---
+
+## Q: Your team added async everywhere but throughput did not improve. How do you investigate?
+
+**Answer:**
+Async improves throughput only when the full call chain is non-blocking. Common culprits when it does not help: (1) a synchronous I/O call somewhere in the chain blocking a thread pool thread, (2) thread pool starvation from too many concurrent operations queuing up, (3) `Task.Run` wrapping sync code masking the problem, (4) a downstream dependency serialising all requests regardless. Investigation: profile with `dotnet-trace` or Application Insights, look at thread pool queue depth and blocked thread counts, check for `.Result`/`.Wait()`, and trace every `await` to confirm none resolve synchronously via a blocking path.
+
+> **Why this matters:** Async misconceptions are a leading cause of performance regressions in .NET APIs. "We made it async" is not a performance fix — it is only a fix when I/O was the bottleneck and the thread was being wasted waiting.
+
+**💡 Production Example:**
+A document processing API added `async`/`await` to all handlers but throughput did not improve. Profiling revealed the PDF rendering library called internally used synchronous file I/O and `Thread.Sleep` internally. The async wrapper was hiding a fully blocking operation. Moving the synchronous rendering call to a `Task.Run` with a bounded `SemaphoreSlim` queue restored scalability by preventing thread pool exhaustion.
+
+❌ **Anti-pattern:**
+```csharp
+// Fake async — wraps a blocking call, wastes a thread pool thread
+public async Task<byte[]> RenderAsync(string templatePath)
+{
+    // SyncRenderer.Render() does blocking file I/O internally
+    return await Task.Run(() => SyncRenderer.Render(templatePath)); // hides the problem
+}
+```
+
+✅ **Best practice:**
+```csharp
+// Bounded concurrency — prevents thread pool exhaustion from sync-over-async
+private static readonly SemaphoreSlim _renderSlot = new(Environment.ProcessorCount);
+
+public async Task<byte[]> RenderAsync(string templatePath, CancellationToken ct)
+{
+    await _renderSlot.WaitAsync(ct);
+    try
+    {
+        // Acknowledge the sync nature; bound the parallelism explicitly
+        return await Task.Run(() => SyncRenderer.Render(templatePath), ct);
+    }
+    finally { _renderSlot.Release(); }
+}
+```
+
+```mermaid
+flowchart TD
+    START([Async added — no throughput gain]) --> Q1{Any .Result or .Wait?}
+    Q1 -->|Yes| FIX1[Remove blocking calls\nAwait the full chain]
+    Q1 -->|No| Q2{Thread pool\nstarvation?\ncheck dotnet-trace}
+    Q2 -->|Yes| FIX2[Bound concurrency\nwith SemaphoreSlim\nor reduce parallelism]
+    Q2 -->|No| Q3{Downstream dependency\nserialising requests?}
+    Q3 -->|Yes| FIX3[Scale downstream\nor add circuit breaker]
+    Q3 -->|No| Q4{Sync I/O inside\nasync method?}
+    Q4 -->|Yes| FIX4[Replace with async I/O\nor use bounded Task.Run]
+    Q4 -->|No| PERF[Profile CPU path —\nbottleneck may not be I/O]
+
+    style FIX1 fill:#4CAF50,color:#fff
+    style FIX2 fill:#4CAF50,color:#fff
+    style FIX3 fill:#4CAF50,color:#fff
+    style FIX4 fill:#4CAF50,color:#fff
+```
+
+---
+
+## Q: How do you enforce null-safety across a large .NET solution?
+
+**Answer:**
+Enable nullable reference types (`<Nullable>enable</Nullable>`) project by project, treat nullable warnings as errors in CI for migrated projects, and fix boundary contracts first — API DTOs, persistence models, and external integrations are where nulls most often enter the system. Use `!` (null-forgiving) sparingly and document why. For new code, design APIs to return `T?` only when null is a meaningful domain value; otherwise use `Option<T>` or throw on missing data.
+
+> **Why this matters:** Null reference exceptions are one of the most common runtime errors in .NET. Nullable reference types shift that class of bug from runtime to compile time, which is where it is cheapest to fix.
+
+**💡 Production Example:**
+On a 200-project solution, `<Nullable>enable</Nullable>` was rolled out incrementally starting with shared domain libraries. CI was configured to treat nullable warnings as errors in fully migrated projects. Within three months, null reference exceptions in production dropped by over 60%, and new nullable bugs were caught at build time rather than in incident reports.
+
+❌ **Anti-pattern:**
+```csharp
+// No nullable annotations — NullReferenceException at runtime
+public Order GetOrder(Guid id)
+{
+    return _cache.Get(id); // returns null if not found — no warning at call sites
+}
+
+// Call site has no idea a null is possible:
+var total = order.Total; // NullReferenceException in production
+```
+
+✅ **Best practice:**
+```csharp
+// Project file: <Nullable>enable</Nullable>
+
+public Order? GetOrder(Guid id) => _cache.Get(id); // nullable return is explicit
+
+// Call site is forced to handle null:
+var order = GetOrder(id);
+if (order is null) return NotFound();
+var total = order.Total; // compiler knows non-null here
+```
+
+---
+
+## Q: How do you make shared in-memory state thread-safe in .NET without killing throughput?
+
+**Answer:**
+Start by questioning whether sharing is necessary at all — immutable objects and per-request state need no synchronisation. When sharing is unavoidable, choose the smallest synchronisation primitive: `lock` for simple critical sections with short hold times, `ReaderWriterLockSlim` for read-heavy data that is rarely written, `Interlocked` for atomic counter/flag operations, and `ConcurrentDictionary`/`ConcurrentQueue` for collections accessed from multiple threads. Avoid `lock` on large code blocks or across I/O calls.
+
+> **Why this matters:** Thread-safety defects are some of the hardest production bugs to reproduce because they depend on timing. But over-synchronisation (locking everything) serialises throughput. Picking the right primitive matters.
+
+**💡 Production Example:**
+A rate limiter used a plain `Dictionary<string, int>` for per-client counters. Under traffic spikes it threw intermittent `InvalidOperationException: Collection was modified`. Replacing it with `ConcurrentDictionary` and `Interlocked.Increment` for the counter updates eliminated the exceptions and preserved throughput — no global lock needed.
+
+❌ **Anti-pattern:**
+```csharp
+// Unsynchronised shared dictionary — race condition under concurrent access
+private static readonly Dictionary<string, int> _hits = new();
+
+public void RecordHit(string clientId)
+{
+    if (_hits.ContainsKey(clientId)) _hits[clientId]++;
+    else _hits[clientId] = 1;
+    // ↑ Not atomic — two threads can interleave between ContainsKey and assignment
+}
+```
+
+✅ **Best practice:**
+```csharp
+private static readonly ConcurrentDictionary<string, int> _hits = new();
+
+public void RecordHit(string clientId)
+{
+    // AddOrUpdate is atomic at the dictionary level
+    _hits.AddOrUpdate(clientId, 1, (_, existing) => existing + 1);
+}
+
+// For simple counters, Interlocked is even cheaper:
+private static long _totalRequests;
+public void CountRequest() => Interlocked.Increment(ref _totalRequests);
+```
+
+---
+
+## Q: How do you benchmark .NET code changes before claiming a performance win?
+
+**Answer:**
+Isolate the hot path and benchmark it with **BenchmarkDotNet** — it handles warmup, multiple runs, and statistical analysis automatically. Compare distributions (median, p99) not single runs. Validate assumptions in a production-like environment because microbenchmarks can hide I/O latency, allocation behaviour under real load, and JIT differences between Debug and Release builds. After a benchmark win, confirm in staging with a realistic load test before declaring victory.
+
+> **Why this matters:** "I tested it and it's faster" without a benchmark is not engineering — it is guesswork. BenchmarkDotNet separates measurement from intuition and provides reproducible evidence that can be committed alongside the code change.
+
+**💡 Production Example:**
+After changing JSON serialisation settings to use source generation, a developer ran BenchmarkDotNet and saw a CPU throughput improvement. However, a staging load test revealed extra allocations caused by a change in buffer strategy. The benchmark had not captured allocation pressure. Adjusting the implementation based on both the microbenchmark and the allocation profile (checked with `dotnet-trace` + `--counters`) produced a change that was both faster and had lower GC pressure before it reached production.
+
+❌ **Anti-pattern:**
+```csharp
+// Manual stopwatch timing — unreliable (no warmup, JIT not stabilised, GC interference)
+var sw = Stopwatch.StartNew();
+for (int i = 0; i < 1000; i++) DoWork();
+sw.Stop();
+Console.WriteLine($"Elapsed: {sw.ElapsedMilliseconds}ms"); // not meaningful
+```
+
+✅ **Best practice:**
+```csharp
+// BenchmarkDotNet — run with: dotnet run -c Release
+[MemoryDiagnoser]   // shows allocations per operation
+[SimpleJob(RuntimeMoniker.Net80)]
+public class SerializationBenchmarks
+{
+    private readonly Order _order = new(Guid.NewGuid(), 99.99m);
+
+    [Benchmark(Baseline = true)]
+    public string Reflection() => JsonSerializer.Serialize(_order);
+
+    [Benchmark]
+    public string SourceGen() => JsonSerializer.Serialize(_order, AppJsonContext.Default.Order);
+}
+// Compare: Mean, Allocated columns — both must improve before shipping
+```
+

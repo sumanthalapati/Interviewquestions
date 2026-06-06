@@ -4285,3 +4285,374 @@ classDiagram
 ```
 
 ---
+
+# 11. Senior Engineer — Design Patterns & SOLID Deep Dive
+
+> This section covers senior-level design patterns and SOLID questions drawn from real interview guides. Each question targets tradeoff judgment and production reasoning.
+
+---
+
+## 11.1 SOLID in Practice
+
+### Q116. Explain each SOLID principle and give one practical .NET example.
+
+**Answer:**
+
+| Principle | Core Rule | Quick .NET Signal |
+|---|---|---|
+| **S**RP | One reason to change | Controller doing DB + email = violation |
+| **O**CP | Extend without modifying | New behavior = new class, not edited switch |
+| **L**SP | Subtypes substitutable | Square breaking Rectangle contract = violation |
+| **I**SP | Clients depend only on what they use | Fat `IWorker` forcing `Robot.Eat()` = violation |
+| **D**IP | Depend on abstractions | `new SqlRepo()` inside service = violation |
+
+> **Why this matters:** SOLID principles are the foundation of maintainable, testable code. Senior engineers must apply them pragmatically — not dogmatically.
+
+**💡 Production Example:**
+A service class had 6 constructor dependencies. Applying SRP revealed it was orchestrating payment, notifications, and logging — three separate responsibilities. Splitting reduced each class to 2 focused dependencies and made unit tests trivial to write.
+
+---
+
+### Q117. How do you spot an SRP violation during code review?
+
+**Answer:**
+Look for classes with multiple reasons to change, mixed technical and business concerns, or methods spanning orchestration, validation, persistence, and side effects. Large constructor dependency lists are often a signal.
+
+> **Why this matters:** Senior engineers need to prevent design debt early. SRP violations usually increase bug rate and make onboarding slower.
+
+**💡 Production Example:**
+A controller handling mapping, validation, and direct SQL calls was refactored into request handling plus application service orchestration. The controller became thin, and test coverage focused on meaningful behavior.
+
+```csharp
+// Signal: constructor with 5+ dependencies often means SRP is broken
+// ❌ OrderController(IOrderRepo, IEmailSvc, IInventorySvc, IPaymentSvc, ILogger)
+// — this controller does too much
+
+// ✅ Thin controller delegates to an application service
+public class OrderController : ControllerBase
+{
+    private readonly IOrderApplicationService _orders;
+    public OrderController(IOrderApplicationService orders) => _orders = orders;
+
+    [HttpPost]
+    public async Task<IActionResult> Place([FromBody] PlaceOrderRequest req)
+        => Ok(await _orders.PlaceAsync(req));
+}
+// All orchestration lives in OrderApplicationService — single reason to change
+```
+
+---
+
+### Q118. When does the Open/Closed Principle become over-engineering?
+
+**Answer:**
+OCP becomes over-engineering when teams create abstractions for variability that does not exist yet. Apply extension points where change is likely and costly, keep simple code simple.
+
+> **Why this matters:** Interviewers test tradeoff judgment. Senior candidates should balance extensibility with readability and delivery speed.
+
+**💡 Production Example:**
+A straightforward switch expression was used for two stable payment rules instead of a full strategy hierarchy. Strategies were introduced later only when new partner-specific rules began arriving regularly.
+
+```csharp
+// ✅ Acceptable for 2 stable cases — no OCP needed yet
+decimal fee = paymentMethod switch
+{
+    "card"   => amount * 0.015m,
+    "wallet" => amount * 0.005m,
+    _        => throw new ArgumentException()
+};
+
+// ✅ Introduce IFeeStrategy only when third partner arrives with custom rules
+public interface IFeeStrategy { decimal Calculate(decimal amount); }
+public class CardFee   : IFeeStrategy { public decimal Calculate(decimal a) => a * 0.015m; }
+public class WalletFee : IFeeStrategy { public decimal Calculate(decimal a) => a * 0.005m; }
+```
+
+---
+
+## 11.2 Pattern Selection & Combination
+
+### Q119. Strategy vs Factory: how do you explain the difference and when would you combine them?
+
+**Answer:**
+Strategy encapsulates interchangeable behavior at runtime. Factory encapsulates object creation. Combine them when selection of strategy depends on runtime context.
+
+> **Why this matters:** Many systems misuse patterns by applying one where the other fits better.
+
+**💡 Production Example:**
+A factory selected tax-calculation strategies by country and customer type. The calling service depended only on `ITaxStrategy`, keeping both behavior and instantiation logic cleanly separated.
+
+```csharp
+public interface ITaxStrategy { decimal Calculate(decimal amount); }
+public class UkVatStrategy : ITaxStrategy { public decimal Calculate(decimal a) => a * 0.20m; }
+public class UsStateTaxStrategy : ITaxStrategy { public decimal Calculate(decimal a) => a * 0.08m; }
+
+// Factory selects the right strategy based on runtime context
+public class TaxStrategyFactory
+{
+    public ITaxStrategy Create(string countryCode) => countryCode switch
+    {
+        "GB" => new UkVatStrategy(),
+        "US" => new UsStateTaxStrategy(),
+        _    => throw new NotSupportedException($"No tax strategy for {countryCode}")
+    };
+}
+
+// Calling service knows only ITaxStrategy — decoupled from both factory and implementations
+public class InvoiceService
+{
+    private readonly TaxStrategyFactory _factory;
+    public InvoiceService(TaxStrategyFactory factory) => _factory = factory;
+
+    public decimal CalculateTotal(decimal subtotal, string countryCode)
+        => subtotal + _factory.Create(countryCode).Calculate(subtotal);
+}
+```
+
+---
+
+### Q120. When is the Observer pattern a better fit than direct service calls in .NET?
+
+**Answer:**
+Observer fits when multiple subscribers need to react to a domain event without tight coupling to the publisher. In-process observers are useful for modular monoliths, while integration events are better when crossing service boundaries.
+
+> **Why this matters:** This choice impacts coupling and change velocity. Direct calls are simpler but can turn one change into many coordinated deployments.
+
+**💡 Production Example:**
+Publishing an `OrderPlaced` domain event that triggered inventory reservation and notification handlers independently. The order workflow stayed focused while downstream behaviors evolved separately.
+
+```csharp
+// Publisher knows nothing about subscribers
+public record OrderPlacedEvent(Guid OrderId, decimal Total) : INotification;
+
+public class OrderService
+{
+    private readonly IMediator _mediator;
+    public OrderService(IMediator mediator) => _mediator = mediator;
+
+    public async Task PlaceAsync(Order order)
+    {
+        // ... save order ...
+        await _mediator.Publish(new OrderPlacedEvent(order.Id, order.Total));
+        // OrderService doesn't know or care who handles this
+    }
+}
+
+// Subscribers are independent — add/remove without touching OrderService
+public class ReserveInventoryHandler : INotificationHandler<OrderPlacedEvent>
+{
+    public Task Handle(OrderPlacedEvent e, CancellationToken ct) => /* reserve stock */;
+}
+
+public class SendConfirmationHandler : INotificationHandler<OrderPlacedEvent>
+{
+    public Task Handle(OrderPlacedEvent e, CancellationToken ct) => /* send email */;
+}
+```
+
+---
+
+### Q121. How would you use the Decorator pattern for cross-cutting concerns in a .NET codebase?
+
+**Answer:**
+Decorator is ideal for layering behaviors like caching, logging, retries, or authorization around a core service without modifying its code. In .NET, Scrutor and DI composition make decorator chains straightforward and testable.
+
+> **Why this matters:** Cross-cutting concerns often leak into business logic if not structured well.
+
+**💡 Production Example:**
+A pricing service was wrapped with a caching decorator and a telemetry decorator. Business logic stayed unchanged while response times improved and observability became consistent.
+
+```csharp
+public interface IPricingService { Task<decimal> GetPriceAsync(int productId); }
+
+// Core implementation — pure business logic
+public class PricingService : IPricingService
+{
+    public async Task<decimal> GetPriceAsync(int productId) => /* DB lookup */ 99.99m;
+}
+
+// Caching decorator — adds Redis caching, no pricing logic
+public class CachingPricingDecorator : IPricingService
+{
+    private readonly IPricingService _inner;
+    private readonly IDistributedCache _cache;
+    public CachingPricingDecorator(IPricingService inner, IDistributedCache cache)
+    { _inner = inner; _cache = cache; }
+
+    public async Task<decimal> GetPriceAsync(int productId)
+    {
+        var key = $"price:{productId}";
+        var cached = await _cache.GetStringAsync(key);
+        if (cached is not null) return decimal.Parse(cached);
+        var price = await _inner.GetPriceAsync(productId);
+        await _cache.SetStringAsync(key, price.ToString(),
+            new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5) });
+        return price;
+    }
+}
+
+// DI composition using Scrutor
+services.AddScoped<IPricingService, PricingService>();
+services.Decorate<IPricingService, CachingPricingDecorator>();
+// services.Decorate<IPricingService, TelemetryPricingDecorator>(); // add more layers
+```
+
+---
+
+### Q122. Mediator pattern versus direct dependency injection: what tradeoffs do you discuss?
+
+**Answer:**
+Mediator centralizes request dispatch and can simplify orchestration and pipeline behaviors, but it can hide control flow when overused. Direct DI is clearer for simple interactions.
+
+> **Why this matters:** Evaluates architectural pragmatism. Senior candidates should avoid dogma and optimize for maintainability.
+
+**💡 Production Example:**
+MediatR was used for command and query handlers with validation and logging pipelines. For trivial single-step operations, direct service calls were kept to avoid unnecessary abstraction.
+
+```csharp
+// ✅ Good use of Mediator — pipeline behaviors (validation, logging, auth) apply automatically
+public record PlaceOrderCommand(Guid CartId, string PaymentToken) : IRequest<OrderResult>;
+
+public class PlaceOrderHandler : IRequestHandler<PlaceOrderCommand, OrderResult>
+{
+    public async Task<OrderResult> Handle(PlaceOrderCommand cmd, CancellationToken ct)
+        => /* complex orchestration */;
+}
+
+// Pipeline behavior applies to ALL commands — no duplication
+public class ValidationBehavior<TReq, TRes> : IPipelineBehavior<TReq, TRes>
+    where TReq : IRequest<TRes>
+{
+    public async Task<TRes> Handle(TReq request, RequestHandlerDelegate<TRes> next, CancellationToken ct)
+    {
+        // validate request
+        return await next();
+    }
+}
+
+// ❌ Over-using Mediator for simple, single-step operations adds ceremony without value
+// Direct DI is clearer: _userService.GetByEmailAsync(email)
+// vs: await _mediator.Send(new GetUserByEmailQuery(email)) — unnecessary indirection
+```
+
+---
+
+## 11.3 Advanced Patterns
+
+### Q123. How do you use Template Method or policy-based pipelines without creating inheritance-heavy designs?
+
+**Answer:**
+Prefer composition-first templates: define the invariant flow once and inject variable steps as delegates or strategy interfaces. If inheritance is used, keep hierarchies shallow.
+
+> **Why this matters:** Rigid inheritance trees become expensive to change.
+
+**💡 Production Example:**
+An import pipeline reused common parsing and auditing steps while injecting per-file validation policies. Gained reuse without locking into deep base-class hierarchies.
+
+```csharp
+// Composition-based pipeline — no deep inheritance
+public class ImportPipeline<T>
+{
+    private readonly Func<Stream, IEnumerable<T>> _parse;
+    private readonly Func<T, bool> _validate;
+    private readonly Func<IEnumerable<T>, Task> _persist;
+
+    public ImportPipeline(
+        Func<Stream, IEnumerable<T>> parse,
+        Func<T, bool> validate,
+        Func<IEnumerable<T>, Task> persist)
+    { _parse = parse; _validate = validate; _persist = persist; }
+
+    public async Task RunAsync(Stream input)
+    {
+        var records = _parse(input);                  // variable step
+        var valid   = records.Where(_validate);       // variable step
+        await _persist(valid);                        // variable step
+        // Audit/logging wrapped here once — reused for every import type
+    }
+}
+
+// Different file types reuse the same pipeline with different steps
+var csvPipeline    = new ImportPipeline<Order>(CsvParser.Parse, OrderValidator.IsValid, _repo.BulkInsert);
+var jsonPipeline   = new ImportPipeline<Order>(JsonParser.Parse, OrderValidator.IsValid, _repo.BulkInsert);
+```
+
+---
+
+### Q124. What anti-patterns do you watch for when teams say they are using design patterns?
+
+**Answer:**
+Watch for unnecessary abstractions, pattern cargo-culting, god factories, and repositories that hide useful query capabilities. Also interface-per-class habits that add ceremony without decoupling value.
+
+> **Why this matters:** Patterns are tools, and misuse can make systems harder to understand than no pattern at all.
+
+**💡 Production Example:**
+A codebase had five layers of wrappers around a simple HTTP client. Removed redundant abstractions, kept one clear boundary interface, and cut both complexity and defect surface.
+
+| Anti-Pattern | Symptom | Fix |
+|---|---|---|
+| Interface-per-class | `IUserService` with one implementor, never swapped | Remove interface unless testability or DI swap is needed |
+| God Factory | Factory with 200 lines of `if`/`switch` creating every object | Use DI container or strategy registry |
+| Repository hiding EF | `GetAll()` loads everything; no filtering capability | Expose `IQueryable` or specification pattern |
+| Mediator everywhere | Every read goes through a command/query — even `GetById` | Keep simple reads as direct service calls |
+| Decorator chain > 4 deep | Wrapping makes stack traces unreadable | Flatten with middleware or AOP |
+
+---
+
+### Q125. How do SOLID and design patterns influence system design decisions at the service boundary level?
+
+**Answer:**
+At service boundaries, SOLID and patterns guide contract stability, dependency direction, and change isolation. DIP supports adapter-based integrations, SRP shapes service responsibilities, and patterns like Anti-Corruption Layer protect domain models from external schema churn.
+
+> **Why this matters:** Senior roles want macro-level design thinking, not only class-level refactoring knowledge.
+
+**💡 Production Example:**
+A legacy billing API was wrapped behind an anti-corruption adapter and mapping layer. Internal domain models stayed consistent while the external provider evolved independently.
+
+```csharp
+// Anti-Corruption Layer — DIP at the service boundary
+public interface IBillingGateway
+{
+    Task<BillingResult> CreateInvoiceAsync(InvoiceRequest request);
+}
+
+// Adapter translates domain model ↔ external provider schema
+public class LegacyBillingAdapter : IBillingGateway
+{
+    private readonly LegacyBillingClient _client;
+
+    public async Task<BillingResult> CreateInvoiceAsync(InvoiceRequest request)
+    {
+        // Map internal domain model → legacy API model
+        var legacyReq = new LegacyInvoiceDto
+        {
+            ClientCode = request.CustomerId.ToString(),
+            LineItems  = request.Lines.Select(l => new LegacyLineItem
+            {
+                Desc  = l.Description,
+                Units = l.Quantity,
+                Rate  = (double)l.UnitPrice
+            }).ToList()
+        };
+
+        var legacyResult = await _client.SubmitAsync(legacyReq);
+
+        // Map response back to domain model
+        return new BillingResult(legacyResult.ConfirmationCode, legacyResult.Status == "OK");
+    }
+}
+
+// Domain code depends only on IBillingGateway — shielded from legacy schema changes
+```
+
+```mermaid
+flowchart LR
+    DOMAIN["Domain Layer\nInvoiceRequest\nBillingResult"] -->|"IBillingGateway\n(DIP)"| ACL["Anti-Corruption Layer\nLegacyBillingAdapter"]
+    ACL -->|"LegacyInvoiceDto"| EXT["External Legacy\nBilling API"]
+
+    style DOMAIN fill:#2196F3,color:#fff
+    style ACL fill:#FF9800,color:#fff
+    style EXT fill:#d62828,color:#fff
+```
+
+---

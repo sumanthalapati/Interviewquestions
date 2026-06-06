@@ -5407,6 +5407,171 @@ public class GcsStorageService : IObjectStorageService
 
 ---
 
+## Section 11 — Containerization & Deployment Best Practices
+
+---
+
+### Q101. How do you containerize a .NET application correctly? What mistakes do you see?
+
+**Answer:**
+Use multi-stage builds with the SDK image only for building and the smaller `aspnet` runtime image for the final stage. Run as a non-root user. Add a `.dockerignore` to exclude `bin/`, `obj/`, and local secrets. Use `dotnet restore` in a separate layer to maximize cache hits. Common mistakes: shipping the full SDK in production (massive image), running as root (CVE risk), and missing `.dockerignore` (leaking local files).
+
+❌ **Wrong:**
+```dockerfile
+# Single stage — ships 900MB SDK + source code as runtime
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+WORKDIR /app
+COPY . .
+RUN dotnet build -c Release
+ENTRYPOINT ["dotnet", "bin/Release/net8.0/MyApp.dll"]
+```
+
+✅ **Correct:**
+```dockerfile
+# Stage 1: Build (SDK image, discarded after build)
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY ["MyApp.csproj", "."]
+RUN dotnet restore --locked-mode
+COPY . .
+RUN dotnet publish -c Release -o /app/publish --no-restore
+
+# Stage 2: Runtime (small runtime image, ~200MB)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+WORKDIR /app
+
+# Security: run as non-root
+RUN adduser --disabled-password --gecos "" appuser
+USER appuser
+
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+
+```
+# .dockerignore — prevents leaking local files and speeds up context transfer
+bin/
+obj/
+.env
+*.user
+appsettings.Development.json
+```
+
+> **Why this matters:** Container security and image size directly affect production risk and deployment speed. A 1.8GB image with the SDK at runtime carries unnecessary CVEs and slow cold starts.
+
+**💡 Production Example:**
+A team's Docker image was 1.8GB because the full SDK image was used as the runtime stage. Switching to multi-stage with `mcr.microsoft.com/dotnet/aspnet:8.0` as the final stage, running as a non-root user, and adding `.dockerignore` brought the image to 180MB — a 90% reduction — and eliminated a high-severity CVE that was present in the SDK but not the runtime image.
+
+---
+
+### Q102. How do you incorporate security scanning into CI/CD without slowing developers too much?
+
+**Answer:**
+Run fast, targeted scans on every PR and block only on critical/high severity findings. Run deep, comprehensive scans on merge to main or nightly. Tune noise down — low and medium severity findings generate weekly tickets, not pipeline failures. This gives developers fast feedback on the issues that matter without death by alert fatigue.
+
+```yaml
+# PR pipeline — fast scan, block only on critical/high
+- task: SnykSecurityScan@1
+  displayName: 'Snyk: PR Security Check'
+  inputs:
+    serviceConnectionEndpoint: 'Snyk-Connection'
+    testType: 'app'
+    severityThreshold: 'high'   # only fail on HIGH or CRITICAL
+    failOnIssues: true
+    additionalArguments: '--all-projects'
+
+# Nightly pipeline — comprehensive scan, full report
+- task: SnykSecurityScan@1
+  displayName: 'Snyk: Full Nightly Scan'
+  inputs:
+    serviceConnectionEndpoint: 'Snyk-Connection'
+    testType: 'app'
+    severityThreshold: 'low'    # report everything, triage manually
+    failOnIssues: false         # don't fail — produce report for review
+    monitorWhen: 'always'
+    additionalArguments: '--all-projects --json-file-output=snyk-results.json'
+```
+
+| Severity | PR behaviour | Nightly behaviour |
+|----------|-------------|-------------------|
+| Critical | Block PR | Block + page |
+| High | Block PR | Block + alert |
+| Medium | Comment only | Weekly ticket |
+| Low | Ignored in PR | Monthly backlog |
+
+> **Why this matters:** Security scanning must be fast enough not to slow developers and strict enough to catch real issues. Both failures — blocking on noise or ignoring critical CVEs — cost the team.
+
+**💡 Production Example:**
+Adding Snyk to every PR initially blocked developers with hundreds of low-severity findings on transitive dependencies they didn't control. Developer trust in the pipeline eroded — people started ignoring all security failures. Tuning to fail only on critical/high in PRs, running full scans nightly, and triaging medium/low findings weekly restored developer trust. Critical vulnerabilities were still caught within hours of appearing; low-severity noise stopped blocking work.
+
+---
+
+### Q103. How do you validate canary releases before full rollout?
+
+**Answer:**
+Compare key metrics between the canary population and the baseline over a validation window. Watch both technical health (error rate, latency p95/p99) and business KPIs (conversion rate, order completion). Automate rollback when thresholds are exceeded — human reaction time is too slow for traffic spikes. Use a minimum validation window (30–60 minutes) even if early metrics look good.
+
+```yaml
+# Canary deployment with automated validation
+- deployment: DeployCanary
+  environment: 'Production'
+  strategy:
+    canary:
+      increments: [2, 10, 100]   # 2% → 10% → 100%
+      deploy:
+        steps:
+          - task: AzureWebApp@1
+            inputs: { appName: 'myapp-prod', slotName: 'canary' }
+      postRouteTraffic:
+        steps:
+          - script: |
+              # Wait for traffic to populate metrics
+              sleep 300
+              # Compare canary vs baseline error rate
+              CANARY_ERROR=$(az monitor metrics list \
+                --resource $CANARY_RESOURCE_ID \
+                --metric "Http5xx" --aggregation total \
+                --query "value[0].timeseries[0].data[-1].total" -o tsv)
+              BASELINE_ERROR=$(az monitor metrics list \
+                --resource $PROD_RESOURCE_ID \
+                --metric "Http5xx" --aggregation total \
+                --query "value[0].timeseries[0].data[-1].total" -o tsv)
+              # Fail if canary error rate > 2x baseline
+              if [ "$CANARY_ERROR" -gt "$(($BASELINE_ERROR * 2))" ]; then
+                echo "##vso[task.logissue type=error]Canary error rate exceeds threshold"
+                exit 1
+              fi
+            displayName: 'Validate Canary Metrics'
+      on:
+        failure:
+          steps:
+            - script: |
+                # Automated rollback — redirect all traffic back to stable
+                az webapp traffic-routing clear --name myapp-prod --resource-group myRG
+              displayName: 'Auto-rollback canary'
+```
+
+```mermaid
+flowchart LR
+    DEPLOY[Deploy canary\n2% traffic] --> WAIT[Wait 5 minutes\nmetrics settle]
+    WAIT --> CHECK{Error rate\n< 2x baseline?}
+    CHECK -- Yes --> EXPAND[Expand to 10%]
+    CHECK -- No --> ROLLBACK[Auto-rollback\nto stable]
+    EXPAND --> CHECK2{Latency p99\n< 500ms?}
+    CHECK2 -- Yes --> FULL[Full rollout\n100%]
+    CHECK2 -- No --> ROLLBACK
+
+    style ROLLBACK fill:#f44336,color:#fff
+    style FULL fill:#4CAF50,color:#fff
+```
+
+> **Why this matters:** Full rollouts of untested changes cause production incidents. Canary validation with automated rollback limits blast radius to a small user percentage and recovers automatically — often before users file support tickets.
+
+**💡 Production Example:**
+After deploying a new search ranking algorithm to 2% of traffic, a comparison of conversion rate, latency p95, and error rate against baseline ran for 4 hours. The canary showed a 15% increase in timeout errors — a database query that performed well in testing but degraded under real production query patterns. Automated rollback triggered before the change was exposed to broader traffic. The fix was identified from the canary's logs and shipped the next day.
+
+---
+
 ## Summary
 
 This guide covered 100 interview questions across 10 sections:
