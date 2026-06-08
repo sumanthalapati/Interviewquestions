@@ -4289,3 +4289,246 @@ flowchart TD
     style REDIS_GEO fill:#9C27B0,color:#fff
 ```
 
+
+---
+
+## System Design Fundamentals
+
+### Q: Back of Envelope Estimation
+
+**A:** Estimation is a critical interview skill. Demonstrate systematic thinking with known constants.
+
+**Key numbers to memorize:**
+
+| Metric | Value |
+|--------|-------|
+| L1 cache | 1 ns |
+| L2 cache | 10 ns |
+| RAM access | 100 ns |
+| SSD read | 100 µs |
+| HDD seek | 10 ms |
+| Network round trip (same DC) | 500 µs |
+| Network round trip (cross-continent) | 150 ms |
+| Read 1MB sequentially from RAM | 250 µs |
+| Read 1MB from SSD | 1 ms |
+
+**Traffic estimation template:**
+- DAU × actions/day = daily requests
+- Daily requests / 86,400 = RPS average
+- Peak RPS = 2-3× average
+
+**Storage estimation template:**
+- Daily data = DAU × data per user per day
+- 5-year storage = daily × 365 × 5
+- Add 20% overhead for replication/indexes
+
+**Why this matters:** Every system design interview starts with estimation. Interviewers expect you to drive to: QPS, storage size, bandwidth. Wrong answers hurt credibility.
+
+**💡 Example:** Design Twitter storage:
+- 500M tweets/day × 280 chars avg × 2 bytes = ~280GB text/day
+- Images: 10% tweets have image × 200KB = 10GB/day
+- 5-year total ≈ (280GB + 10GB) × 365 × 5 ≈ **530TB**
+
+---
+
+### Q: Bloom Filter — Probabilistic Set Membership
+
+**A:** A Bloom filter answers "is this element possibly in the set?" with zero false negatives but tunable false positives.
+
+**How it works:**
+1. Bit array of M bits, initialized to 0
+2. K independent hash functions
+3. INSERT: hash element K times → set those bit positions to 1
+4. QUERY: hash element K times → if ALL positions are 1 → "probably present"; if ANY is 0 → "definitely absent"
+
+**Properties:**
+- False positive rate: `(1 - e^(-kn/m))^k` where n = elements inserted
+- No false negatives (never says "absent" for something inserted)
+- Space: ~10 bits/element for 1% false positive rate
+- Cannot delete (standard Bloom filter)
+
+```mermaid
+flowchart TD
+    E[Element] --> H1[Hash 1] --> B1[Bit 3 = 1]
+    E --> H2[Hash 2] --> B2[Bit 7 = 1]
+    E --> H3[Hash 3] --> B3[Bit 14 = 1]
+    B1 & B2 & B3 --> BA[Bit Array]
+    Q[Query] --> CH{All bits set?}
+    CH -->|Yes| P[Possibly Present]
+    CH -->|No| N[Definitely Absent]
+```
+
+**Real-world uses:**
+- Cassandra: before disk read, check Bloom filter to skip SSTable
+- Chrome Safe Browsing: local Bloom filter of malicious URLs
+- Web crawlers: URL deduplication (before hitting DB)
+- CDN: don't cache one-hit-wonder URLs
+
+**Why this matters:** Bloom filters appear in every data-intensive system design. Interviewers love to ask "how would you avoid unnecessary DB lookups?"
+
+**💡 Production Example:** Cassandra uses Bloom filters per SSTable. Before reading from disk (10ms), it checks the Bloom filter (microseconds). With 1% false positive rate and 10 SSTables, 90% of DB lookups are eliminated, reducing read latency by 10×.
+
+---
+
+### Q: Consistent Hashing
+
+**A:** Consistent hashing minimizes key remapping when nodes are added or removed, solving the rehashing problem of modulo hashing.
+
+**Problem with modulo hashing:**
+- `server = hash(key) % N`
+- When N changes (add/remove node), almost ALL keys remap → cache invalidation storm
+
+**Consistent hashing solution:**
+1. Hash ring: 0 to 2^32 positions
+2. Nodes placed at hash(node_id) positions on ring
+3. Key assigned to first node clockwise from hash(key)
+4. Add node: only keys between new node and its predecessor remap (~1/N keys)
+5. Remove node: only that node's keys remap to next node
+
+**Virtual nodes (vnodes):**
+- Each physical node has V virtual nodes on the ring
+- Balances uneven distribution
+- Enables weighted assignment (more powerful nodes = more vnodes)
+
+```mermaid
+flowchart LR
+    subgraph Ring
+        N1[Node A\n0°]
+        N2[Node B\n120°]
+        N3[Node C\n240°]
+    end
+    K1[Key 1\n30°] --> N2
+    K2[Key 2\n150°] --> N3
+    K3[Key 3\n270°] --> N1
+```
+
+**Why this matters:** Consistent hashing is foundational to Cassandra, DynamoDB, Redis Cluster, and any distributed cache. Interviewers expect you to explain vnodes and why they help with hotspots.
+
+**💡 Production Example:** Cassandra uses consistent hashing with virtual nodes (256 vnodes/node). When a node is added, only ~1/N of keys migrate, making cluster expansion live with no downtime. Amazon's DynamoDB uses consistent hashing internally for partition placement.
+
+---
+
+### Q: Gossip Protocol
+
+**A:** Gossip (epidemic protocol) is used for cluster membership and failure detection in distributed systems without a single coordinator.
+
+**How it works:**
+1. Every T seconds, each node picks K random peers
+2. Exchanges: "I know nodes A, B, C are alive with heartbeat counters X, Y, Z"
+3. Update local state with received information
+4. Mark node failed if heartbeat counter hasn't increased in N rounds
+
+**Properties:**
+- Convergence: O(log N) rounds for info to reach all N nodes
+- Resilient: no single point of failure
+- Self-healing: new nodes learn cluster topology quickly
+- Bandwidth: O(log N) messages per round vs O(N) for broadcast
+
+**Failure detection:**
+- Heartbeat counter: monotonically increasing per node
+- Phi-accrual detector (Cassandra): suspicion level based on arrival time statistics, not binary alive/dead
+
+**Why this matters:** Gossip appears in Cassandra, DynamoDB, Consul, and Serf. Understanding how clusters self-organize without a central registry is a senior-level concept.
+
+**💡 Production Example:** Cassandra uses gossip for cluster membership. Each node gossips with 3 peers every second. In a 100-node cluster, node joins/leaves propagate to all nodes within 7 rounds (~7 seconds). There's no "master" coordinating membership — pure gossip.
+
+---
+
+### Q: Hinted Handoff
+
+**A:** Hinted handoff is a write availability technique: when the intended replica is down, another node temporarily stores the write and delivers it when the replica recovers.
+
+**Flow:**
+1. Write comes in, replica B is unavailable
+2. Coordinator stores write with "hint: deliver to B when it recovers"
+3. Coordinator continues to monitor B
+4. When B recovers, coordinator delivers the hinted write
+5. B applies write, coordinator deletes hint
+
+**Trade-offs:**
+- Improves write availability (can write even when replica down)
+- Risk: hints can accumulate if node is down for long (bounded hint window)
+- Eventually consistent: B will converge but may serve stale reads
+
+**Combined with read repair:**
+- Hinted handoff: proactive repair during writes
+- Read repair: reactive repair during reads (detects stale data, updates in background)
+- Anti-entropy: Merkle tree comparison for full replica sync
+
+**Why this matters:** Hinted handoff + read repair + anti-entropy is Cassandra's consistency model. Understanding all three is necessary to explain eventual consistency in practice.
+
+**💡 Production Example:** Cassandra's hinted handoff has a default 3-hour window. If a node is down for 3+ hours, hints are discarded (too many), and full repair (nodetool repair) is needed. Netflix learned this the hard way and runs daily repairs.
+
+---
+
+### Q: Cell-Based Architecture
+
+**A:** Cell-based (silo) architecture divides infrastructure into independent cells, limiting blast radius of failures.
+
+**Structure:**
+- Each cell: complete stack (API, DB, cache, workers) serving a subset of users
+- User assigned to cell at signup (never migrates normally)
+- Cells don't share state; no cross-cell calls at runtime
+
+**Benefits:**
+- Blast radius: bug/outage affects only 1 cell (e.g., 1/50 of users)
+- Deployment: roll out to 1 cell first, monitor, then progressively deploy
+- Compliance: EU users in EU cells (data residency)
+- Scale: add cells horizontally
+
+**Challenges:**
+- Global features: cross-cell queries (e.g., global leaderboard) need aggregation layer
+- Uneven cell load: consistent hashing or power-of-two-choices for assignment
+- Cell routing: DNS or routing layer maps user → cell
+
+```mermaid
+flowchart TD
+    U[Users] --> R[Router/DNS]
+    R --> C1[Cell 1\nUsers 1-2M]
+    R --> C2[Cell 2\nUsers 2-4M]
+    R --> C3[Cell 3\nUsers 4-6M]
+    C1 --> DB1[(DB1)]
+    C2 --> DB2[(DB2)]
+    C3 --> DB3[(DB3)]
+```
+
+**Why this matters:** Cell-based architecture is how AWS, Slack, and Shopify limit outage impact. "Blast radius reduction" is a key SRE concept.
+
+**💡 Production Example:** Shopify uses cell-based architecture (pods) where each pod serves a shard of merchants. During Black Friday 2021, a bug in one pod affected <2% of merchants instead of all. AWS Availability Zones are essentially cells at the infrastructure level.
+
+---
+
+### Q: Actor Model
+
+**A:** The actor model is a concurrency paradigm where actors are independent units that communicate via asynchronous message passing, with no shared mutable state.
+
+**Actor properties:**
+- Each actor has: private state, mailbox (message queue), behavior (how to handle messages)
+- Actors can: send messages, create child actors, update own state
+- No shared memory → no locks, no race conditions
+
+**Supervision:**
+- Parent actors supervise children: restart, stop, or escalate on failure
+- Fault isolation: one actor crashes → only that actor affected
+
+**Frameworks:**
+- .NET: Microsoft Orleans (virtual actors / grains)
+- JVM: Akka
+- Erlang: native (WhatsApp uses this)
+- Python: Ray (for ML)
+
+**Why it matters for .NET:**
+```csharp
+// Orleans grain
+public class UserGrain : Grain, IUserGrain {
+    private UserState _state;
+    
+    public async Task<UserProfile> GetProfile() {
+        return _state.Profile; // single-threaded access, no locks
+    }
+}
+```
+
+**Why this matters:** Actor model is the foundation of WhatsApp (Erlang), Microsoft Orleans, and any stateful serverless design. Interviewers ask about it when discussing stateful services at scale.
+
+**💡 Production Example:** WhatsApp uses Erlang's actor model (processes). Each user conversation is an actor. Erlang supports 1M+ lightweight processes per VM. WhatsApp served 900M users with ~50 engineers because Erlang's supervision trees handle crashes automatically.

@@ -2979,3 +2979,376 @@ flowchart LR
     style C3 fill:#2196F3,color:#fff
 ```
 
+
+---
+
+## Real-Time Systems Design
+
+### Q50: Design a Real-Time Gaming Leaderboard
+
+**A:** A leaderboard must handle millions of score updates per second and serve near-instant rankings.
+
+**Architecture:**
+- **Score ingestion**: Kafka topic per game, consumers update Redis
+- **Redis Sorted Sets**: ZADD O(log N), ZRANK O(log N), ZRANGE for top-K
+- **Tiered storage**: Redis for live rankings, PostgreSQL for historical
+- **Pub/Sub for push**: Redis pub/sub or WebSocket server broadcasts rank changes
+- **Segmentation**: global, regional, friends-only leaderboards
+
+```mermaid
+flowchart TD
+    G[Game Server] --> K[Kafka]
+    K --> C[Score Consumer]
+    C --> R[(Redis Sorted Set)]
+    R --> API[Leaderboard API]
+    API --> WS[WebSocket Server]
+    WS --> U[Users]
+    R --> PG[(PostgreSQL\nHistorical)]
+```
+
+**Scaling:**
+- Partition Redis by game_id using consistent hashing
+- Read replicas for leaderboard reads (eventual consistency acceptable)
+- Approximate top-K with Count-Min Sketch for massive scale
+
+**Why this matters:** Redis Sorted Set is the canonical leaderboard solution in FAANG interviews. Interviewers expect you to know ZADD, ZRANK, ZRANGEBYSCORE by heart.
+
+**💡 Production Example:** Fortnite processes ~3M concurrent players. They partition leaderboards by region (NA, EU, APAC) and use Redis clusters with 6 shards. Rank queries are served from read replicas with 100ms staleness acceptable.
+
+---
+
+### Q51: Design Real-Time Live Comments (YouTube/Twitch)
+
+**A:** Live comments require fan-out to millions of concurrent viewers with minimal latency.
+
+**Architecture:**
+- **Ingest**: HTTP POST → message queue (Kafka or Redis Streams)
+- **Fan-out service**: pulls from queue, pushes to SSE/WebSocket connections
+- **Connection management**: consistent hashing maps stream_id to server
+- **Sticky sessions**: WebSocket connections need to be sticky (same server)
+- **Rate limiting**: per-user comment throttle (token bucket)
+- **Moderation**: async ML classifier, shadow-banning
+
+```mermaid
+sequenceDiagram
+    participant V as Viewer
+    participant API as Comment API
+    participant K as Kafka
+    participant FO as Fan-out Service
+    participant WS as WebSocket Pool
+    V->>API: POST comment
+    API->>K: Publish event
+    K->>FO: Consume
+    FO->>WS: Broadcast to stream subscribers
+    WS-->>V: Push to all viewers
+```
+
+**Scaling challenges:**
+- 1M viewers on one stream → 1M WebSocket connections → need horizontal scaling with consistent hashing
+- Comment storm mitigation: token bucket per user, aggregate display (show "500 🔥" instead of individual)
+
+**Why this matters:** Fan-out at scale is a core distributed systems problem. The push vs pull trade-off and connection management are frequent interview topics.
+
+**💡 Production Example:** Twitch handles 2M concurrent viewers on popular streams. They use a Pub/Sub system where comments fan out through regional PoPs. Chat servers hold ~50K connections each, and stream_id is consistently hashed to a server cluster.
+
+---
+
+### Q52: Design a Distributed Counter
+
+**A:** Counting at massive scale (page views, likes, API calls) requires trading consistency for performance.
+
+**Approaches:**
+
+| Approach | Throughput | Consistency | Use Case |
+|----------|-----------|-------------|----------|
+| Single Redis INCR | ~100K/s | Strong | Small scale |
+| Redis Cluster | ~1M/s | Strong | Medium scale |
+| Approximate (HyperLogLog) | Unlimited | Approximate | Unique counts |
+| Cell-based sharding | Unlimited | Eventual | Massive scale |
+| CRDT counters | Unlimited | Eventual | Distributed |
+
+**Cell-based approach:**
+- Partition counter by cell_id = hash(counter_key) % N_CELLS
+- Each write goes to one cell, periodic aggregation job sums cells
+- Trade-off: reads are eventually consistent (aggregated every X seconds)
+
+```mermaid
+flowchart LR
+    W[Write: +1] --> H[Hash]
+    H --> C1[Cell 1\ncount: 1000]
+    H --> C2[Cell 2\ncount: 800]
+    H --> C3[Cell 3\ncount: 1200]
+    AGG[Aggregator] --> C1 & C2 & C3
+    AGG --> T[(Total: 3000)]
+```
+
+**Why this matters:** Understanding when NOT to use a single counter (hot key problem) is critical. CRDT-G-Counter is the theoretical foundation for distributed counters.
+
+**💡 Production Example:** Facebook counts 4.5B likes/day. They use a tiered approach: in-memory sharded counters per datacenter, async aggregation to a central store every 60 seconds. Displayed counts are approximate (±5%).
+
+---
+
+### Q53: Design a Real-Time Presence Platform (Online/Offline Status)
+
+**A:** Showing who is online requires heartbeat tracking, efficient storage, and push notifications.
+
+**Architecture:**
+- **Heartbeat**: clients send heartbeat every 30s to presence service
+- **State machine**: Online → Away (5 min) → Offline (15 min no heartbeat)
+- **Storage**: Redis with TTL (key = user_id, TTL = 30s, auto-expires = offline)
+- **Change detection**: on SET, compare old value → publish to Pub/Sub if changed
+- **Fan-out**: presence service pushes status changes to friend list
+- **Friend list fan-out**: for users with 5K friends, async fan-out via queue
+
+```mermaid
+stateDiagram-v2
+    [*] --> Online: Heartbeat received
+    Online --> Away: 5 min no heartbeat
+    Away --> Online: Heartbeat received
+    Away --> Offline: 15 min no heartbeat
+    Offline --> Online: Heartbeat received
+    Offline --> [*]
+```
+
+**Scaling:**
+- Redis key expiry for automatic offline detection
+- Consistent hashing: user_id maps to specific presence server
+- For 1B users: only store ONLINE users (sparse), offline is default
+
+**Why this matters:** Presence is in every chat app interview (WhatsApp, Slack, Discord). The Redis TTL trick for automatic offline detection is elegant and frequently expected.
+
+**💡 Production Example:** WhatsApp serves 2B users. They only track online users in Redis (sparse storage). Each user has a persistent WebSocket to a server; disconnection immediately triggers offline event fan-out to up to 256 contacts.
+
+---
+
+## Classic Interview System Designs
+
+### Q54: Design Airbnb
+
+**Q: Design the Airbnb home rental platform.**
+
+**A:**
+**Core services:**
+- Search Service: geospatial search (Elasticsearch + geo queries), availability calendar
+- Booking Service: two-phase commit between inventory and payment
+- Payment Service: Stripe integration, split payments (host payout + service fee)
+- Listing Service: photo storage (S3), CDN delivery
+- Review Service: post-stay only, fraud detection
+
+**Availability calendar challenge:**
+- Listings have complex availability: check-in rules, min nights, blocked dates
+- Use bitset per listing per month: 1 = available, 0 = blocked
+- Lock listing during booking to prevent double-booking (optimistic locking with version)
+
+```mermaid
+flowchart TD
+    U[User Search] --> S[Search Service\nElasticsearch]
+    S --> L[Listing Service]
+    U --> B[Booking Service]
+    B --> P[Payment Service]
+    B --> I[Inventory Lock]
+    I --> DB[(Availability DB)]
+    P --> Stripe
+```
+
+**Why this matters:** Two-phase locking for inventory + payment is a canonical distributed transaction problem. The geospatial search with availability filter is a classic.
+
+**💡 Production Example:** Airbnb handles 150M listings. They moved from MySQL with geo queries to Elasticsearch with geo_distance queries, achieving <100ms search latency. Double-booking prevention uses a database-level unique constraint on (listing_id, date).
+
+---
+
+### Q55: Design Spotify
+
+**Q: Design Spotify's music streaming service.**
+
+**A:**
+**Core components:**
+- **Audio delivery**: pre-signed S3 URLs, adaptive bitrate (Ogg Vorbis 96/160/320kbps)
+- **Recommendation**: Collaborative filtering + content-based (audio features), offline ML batch
+- **Playlist service**: ordered list, collaborative playlists (CRDT for concurrent edits)
+- **Search**: Elasticsearch for full-text, prefix search for autocomplete
+- **Offline sync**: download encrypted tracks, DRM (Widevine), local SQLite metadata
+
+**Recommendation pipeline:**
+1. Event logging: play, skip, like → Kafka
+2. Batch processing: Spark jobs compute user-song matrix
+3. Matrix factorization (ALS): user and song embedding vectors
+4. Serve via feature store: nearest neighbor in embedding space = recommendations
+
+```mermaid
+flowchart TD
+    U[User plays song] --> K[Kafka]
+    K --> SP[Spark Batch Job]
+    SP --> MF[Matrix Factorization]
+    MF --> FS[Feature Store]
+    FS --> RS[Recommendation Service]
+    RS --> U
+```
+
+**Why this matters:** Collaborative filtering and the recommendation pipeline are asked at Netflix, Spotify, and YouTube. The offline sync + DRM pattern is unique to media companies.
+
+**💡 Production Example:** Spotify's Discover Weekly processes 30TB of streaming data per week using Apache Spark on GCP. The ALS model produces 200M user embeddings and 30M song embeddings. Recommendations are pre-computed Sunday night for Monday delivery.
+
+---
+
+### Q56: Design Amazon S3 (Object Storage)
+
+**Q: Design an object storage system like S3.**
+
+**A:**
+**Core features:** PUT/GET/DELETE objects, unlimited scale, 11-nines durability
+
+**Architecture:**
+- **Metadata service**: maps (bucket, key) → object_id, stored in distributed KV (like DynamoDB)
+- **Storage nodes**: objects split into chunks, each chunk stored with erasure coding (Reed-Solomon 6+3)
+- **Placement service**: decides which storage nodes hold each chunk
+- **Load balancer**: routes PUT to placement service, GET to storage nodes directly
+
+**Durability:**
+- Erasure coding: 6 data + 3 parity shards → tolerate 3 node failures
+- Cross-AZ replication: shards spread across 3+ AZs
+- CRC checksum on every read/write
+
+**Consistency (achieved 2020):**
+- Strong read-after-write: metadata service uses single-leader replication
+- List consistency: metadata changes are synchronously replicated before ACK
+
+```mermaid
+flowchart TD
+    C[Client PUT] --> LB[Load Balancer]
+    LB --> PS[Placement Service]
+    PS --> SN1[Storage Node 1\nAZ-a]
+    PS --> SN2[Storage Node 2\nAZ-b]
+    PS --> SN3[Storage Node 3\nAZ-c]
+    PS --> MD[(Metadata Service)]
+    MD --> C
+```
+
+**Why this matters:** Object storage design is asked at every major cloud company. Erasure coding vs replication trade-offs and strong consistency implementation are core topics.
+
+**💡 Production Example:** S3 stores 350 trillion objects. Each object's metadata is stored in a custom DynamoDB-like system. Durability is achieved via Reed-Solomon 6+3 erasure coding across 3 AZs, resulting in mathematically provable 99.999999999% durability.
+
+---
+
+### Q57: Design Twitter Timeline
+
+**Q: Design Twitter's home timeline and tweet fanout.**
+
+**A:**
+**Two models:**
+1. **Fanout on write (push)**: On tweet, push to all followers' timeline caches. Fast reads, slow writes for celebrities.
+2. **Fanout on read (pull)**: Timeline is computed at read time from followed accounts. Slow reads, fast writes.
+3. **Hybrid (Twitter's actual approach)**: Push for regular users, pull for celebrities (>1M followers).
+
+**Timeline cache:**
+- Redis sorted set per user: tweet_id (score=timestamp) → 800 tweet cache
+- On follow: retroactively add tweets to cache (up to 800)
+- On tweet: push to followers' caches asynchronously
+
+**Celebrity handling:**
+- Detect: follower_count > threshold (e.g., 1M)
+- Don't push celebrity tweets; pull at read time and merge with cached timeline
+
+```mermaid
+flowchart TD
+    T[New Tweet] --> FS[Fanout Service]
+    FS --> FL{Follower Count}
+    FL -->|< 1M| PW[Push to followers' caches]
+    FL -->|> 1M| CE[Celebrity table]
+    PW --> RC[(Redis Cache\nper user)]
+    RT[Read Timeline] --> RC
+    RT --> CE
+    RT --> MR[Merge & Sort]
+```
+
+**Why this matters:** The push vs pull fanout trade-off with the celebrity exception is one of the most cited real-world system design decisions. Twitter's 2012 blog post about this is required reading.
+
+**💡 Production Example:** Twitter's fanout service processed 500M tweets/day. Lady Gaga with 30M followers would require 30M cache writes per tweet at 5 tweets/day = 150M writes/day for one user. Hence the celebrity pull model.
+
+---
+
+### Q58: Design a Web Crawler
+
+**Q: Design a distributed web crawler.**
+
+**A:**
+**Core components:**
+- **URL frontier**: priority queue of URLs to crawl (BFS/DFS/politeness-aware)
+- **Fetcher**: HTTP client, respects robots.txt, rate limits per domain
+- **Parser**: extracts links, content, metadata
+- **Content store**: deduplicated storage (hash of content → S3)
+- **URL deduplication**: Bloom filter for seen URLs (approximate, space-efficient)
+
+**Politeness:**
+- robots.txt compliance: fetch /robots.txt before crawling
+- Crawl delay: respect Crawl-delay directive
+- Domain throttling: max N requests/second per domain
+
+**Distributed design:**
+- URL frontier partitioned by domain (consistent hashing)
+- Each fetcher owns domains in its hash range
+- Prevents hammering same server from multiple fetchers
+
+```mermaid
+flowchart TD
+    UF[URL Frontier\nPriority Queue] --> F[Fetcher]
+    F --> RT[robots.txt Check]
+    RT --> H[HTTP Request]
+    H --> P[Parser]
+    P --> L[Link Extractor]
+    P --> CS[(Content Store\nS3)]
+    L --> BF[Bloom Filter\nDedup]
+    BF -->|New URL| UF
+```
+
+**Why this matters:** Web crawlers appear in Google and Bing interviews. Bloom filters for URL dedup and the politeness architecture are frequently tested concepts.
+
+**💡 Production Example:** Googlebot crawls ~15 billion pages/day. The URL frontier uses a two-level queue: per-domain back queues for politeness, front queues for priority. Content deduplication uses SimHash to detect near-duplicates (not just exact).
+
+---
+
+### Q59: Design ChatGPT / AI Chat Service
+
+**Q: Design a scalable AI chat assistant like ChatGPT.**
+
+**A:**
+**Core flow:**
+1. User sends message → API gateway → session service (fetch history) → inference service
+2. Inference: stream tokens via SSE/WebSocket back to client
+3. Conversation stored: message + response appended to session history
+
+**Key challenges:**
+- **Stateful conversations**: context window = all previous messages → grows with turns
+- **Streaming**: users expect first token in <1s, not wait for full response
+- **GPU cost**: LLM inference is expensive; batching critical
+- **Context truncation**: sliding window, summary compression when context full
+
+**Inference serving:**
+- vLLM with continuous batching: serve multiple users on same GPU
+- PagedAttention: KV cache paging to reduce GPU memory waste
+- Model parallelism: tensor parallel for large models across GPUs
+
+**Scaling:**
+- Stateless API tier + session state in Redis
+- GPU autoscaling based on queue depth (Kubernetes + KEDA)
+- Response caching for identical prompts (SHA256 of prompt as cache key)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant GW as API Gateway
+    participant SS as Session Service
+    participant LB as GPU Load Balancer
+    participant IS as Inference (vLLM)
+    U->>GW: POST /chat
+    GW->>SS: Get history (session_id)
+    SS->>GW: Return messages
+    GW->>LB: Prompt + history
+    LB->>IS: Batch request
+    IS-->>U: Stream tokens (SSE)
+    GW->>SS: Save response async
+```
+
+**Why this matters:** AI system design is now standard at FAANG. Understanding inference infrastructure (vLLM, continuous batching, PagedAttention) differentiates senior candidates.
+
+**💡 Production Example:** OpenAI serves 100M users/week. They use custom NVIDIA H100 clusters with vLLM-style continuous batching to achieve ~40 tokens/second throughput per user while serving thousands concurrently. Cold start latency < 300ms (first token).

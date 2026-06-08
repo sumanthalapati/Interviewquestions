@@ -2331,3 +2331,289 @@ flowchart LR
 - Eventual consistency requires idempotent writes and conflict resolution — last-write-wins (Cassandra) or application-level merge
 - DynamoDB strongly-consistent reads cost 2x RCU — use them only when staleness is unacceptable (financial totals, inventory levels)
 - Cosmos DB's 5 consistency levels show the full spectrum in a single product — useful reference for interviews
+
+---
+
+## Technology Deep Dives
+
+### Q: API Gateway vs Load Balancer — When to Use Which?
+
+**A:**
+
+| Aspect | Load Balancer | API Gateway |
+|--------|--------------|-------------|
+| Layer | L4 (TCP) or L7 (HTTP) | L7 (HTTP/HTTPS) |
+| Purpose | Distribute traffic | Manage APIs |
+| Auth | No | Yes (JWT, OAuth2) |
+| Rate limiting | Basic | Advanced (per-user, per-endpoint) |
+| Request transformation | No | Yes (headers, body) |
+| Service discovery | Yes | Yes |
+| Caching | No | Yes |
+| Protocol | TCP/HTTP | HTTP/gRPC/WebSocket |
+| Examples | AWS ALB, nginx, HAProxy | Kong, AWS API GW, Apigee |
+
+**Architecture pattern:**
+```
+Internet → CDN → Load Balancer → API Gateway → Microservices
+```
+
+- **Load Balancer**: handles connection distribution, health checks, SSL termination at scale
+- **API Gateway**: handles cross-cutting concerns: auth, rate limiting, routing, transformation
+
+**Why this matters:** In .NET microservices, you'll configure both. Understanding which does what prevents security gaps (auth bypass if LB bypasses API GW).
+
+**💡 Production Example:** Netflix uses a two-tier approach: AWS ELBs for L4 load balancing, then Zuul (open-sourced) as API gateway for routing, auth, and rate limiting. Kong is popular in .NET microservices shops.
+
+---
+
+### Q: Rate Limiting Strategies Deep Dive
+
+**A:** Five algorithms with different trade-offs:
+
+**1. Fixed Window Counter**
+- Count requests per time window (e.g., 100 req/minute)
+- Simple, but edge-case: 200 requests in 2-second burst at window boundary
+- Use case: simple quotas
+
+**2. Sliding Window Log**
+- Store timestamp of each request, count within last N seconds
+- Accurate but high memory (stores all timestamps)
+- Use case: strict per-user limits
+
+**3. Sliding Window Counter**
+- Approximate sliding window using two fixed window counters
+- Formula: `current_window_count + prev_window_count × (1 - elapsed_fraction)`
+- Low memory, near-accurate
+- Use case: most production systems (Redis implementation)
+
+**4. Token Bucket**
+- Bucket holds N tokens, refilled at rate R tokens/second
+- Each request consumes 1 token; burst allowed (up to bucket size)
+- Use case: API rate limiting, allows bursts
+- AWS throttling uses this
+
+**5. Leaky Bucket**
+- Queue processes requests at fixed rate (output rate = constant)
+- Excess requests dropped or queued
+- Use case: smoothing traffic, protecting downstream services
+
+```mermaid
+flowchart TD
+    R[Request] --> TB{Token\nBucket}
+    TB -->|Token available| P[Process]
+    TB -->|Empty| RL[Rate Limited\n429]
+    T[Timer] -->|Refill at rate R| TB
+```
+
+**Redis implementation (Token Bucket):**
+```lua
+-- Lua script for atomic token bucket
+local key = KEYS[1]
+local rate = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+local last_tokens = tonumber(redis.call('hget', key, 'tokens') or capacity)
+local last_refreshed = tonumber(redis.call('hget', key, 'timestamp') or 0)
+
+local elapsed = math.max(0, now - last_refreshed)
+local tokens = math.min(capacity, last_tokens + (elapsed * rate))
+
+if tokens >= requested then
+    tokens = tokens - requested
+    redis.call('hset', key, 'tokens', tokens, 'timestamp', now)
+    return 1 -- allowed
+else
+    return 0 -- rate limited
+end
+```
+
+**Why this matters:** Rate limiting is in every API design interview and .NET production system. Understanding the algorithms, not just the tools, differentiates senior engineers.
+
+**💡 Production Example:** Stripe uses token bucket with per-API-key limits. Burst: 100 req/sec, sustained: 25 req/sec. Headers: `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 87`, `Retry-After: 1.2`. ASP.NET Core 7+ has built-in rate limiting middleware (Microsoft.AspNetCore.RateLimiting).
+
+---
+
+### Q: Redis Use Cases — Choosing the Right Data Structure
+
+**A:** Redis is not just a cache. Different data structures solve different problems optimally.
+
+| Use Case | Redis Structure | Command | Complexity |
+|----------|----------------|---------|-----------|
+| Session cache | String | GET/SET | O(1) |
+| Leaderboard | Sorted Set | ZADD/ZRANK | O(log N) |
+| Rate limiting | String + INCR | INCR/EXPIRE | O(1) |
+| Pub/Sub | Pub/Sub | PUBLISH/SUBSCRIBE | O(N subscribers) |
+| Job queue | List | RPUSH/BLPOP | O(1) |
+| Unique visitors | HyperLogLog | PFADD/PFCOUNT | O(1) |
+| Social graph | Set | SADD/SINTER | O(N) |
+| Time-series | Stream | XADD/XRANGE | O(log N) |
+| Geospatial | Geo | GEOADD/GEODIST | O(log N) |
+| Distributed lock | String | SET NX EX | O(1) |
+
+**Distributed lock pattern (Redlock):**
+```csharp
+// Using StackExchange.Redis in .NET
+var acquired = await db.StringSetAsync(
+    "lock:resource", 
+    lockValue, 
+    TimeSpan.FromSeconds(30),
+    When.NotExists);
+
+if (acquired) {
+    try { /* critical section */ }
+    finally {
+        // Release only if we own it (Lua for atomicity)
+        var script = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
+        await db.ScriptEvaluateAsync(script, new RedisKey[] { "lock:resource" }, new RedisValue[] { lockValue });
+    }
+}
+```
+
+**Why this matters:** Using Redis String for a leaderboard (instead of Sorted Set) is a red flag in interviews. Knowing which structure fits which problem is expected at senior level.
+
+**💡 Production Example:** Twitter uses Redis Sorted Sets for timeline caches (tweet_id as score). Instagram uses Redis for 300M follow relationships stored as Sets (SINTER for mutual followers). Stack Overflow uses Redis for hot question caching with automatic expiry.
+
+---
+
+### Q: Kafka Deep Dive — Architecture and Guarantees
+
+**A:** Kafka is a distributed, partitioned, replicated commit log designed for high-throughput event streaming.
+
+**Core concepts:**
+- **Topic**: logical stream of records, split into partitions
+- **Partition**: ordered, immutable append-only log; unit of parallelism
+- **Offset**: position within partition; consumers track their offset
+- **Consumer group**: partitions distributed among consumers; each partition consumed by exactly one consumer in group
+- **Replication**: each partition has 1 leader + N-1 followers; leader handles reads/writes
+
+**Producer guarantees (acks setting):**
+- `acks=0`: fire and forget, fastest, may lose data
+- `acks=1`: leader ACK, fast, data loss if leader dies before replication
+- `acks=all`: all ISR replicas ACK, slowest, no data loss
+
+**Consumer guarantees:**
+- At-least-once (default): commit offset after processing; may re-process on failure
+- At-most-once: commit before processing; may lose messages
+- Exactly-once: Kafka transactions (idempotent producer + transactional consumer)
+
+**Ordering:**
+- Ordered within partition (global ordering requires 1 partition)
+- Use partition key to ensure same-entity events go to same partition
+
+```mermaid
+flowchart TD
+    P[Producer] --> T[Topic: orders]
+    T --> P0[Partition 0\noffset 0,1,2...]
+    T --> P1[Partition 1\noffset 0,1,2...]
+    T --> P2[Partition 2\noffset 0,1,2...]
+    P0 --> CG[Consumer Group]
+    P1 --> CG
+    P2 --> CG
+    CG --> C1[Consumer 1\nP0]
+    CG --> C2[Consumer 2\nP1]
+    CG --> C3[Consumer 3\nP2]
+```
+
+**Why this matters:** Kafka is in every event-driven .NET architecture. Understanding partition key design (avoid hot partitions), consumer group rebalancing, and exactly-once semantics is expected at senior level.
+
+**💡 Production Example:** LinkedIn (Kafka's creator) processes 7 trillion messages/day. Partition key = user_id ensures all events for a user are ordered. Consumer lag monitoring is critical: >30 second lag = alert. .NET: Confluent.Kafka NuGet package.
+
+---
+
+### Q: Service Discovery — How Microservices Find Each Other
+
+**A:** Service discovery enables dynamic endpoint resolution as services scale up/down.
+
+**Client-side discovery:**
+- Client queries registry → gets IP list → load balances itself
+- Examples: Netflix Eureka + Ribbon, Consul + client library
+- Pros: smart client, fast (no proxy hop)
+- Cons: client must implement discovery logic for each language
+
+**Server-side discovery:**
+- Load balancer queries registry → routes request
+- Examples: AWS ALB + ECS, Kubernetes Service
+- Pros: client is simple, language-agnostic
+- Cons: extra network hop, LB is SPOF (mitigated by clustering)
+
+**Kubernetes service discovery:**
+- `Service` object: stable DNS name (my-service.namespace.svc.cluster.local)
+- kube-proxy: iptables rules route to pod IPs
+- CoreDNS: cluster-internal DNS resolver
+
+**Health checks:**
+- Registry marks endpoint unhealthy → removed from discovery
+- Consul: HTTP health check, TCP check, or script check
+
+**Why this matters:** In .NET microservices on Kubernetes, service discovery is automatic via K8s Services. But understanding the mechanism (iptables, CoreDNS) explains latency and debugging.
+
+**💡 Production Example:** Netflix uses Eureka for 1000+ microservices across 3 regions. Each service registers on startup with TTL of 90 seconds; missed heartbeats cause eviction. Ribbon client does round-robin with circuit breaking via Hystrix.
+
+---
+
+### Q: Sidecar Pattern
+
+**A:** A sidecar is a co-located helper container that augments a service with cross-cutting concerns without modifying the service itself.
+
+**Common sidecars:**
+- **Service mesh proxy** (Envoy/Istio): mTLS, retries, circuit breaking, observability
+- **Log shipper** (Fluentd/Filebeat): collect container logs → Elasticsearch
+- **Config sync**: pull secrets from Vault on startup
+- **Metrics collector** (Prometheus exporter): expose service metrics
+
+**Architecture:**
+```mermaid
+flowchart LR
+    subgraph Pod
+        App[App Container\nPort 8080]
+        SC[Sidecar: Envoy\nPort 15001]
+    end
+    SC -->|mTLS| OtherPod[Other Service]
+    SC -->|metrics| Prom[Prometheus]
+    SC -->|logs| ELK[Elasticsearch]
+```
+
+**Service mesh (Istio):**
+- All traffic routed through Envoy sidecars
+- Zero-code mTLS between all services
+- Traffic policies: retries, timeouts, circuit breakers via YAML
+- Distributed tracing automatically injected (Jaeger/Zipkin headers)
+
+**Why this matters:** .NET microservices on Kubernetes often use Istio or Dapr (Distributed Application Runtime — Microsoft's sidecar framework). Interviewers ask "how do you add observability without changing 50 services?"
+
+**💡 Production Example:** Airbnb migrated 2000+ services to Istio service mesh. Zero code changes required for mTLS. Sidecar adds ~5ms latency per hop but provides complete observability. Microsoft Dapr is the .NET-friendly alternative with actors, pub/sub, state management sidecars.
+
+---
+
+### Q: How Virtual Machines Work
+
+**A:** Virtual machines allow multiple isolated OS instances to run on shared physical hardware.
+
+**Hypervisor types:**
+
+| Type | Description | Examples | Performance |
+|------|-------------|---------|------------|
+| Type 1 (bare metal) | Runs directly on hardware | Hyper-V, VMware ESXi, KVM | Near-native |
+| Type 2 (hosted) | Runs on host OS | VirtualBox, VMware Workstation | Higher overhead |
+
+**Key mechanisms:**
+- **CPU virtualization**: VT-x/AMD-V hardware extensions trap privileged instructions
+- **Memory virtualization**: EPT/NPT (Extended/Nested Page Tables) map VM→host→physical addresses without software intervention
+- **I/O virtualization**: VirtIO paravirtual drivers bypass emulation layer
+- **Live migration**: copy memory pages to destination while VM runs; final "stop-copy" phase freezes briefly
+
+**Containers vs VMs:**
+
+| | VMs | Containers |
+|---|---|---|
+| Isolation | Full OS boundary | Process isolation (namespaces) |
+| Boot time | Minutes | Milliseconds |
+| Memory overhead | GB per VM | MB per container |
+| Security | Strong | Weaker (shared kernel) |
+| Use case | Multi-tenant cloud, Windows+Linux mix | Microservices, CI/CD |
+
+**Why this matters:** Azure runs on Hyper-V; AWS on Xen and Nitro (KVM-based). Understanding VM overhead justifies container migration decisions. Hyper-V isolation in Windows Containers adds VM security to containers.
+
+**💡 Production Example:** AWS Nitro System (2017+) offloads hypervisor functions to dedicated hardware cards, reducing virtualization overhead to <5%. This allows EC2 instances to claim "bare metal performance." Azure Hyper-V underpins Azure VMs and Azure Kubernetes Service node pools.
