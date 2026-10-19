@@ -16,6 +16,7 @@
 8. [Pipes](#8-pipes)
 9. [HTTP & Interceptors](#9-http--interceptors)
 10. [Angular Compilation, Build & Optimization](#10-angular-compilation-build--optimization)
+11. [Frontend Design Patterns](#frontend-design-patterns)
 
 ---
 
@@ -3578,3 +3579,1023 @@ sequenceDiagram
     end
 ```
 
+---
+
+# Frontend Design Patterns
+
+> Every answer in this section follows the same learning path: **question → answer → problem solved → before the pattern → wrong example → correct example → how it works afterward**. The examples use Angular and TypeScript, but the design ideas apply to most component-based frontend frameworks.
+
+## FDP-Q1. Container and Presentational Component Pattern
+
+**Question:** What is the Container/Presentational pattern, what problem does it solve, and how is it used in Angular?
+
+**Answer:** A container component handles data loading, state, routing, and application actions. A presentational component receives data through inputs, renders it, and emits user intentions through outputs. The presentational component does not know where the data came from.
+
+**What problem does this concept solve?** It separates application behavior from UI rendering. This makes visual components reusable, easier to test, and less dependent on HTTP services or global state.
+
+**Before this pattern:** One large component fetched products, filtered them, managed loading, navigated, displayed cards, and updated the cart. A visual change could accidentally affect business logic, and the product card could not be reused with mock or cached data.
+
+❌ **Wrong example — the child component owns everything:**
+
+```typescript
+@Component({ selector: 'app-product-list', template: `...` })
+export class ProductListComponent {
+  private http = inject(HttpClient);
+  private router = inject(Router);
+  products: Product[] = [];
+
+  ngOnInit() {
+    this.http.get<Product[]>('/api/products')
+      .subscribe(items => this.products = items);
+  }
+
+  buy(product: Product) {
+    this.http.post('/api/cart', { productId: product.id }).subscribe();
+    this.router.navigate(['/cart']);
+  }
+}
+```
+
+✅ **Correct example — container coordinates, view renders:**
+
+```typescript
+@Component({
+  selector: 'app-product-page',
+  template: `
+    <app-product-list
+      [products]="products()"
+      [loading]="loading()"
+      (productSelected)="addToCart($event)" />
+  `
+})
+export class ProductPageComponent {
+  private facade = inject(ProductFacade);
+  products = this.facade.products;
+  loading = this.facade.loading;
+
+  addToCart(product: Product) {
+    this.facade.addToCart(product.id);
+  }
+}
+
+@Component({
+  selector: 'app-product-list',
+  template: `
+    @if (loading()) { <p>Loading...</p> }
+    @for (product of products(); track product.id) {
+      <button (click)="productSelected.emit(product)">{{ product.name }}</button>
+    }
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ProductListComponent {
+  products = input.required<Product[]>();
+  loading = input(false);
+  productSelected = output<Product>();
+}
+```
+
+**How it works after this pattern:** The page container decides where products come from and what “add to cart” means. The list only describes the UI contract. Storybook, unit tests, or another page can reuse the list by supplying different inputs.
+
+**When not to use it:** Do not split every two-line component. Use the separation when a component mixes significant orchestration with reusable rendering.
+
+### Practical walkthrough — Container and presentational components: show a booking list
+
+#### Before the pattern
+
+`BookingListComponent` fetches data, parses API errors, stores loading state, checks permissions, opens dialogs, and renders rows. A simple row-design change requires mocking HTTP, router, and authorization. Reusing the list in an admin page triggers a tangle of inputs and flags.
+
+#### After the pattern
+
+The container owns orchestration: it calls the facade, exposes `vm`, and handles navigation. `BookingListViewComponent` accepts `bookings`, `loading`, and `canCancel` as inputs, then emits `cancel` events.
+
+```text
+BookingListPage (data + decisions) -> BookingListView (display + events)
+```
+
+**What changed:** the view can be tested with plain input data, while the container is tested for decisions. Do not split a three-line component just because the name exists; split when data/orchestration and rendering change for different reasons.
+
+**Build it:** render the view with empty, loading, error, and populated input data without configuring `HttpClient`.
+
+---
+
+## FDP-Q2. Facade Pattern
+
+**Question:** What is the Facade pattern in frontend applications, and why place it between components and application services?
+
+**Answer:** A facade exposes a small, feature-focused API over several lower-level services, stores, and HTTP calls. Components ask the facade for user-facing operations instead of coordinating implementation details themselves.
+
+**What problem does this concept solve?** It reduces component coupling and prevents UI code from knowing how many services, state containers, or API calls are required for one action.
+
+**Before this pattern:** A checkout component called cart, inventory, coupon, payment, analytics, and router services directly. Tests required many mocks, and changing the checkout workflow required editing the component.
+
+❌ **Wrong example — orchestration leaks into the component:**
+
+```typescript
+checkout() {
+  this.inventory.reserve(this.cart.items()).subscribe(reservation => {
+    this.payment.charge(this.card, this.cart.total()).subscribe(receipt => {
+      this.analytics.track('purchase', receipt.id);
+      this.cart.clear();
+      this.router.navigate(['/success', receipt.id]);
+    });
+  });
+}
+```
+
+✅ **Correct example — one feature API hides coordination:**
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class CheckoutFacade {
+  private api = inject(CheckoutApi);
+  private router = inject(Router);
+  private analytics = inject(AnalyticsService);
+
+  readonly submitting = signal(false);
+  readonly error = signal<string | null>(null);
+
+  submit(command: CheckoutCommand) {
+    this.submitting.set(true);
+    this.api.checkout(command).pipe(finalize(() => this.submitting.set(false)))
+      .subscribe({
+        next: receipt => {
+          this.analytics.track('purchase', receipt.id);
+          this.router.navigate(['/success', receipt.id]);
+        },
+        error: () => this.error.set('Checkout failed. Please try again.')
+      });
+  }
+}
+
+@Component({ template: `<button (click)="submit()">Pay</button>` })
+export class CheckoutPageComponent {
+  facade = inject(CheckoutFacade);
+  submit() { this.facade.submit(this.buildCommand()); }
+}
+```
+
+**How it works after this pattern:** The component translates clicks into feature actions. The facade owns coordination and exposes UI-ready state. Backend or state-management changes do not force template components to change.
+
+**When not to use it:** A facade that only renames every method of one service adds indirection without simplifying anything.
+
+### Practical walkthrough — Facade: hide several state and API details
+
+#### Before the pattern
+
+Five components inject `HttpClient`, `ActivatedRoute`, a store, and a notification service. Each component knows endpoint URLs and repeats when to refresh bookings. A backend URL change or state-library migration touches every screen.
+
+#### After the pattern
+
+`BookingsFacade` exposes intentions (`load`, `cancel`) and a small view model (`bookings`, `loading`, `error`). Internally it coordinates the API and state store.
+
+```text
+Component -> BookingsFacade -> API + Store + Notification
+```
+
+**What changed:** UI code talks in product language, and the state/API mechanism is replaceable. A facade must not become a giant “everything service”; keep it around one feature boundary.
+
+**Build it:** replace a direct `HttpClient` call in two components with one facade method and show that only the facade knows `/api/bookings`.
+
+---
+
+## FDP-Q3. Adapter Pattern
+
+**Question:** How does the Adapter pattern protect frontend code from inconsistent API or third-party data formats?
+
+**Answer:** An adapter converts an external data shape into the stable model expected by the application. Only the adapter understands provider-specific field names, null rules, dates, or version differences.
+
+**What problem does this concept solve?** It prevents backend DTOs and third-party schemas from spreading through components. It also provides one place to validate and normalize data.
+
+**Before this pattern:** Every component checked whether a customer was returned as `first_name`, `firstName`, or `display_name`. Date parsing and null handling differed from screen to screen.
+
+❌ **Wrong example — provider details leak into the template:**
+
+```html
+<h2>{{ apiUser.display_name || apiUser.first_name + ' ' + apiUser.last_name }}</h2>
+<p>{{ apiUser.created_at | date }}</p>
+```
+
+✅ **Correct example — adapt at the boundary:**
+
+```typescript
+interface UserDto {
+  user_id: string;
+  display_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  created_at: string;
+}
+
+interface UserViewModel {
+  id: string;
+  name: string;
+  createdAt: Date;
+}
+
+function adaptUser(dto: UserDto): UserViewModel {
+  const fallbackName = [dto.first_name, dto.last_name].filter(Boolean).join(' ');
+  return {
+    id: dto.user_id,
+    name: dto.display_name?.trim() || fallbackName || 'Unknown user',
+    createdAt: new Date(dto.created_at)
+  };
+}
+
+getUser(id: string) {
+  return this.http.get<UserDto>(`/api/users/${id}`).pipe(map(adaptUser));
+}
+```
+
+**How it works after this pattern:** Components receive one predictable `UserViewModel`. If the provider releases a new schema, only the boundary adapter and its contract tests change.
+
+**When not to use it:** Do not create duplicate models when the external contract is already stable, internal, and exactly matches what the UI needs.
+
+### Practical walkthrough — Adapter: normalize an unstable API shape
+
+#### Before the pattern
+
+Templates contain `booking.start_time ?? booking.startTime`, compare string statuses, and format currencies with provider-specific fields. When the API changes `guest_name` to a nested `guest.name`, every component breaks.
+
+#### After the pattern
+
+An adapter converts `BookingApiDto` into a stable `Booking` view/domain model at the HTTP boundary.
+
+```text
+API DTO -> BookingAdapter -> Booking { guestName, startsAt, isCancelable }
+```
+
+**What changed:** the rest of the UI depends on one local language. Put parsing, date conversion, defaults, and compatibility rules in the adapter; do not let a missing API field silently become a dangerous default.
+
+**Build it:** feed two API versions into the adapter and assert both create the same `Booking` model.
+
+---
+
+## FDP-Q4. Repository Pattern for Client Data Access
+
+**Question:** What does the Repository pattern mean in a frontend application?
+
+**Answer:** A frontend repository provides intention-based access to data while hiding whether that data comes from HTTP, IndexedDB, a cache, or a test double.
+
+**What problem does this concept solve?** It keeps transport and persistence details out of feature logic and allows offline, cached, or alternative implementations behind the same contract.
+
+**Before this pattern:** Components built URLs, HTTP parameters, cache keys, and local-storage rules themselves. The same product query behaved differently on different screens.
+
+❌ **Wrong example — storage decisions inside a component:**
+
+```typescript
+loadProducts() {
+  const cached = localStorage.getItem('products');
+  if (cached) this.products = JSON.parse(cached);
+  else this.http.get<Product[]>('/api/v2/products?active=true')
+    .subscribe(items => localStorage.setItem('products', JSON.stringify(items)));
+}
+```
+
+✅ **Correct example — depend on an explicit repository contract:**
+
+```typescript
+export abstract class ProductRepository {
+  abstract findActive(query: ProductQuery): Observable<Product[]>;
+  abstract findById(id: string): Observable<Product | null>;
+}
+
+@Injectable()
+export class HttpProductRepository implements ProductRepository {
+  private http = inject(HttpClient);
+
+  findActive(query: ProductQuery) {
+    const params = new HttpParams()
+      .set('search', query.search)
+      .set('page', query.page);
+    return this.http.get<ProductDto[]>('/api/products', { params }).pipe(
+      map(items => items.map(adaptProduct))
+    );
+  }
+
+  findById(id: string) {
+    return this.http.get<ProductDto>(`/api/products/${id}`).pipe(map(adaptProduct));
+  }
+}
+
+// Application configuration chooses the implementation.
+{ provide: ProductRepository, useClass: HttpProductRepository }
+```
+
+**How it works after this pattern:** Feature code asks for active products, not for a particular URL or storage mechanism. Tests provide an in-memory repository, while an offline build can use IndexedDB.
+
+**When not to use it:** For a tiny app with one straightforward endpoint, a typed API service may already be the right abstraction.
+
+### Practical walkthrough — Repository: centralize client data access
+
+#### Before the pattern
+
+Every component builds URLs, query parameters, headers, error mapping, and DTO conversion. One list requests `?from=...`, another forgets pagination, and a cancellation button fails to refresh cached data.
+
+#### After the pattern
+
+`BookingsRepository` owns transport operations such as `search(filters)`, `get(id)`, and `cancel(id)`. It delegates DTO translation to adapters and returns application-friendly models.
+
+**What changed:** HTTP policy has one home, so endpoint changes and contract tests are localized. It does not mean copying server-side repository abstractions; a frontend repository represents a remote data source and caching policy.
+
+**Build it:** add a correlation header once in the repository, then confirm no component constructs HTTP headers itself.
+
+---
+
+## FDP-Q5. Observer and Reactive Data-Flow Pattern
+
+**Question:** How does the Observer pattern work in Angular with RxJS or Signals?
+
+**Answer:** A producer exposes changing state, and interested consumers react when that state changes. RxJS Observables model asynchronous streams; Signals model synchronous reactive state and derived values.
+
+**What problem does this concept solve?** It avoids manual polling and scattered callbacks while keeping derived UI synchronized with its sources.
+
+**Before this pattern:** Components copied shared values into local fields and manually notified one another. Some screens showed old cart counts because one update path forgot to refresh them.
+
+❌ **Wrong example — mutable shared state with manual refresh:**
+
+```typescript
+export class CartService {
+  items: CartItem[] = [];
+}
+
+// Every component must remember to call refreshCount().
+this.cart.items.push(item);
+this.header.refreshCount();
+```
+
+✅ **Correct example — publish readonly reactive state:**
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class CartStore {
+  private readonly _items = signal<CartItem[]>([]);
+  readonly items = this._items.asReadonly();
+  readonly count = computed(() => this._items().reduce((n, x) => n + x.quantity, 0));
+  readonly total = computed(() => this._items().reduce((n, x) => n + x.price * x.quantity, 0));
+
+  add(item: CartItem) {
+    this._items.update(items => [...items, item]);
+  }
+}
+
+@Component({ template: `<span>Cart ({{ cart.count() }})</span>` })
+export class HeaderComponent {
+  readonly cart = inject(CartStore);
+}
+```
+
+**How it works after this pattern:** Components read readonly state. When `add` creates a new item array, Angular recalculates `count` and `total`, and only dependent views update.
+
+**When not to use it:** Do not turn simple one-time values into complex event streams. Also avoid public mutable Subjects or Signals that let any component change state without rules.
+
+### Practical walkthrough — Observer/reactive data flow: keep the screen synchronized
+
+#### Before the pattern
+
+The component calls `load()` in several lifecycle hooks, subscribes without cleanup, and manually sets three booleans. A quick route change can let an old response overwrite the newest search result.
+
+#### After the pattern
+
+Route filters and refresh clicks become streams/signals. `switchMap` cancels obsolete searches, one state source derives loading/data/error, and Angular cleans subscriptions through `async` pipe or `takeUntilDestroyed()`.
+
+```text
+filter change -> switchMap(repository.search) -> view model -> template
+```
+
+**What changed:** the UI reacts to changing inputs rather than manually coordinating callbacks. Choose the correct operator: `switchMap` for latest search, `concatMap` for ordered saves, `exhaustMap` to ignore double-submit, and `mergeMap` for independent parallel work.
+
+**Build it:** type “a”, “ab”, “abc” quickly and verify only the `abc` response updates the list.
+
+---
+
+## FDP-Q6. State Machine Pattern
+
+**Question:** Why model complex UI workflows as explicit state machines?
+
+**Answer:** A state machine defines the finite states a feature may occupy and the events allowed to move it between states. Impossible combinations become unrepresentable.
+
+**What problem does this concept solve?** It replaces loosely related booleans and ad hoc conditions with explicit, testable workflow rules.
+
+**Before this pattern:** A payment component used `isLoading`, `isSuccess`, `hasError`, and `isCancelled`. Bugs produced states such as loading and successful at the same time.
+
+❌ **Wrong example — contradictory booleans are possible:**
+
+```typescript
+isLoading = false;
+isSuccess = false;
+hasError = false;
+isCancelled = false;
+
+submit() {
+  this.isLoading = true;
+  // One error path forgets to reset isLoading.
+}
+```
+
+✅ **Correct example — one discriminated state:**
+
+```typescript
+type PaymentState =
+  | { status: 'idle' }
+  | { status: 'submitting' }
+  | { status: 'succeeded'; receiptId: string }
+  | { status: 'failed'; message: string }
+  | { status: 'cancelled' };
+
+state = signal<PaymentState>({ status: 'idle' });
+
+submit(command: PaymentCommand) {
+  if (this.state().status === 'submitting') return;
+  this.state.set({ status: 'submitting' });
+  this.api.pay(command).subscribe({
+    next: result => this.state.set({ status: 'succeeded', receiptId: result.id }),
+    error: () => this.state.set({ status: 'failed', message: 'Payment failed' })
+  });
+}
+```
+
+**How it works after this pattern:** The template switches on `state().status`, and TypeScript narrows the available fields. Tests verify allowed transitions such as `idle → submitting → succeeded` and rejected transitions such as a second submit while processing.
+
+**When not to use it:** A simple toggle does not need a state machine. Use it for multi-step, asynchronous, or regulated workflows.
+
+### Practical walkthrough — State machine: make booking cancellation states legal
+
+#### Before the pattern
+
+The component has `isLoading`, `isCancelled`, `hasError`, and `isConfirming`. Two booleans can be true together, producing an impossible UI such as “cancelled and showing retry” or allowing double submission.
+
+#### After the pattern
+
+Use named states and allowed transitions:
+
+```text
+Idle -> Confirming -> Submitting -> Succeeded
+                   \-> Failed -> Confirming
+```
+
+Buttons and messages derive from the state. `Submitting` disables a second click; `Succeeded` invalidates/reloads the detail; `Failed` carries a retryable error.
+
+**What changed:** invalid combinations are unrepresentable in the model. A full state-machine library is valuable for complex flows; a discriminated union/signal is often enough for a small component.
+
+**Build it:** write a test that attempts `Succeeded -> Submitting` without a new cancellation command and ensure the transition is rejected.
+
+---
+
+## FDP-Q7. Strategy Pattern
+
+**Question:** How does the Strategy pattern remove large condition chains from frontend business behavior?
+
+**Answer:** Strategy defines a family of interchangeable algorithms behind one interface. Runtime context selects the implementation without changing the caller.
+
+**What problem does this concept solve?** It keeps each variation isolated and makes new behavior additive instead of expanding a central `if/else` block.
+
+**Before this pattern:** Discount calculation used a growing chain for regular, premium, employee, regional, and promotional customers. Every change risked breaking unrelated branches.
+
+❌ **Wrong example — behavior grows in one conditional:**
+
+```typescript
+function discount(type: string, total: number) {
+  if (type === 'premium') return total * 0.20;
+  if (type === 'employee') return total * 0.30;
+  if (type === 'seasonal') return total > 1000 ? 150 : 0;
+  return 0;
+}
+```
+
+✅ **Correct example — interchangeable strategies:**
+
+```typescript
+interface DiscountStrategy {
+  calculate(total: number): number;
+}
+
+class PremiumDiscount implements DiscountStrategy {
+  calculate(total: number) { return total * 0.20; }
+}
+
+class ThresholdDiscount implements DiscountStrategy {
+  calculate(total: number) { return total > 1000 ? 150 : 0; }
+}
+
+const strategies: Record<CustomerType, DiscountStrategy> = {
+  regular: { calculate: () => 0 },
+  premium: new PremiumDiscount(),
+  seasonal: new ThresholdDiscount()
+};
+
+const amount = strategies[customer.type].calculate(cart.total);
+```
+
+**How it works after this pattern:** Checkout depends only on `DiscountStrategy`. Each algorithm has focused tests, and a new strategy can be registered without rewriting checkout logic.
+
+**When not to use it:** Two tiny, stable branches may be clearer as a conditional. Apply the pattern when variations change independently or are selected dynamically.
+
+### Practical walkthrough — Strategy: vary validation by country
+
+#### Before the pattern
+
+`AddressComponent` grows a `switch(country)` with postal-code, state, and tax rules. Adding a country edits shared code and makes every path harder to test.
+
+#### After the pattern
+
+Each `AddressValidationStrategy` handles one region. A selector chooses it from a trusted country code; the component calls the stable `validate(address)` method.
+
+**What changed:** rules vary independently and tests are focused. Do not use strategies for two tiny stable conditions—clarity beats ceremony. Keep selection separate from algorithm logic.
+
+**Build it:** add an India strategy and prove that the existing US strategy tests do not change.
+
+---
+
+## FDP-Q8. Factory Pattern
+
+**Question:** When should frontend code use a Factory instead of constructing objects directly?
+
+**Answer:** A factory centralizes creation when selecting or configuring an object requires rules, dependencies, validation, or environment-specific behavior.
+
+**What problem does this concept solve?** It prevents object-creation rules from being duplicated throughout components and keeps callers independent from concrete implementations.
+
+**Before this pattern:** Every page inspected file extensions and manually chose a PDF, image, or video previewer. Some pages forgot unsupported-file handling.
+
+❌ **Wrong example — repeated construction logic:**
+
+```typescript
+if (file.type === 'application/pdf') viewer = new PdfViewer(config.pdfWorker);
+else if (file.type.startsWith('image/')) viewer = new ImageViewer();
+else if (file.type.startsWith('video/')) viewer = new VideoViewer(config.cdn);
+else throw new Error('Unsupported');
+```
+
+✅ **Correct example — one creation policy:**
+
+```typescript
+interface FilePreviewer {
+  supports(file: FileInfo): boolean;
+  open(file: FileInfo): void;
+}
+
+@Injectable({ providedIn: 'root' })
+export class PreviewerFactory {
+  constructor(@Inject(PREVIEWERS) private previewers: FilePreviewer[]) {}
+
+  create(file: FileInfo): FilePreviewer {
+    const previewer = this.previewers.find(x => x.supports(file));
+    if (!previewer) throw new Error(`Unsupported file type: ${file.mimeType}`);
+    return previewer;
+  }
+}
+
+this.previewerFactory.create(file).open(file);
+```
+
+**How it works after this pattern:** Selection and configuration live in one factory. Adding a spreadsheet previewer means registering a new implementation rather than editing every consumer.
+
+**When not to use it:** Direct construction is clearer when there is only one simple implementation and no creation policy.
+
+### Practical walkthrough — Factory: build a correctly configured form
+
+#### Before the pattern
+
+Two screens manually create booking forms. One omits an async availability validator; another uses a different default guest count. The same business input creates inconsistent forms.
+
+#### After the pattern
+
+`BookingFormFactory.create(existingBooking?)` constructs controls, validators, defaults, and conversion rules in one named place.
+
+```text
+Booking data -> FormFactory -> FormGroup with the right rules
+```
+
+**What changed:** construction policy is shared and testable. A factory should return a valid object/form, not hide all UI decisions or turn a simple object literal into a ceremony.
+
+**Build it:** test create and edit modes; assert both include the availability validator and that edit mode retains server values.
+
+---
+
+## FDP-Q9. Command Pattern
+
+**Question:** How does the Command pattern support undo, redo, queuing, or audit history in frontend applications?
+
+**Answer:** A command represents a user action as an object with an execution method and, where possible, an inverse operation. The caller invokes commands without knowing their internal steps.
+
+**What problem does this concept solve?** It turns actions into data that can be stored, replayed, queued, audited, or reversed.
+
+**Before this pattern:** A design editor directly modified canvas objects from click handlers. There was no reliable way to undo one change or replay offline edits.
+
+❌ **Wrong example — the click permanently mutates state:**
+
+```typescript
+moveRight(shape: Shape) {
+  shape.x += 10;
+  this.save(shape);
+}
+```
+
+✅ **Correct example — action and inverse action travel together:**
+
+```typescript
+interface Command {
+  execute(): Promise<void>;
+  undo(): Promise<void>;
+}
+
+class MoveShapeCommand implements Command {
+  private readonly before: { x: number; y: number };
+
+  constructor(
+    private readonly shape: Shape,
+    private readonly dx: number,
+    private readonly dy: number,
+    private readonly documents: DocumentRepository
+  ) {
+    this.before = { x: shape.x, y: shape.y };
+  }
+
+  async execute() {
+    this.shape.x = this.before.x + this.dx;
+    this.shape.y = this.before.y + this.dy;
+    await this.documents.savePosition(this.shape.id, this.shape.x, this.shape.y);
+  }
+
+  async undo() {
+    this.shape.x = this.before.x;
+    this.shape.y = this.before.y;
+    // Undo is a new persisted operation, not only a local memory rewind.
+    await this.documents.savePosition(this.shape.id, this.shape.x, this.shape.y);
+  }
+}
+
+class CommandHistory {
+  private done: Command[] = [];
+
+  async run(command: Command) {
+    await command.execute();
+    this.done.push(command); // store only after persistence succeeds
+  }
+
+  async undo() {
+    const command = this.done.at(-1);
+    if (!command) return;
+    await command.undo();
+    this.done.pop();
+  }
+}
+
+await history.run(new MoveShapeCommand(shape, 10, 0, documents));
+await history.undo();
+```
+
+**How it works after this pattern:** Buttons create commands, while a history service executes and stores them only after persistence succeeds. Undo writes a compensating operation, so the server and other clients do not remain at the moved position while only this browser moves back.
+
+**When not to use it:** Ordinary form submission rarely needs command objects. Use it when actions require history, scheduling, retries, or reversal.
+
+### Practical walkthrough — Command: make user actions explicit and reversible when needed
+
+#### Before the pattern
+
+Click handlers directly mutate a local list, call APIs, show toasts, and attempt ad-hoc undo. Keyboard shortcuts and toolbar buttons duplicate the cancellation procedure.
+
+#### After the pattern
+
+Create a `CancelBookingCommand` with `execute()` and, when product semantics allow it, `undo()`/compensation. Buttons, menus, and keyboard shortcuts invoke the same command path.
+
+**What changed:** intent is a first-class object that can be queued, logged, disabled, retried, or undone consistently. UI undo normally means issuing a compensating server command, not rewinding local state while the server remains cancelled.
+
+**Build it:** use one cancel command from a button and `Ctrl+Backspace`, then log its correlation ID for both entry points.
+
+---
+
+## FDP-Q10. Mediator Pattern
+
+**Question:** How does the Mediator pattern reduce direct dependencies between frontend components or feature services?
+
+**Answer:** A mediator coordinates interactions among participants so they communicate through one workflow-focused object rather than referencing one another directly.
+
+**What problem does this concept solve?** It prevents a network of component-to-component dependencies and places cross-feature coordination in one testable location.
+
+**Before this pattern:** Cart, coupon, shipping, and payment components held references to one another or emitted chains of events through several parent levels.
+
+❌ **Wrong example — sibling components control each other:**
+
+```typescript
+applyCoupon(code: string) {
+  this.cartComponent.recalculate(code);
+  this.shippingComponent.refresh(this.cartComponent.total);
+  this.paymentComponent.updateAmount(this.cartComponent.total);
+}
+```
+
+✅ **Correct example — a checkout mediator coordinates the workflow:**
+
+```typescript
+@Injectable()
+export class CheckoutMediator {
+  private cart = inject(CartStore);
+  private pricing = inject(PricingService);
+  private shipping = inject(ShippingService);
+
+  readonly quote = signal<CheckoutQuote | null>(null);
+
+  applyCoupon(code: string) {
+    return this.pricing.quote(this.cart.items(), code).pipe(
+      switchMap(price => this.shipping.options(price).pipe(
+        map(options => ({ price, options }))
+      )),
+      tap(quote => this.quote.set(quote))
+    );
+  }
+}
+```
+
+**How it works after this pattern:** Components send user intentions to the mediator and render its state. They no longer know which sibling must refresh or in what order.
+
+**When not to use it:** Avoid turning the mediator into a “god service.” Keep it scoped to one workflow and leave domain rules in the appropriate services.
+
+### Practical walkthrough — Mediator: coordinate sibling widgets without parent-child chains
+
+#### Before the pattern
+
+A calendar emits to its parent, which emits to a dashboard, which calls a filter panel, which updates a map. New siblings require more outputs and the tree becomes the accidental integration API.
+
+#### After the pattern
+
+A feature-scoped mediator/event service publishes a typed `BookingSelected` event or shared selected-booking signal. Calendar, map, and details panel communicate through the feature contract.
+
+**What changed:** sibling coordination no longer depends on DOM hierarchy. Scope the mediator to the feature and use explicit event names; a global event bus makes ownership and debugging disappear.
+
+**Build it:** move the map beside—not under—the calendar and confirm selection behavior needs no parent wiring changes.
+
+---
+
+## FDP-Q11. Proxy and HTTP Interceptor Pattern
+
+**Question:** How do Angular HTTP interceptors apply the Proxy or Chain-of-Responsibility pattern?
+
+**Answer:** An interceptor stands between callers and `HttpClient`, adding cross-cutting behavior such as authentication, correlation IDs, timing, or standardized error mapping without changing every request call.
+
+**What problem does this concept solve?** It centralizes behavior that should apply consistently to many requests and prevents duplicated request decoration.
+
+**Before this pattern:** Every API service manually added the token and error handler. One forgotten header caused random authorization failures.
+
+❌ **Wrong example — repeated cross-cutting code:**
+
+```typescript
+getOrders() {
+  const token = this.auth.getToken();
+  return this.http.get('/api/orders', {
+    headers: { Authorization: `Bearer ${token}`, 'X-Correlation-ID': crypto.randomUUID() }
+  }).pipe(catchError(this.handleError));
+}
+```
+
+✅ **Correct example — an interceptor decorates matching requests:**
+
+```typescript
+export const authInterceptor: HttpInterceptorFn = (request, next) => {
+  const auth = inject(AuthService);
+  const isOwnApi = request.url.startsWith(environment.apiBaseUrl);
+  if (!isOwnApi) return next(request); // never leak token to third-party URLs
+
+  const token = auth.accessToken();
+  const secured = request.clone({
+    setHeaders: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      'X-Correlation-ID': crypto.randomUUID()
+    }
+  });
+  return next(secured);
+};
+```
+
+**How it works after this pattern:** API services describe endpoints and payloads. The interceptor pipeline consistently adds approved cross-cutting behavior, and each interceptor remains small and ordered.
+
+**When not to use it:** Do not hide business workflows or indiscriminately retry writes in an interceptor. Cross-cutting transport concerns belong here; domain behavior does not.
+
+### Practical walkthrough — Proxy/HTTP interceptor: add cross-cutting HTTP behavior once
+
+#### Before the pattern
+
+Every repository attaches auth tokens, correlation IDs, error logging, and a `401` redirect. A new endpoint forgets one header, while another retries a non-idempotent POST unsafely.
+
+#### After the pattern
+
+Angular interceptors wrap all selected requests. One adds immutable headers, one maps auth failures, one traces; the repository stays about bookings.
+
+```text
+Repository -> auth interceptor -> correlation interceptor -> error mapper -> HttpClient
+```
+
+**What changed:** transport-wide policy is ordered and reusable. Interceptors cannot replace domain-level authorization or decide product-specific error messages. Document ordering and bypass rules for login/refresh endpoints.
+
+**Build it:** make two repositories and verify both outbound requests contain exactly one correlation ID.
+
+---
+
+## FDP-Q12. Store and Unidirectional Data-Flow Pattern
+
+**Question:** What problem does a feature store and unidirectional data flow solve?
+
+**Answer:** State flows from one controlled store to views, while views send actions back to the store. Updates create new state rather than allowing components to mutate shared objects directly.
+
+**What problem does this concept solve?** It makes state changes predictable, traceable, and testable when several components depend on the same feature data.
+
+**Before this pattern:** Components shared mutable objects and updated them directly. A filtered list, count badge, and detail view could disagree because each maintained its own copy.
+
+❌ **Wrong example — anyone can mutate shared state:**
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class BookingState {
+  bookings: Booking[] = [];
+}
+
+this.state.bookings.push(newBooking);
+this.state.bookings[0].status = 'Cancelled';
+```
+
+✅ **Correct example — readonly state and named updates:**
+
+```typescript
+interface BookingFeatureState {
+  bookings: Booking[];
+  loading: boolean;
+  error: string | null;
+}
+
+@Injectable()
+export class BookingStore {
+  private readonly _state = signal<BookingFeatureState>({
+    bookings: [], loading: false, error: null
+  });
+
+  readonly state = this._state.asReadonly();
+  readonly upcoming = computed(() =>
+    this._state().bookings.filter(x => new Date(x.startsAt) > new Date())
+  );
+
+  bookingAdded(booking: Booking) {
+    this._state.update(s => ({ ...s, bookings: [...s.bookings, booking] }));
+  }
+}
+```
+
+**How it works after this pattern:** Components select readonly state and request named changes. Every update follows one direction, derived values stay synchronized, and mutation logic has focused tests.
+
+**When not to use it:** Do not introduce a global store for local input state or a small isolated component. Keep state as close as practical to where it is used.
+
+### Practical walkthrough — Store/unidirectional flow: avoid competing mutations
+
+#### Before the pattern
+
+List, detail, and calendar components each keep their own mutable booking array. Cancelling from one view leaves another stale; debugging means searching for every mutation.
+
+#### After the pattern
+
+User events dispatch intentions; a reducer/store produces the next state; selectors derive screen-specific views; effects perform remote I/O and dispatch result events.
+
+```text
+Intent -> reducer state -> selectors -> view
+              ^                |
+              +-- effect result+
+```
+
+**What changed:** state transitions have a traceable path and all views share a source of truth. Do not introduce a global store for isolated local form state; use component state until sharing/time-travel/debugging value is real.
+
+**Build it:** cancel a booking from detail and verify list and calendar update from one state transition.
+
+---
+
+## FDP-Q13. Decorator Pattern with Directives and Pipes
+
+**Question:** How can Angular directives apply the Decorator pattern to UI behavior?
+
+**Answer:** A directive attaches reusable behavior to an existing element or component without changing its class. It decorates the host with events, attributes, styles, or accessibility behavior.
+
+**What problem does this concept solve?** It prevents the same UI behavior from being copied into many components or encoded in a large base class.
+
+**Before this pattern:** Every button separately implemented permission checks, disabled styling, tooltip text, and click prevention.
+
+❌ **Wrong example — copied permission behavior:**
+
+```html
+<button
+  [disabled]="!permissions.can('Users.Delete')"
+  [title]="permissions.can('Users.Delete') ? '' : 'Not allowed'"
+  (click)="permissions.can('Users.Delete') && deleteUser()">
+  Delete
+</button>
+```
+
+✅ **Correct example — decorate any element consistently:**
+
+```typescript
+@Directive({ selector: '[appRequiresPermission]' })
+export class RequiresPermissionDirective {
+  permission = input.required<string>({ alias: 'appRequiresPermission' });
+  private auth = inject(PermissionService);
+  private host = inject(ElementRef<HTMLButtonElement>);
+
+  constructor() {
+    effect(() => {
+      const allowed = this.auth.has(this.permission());
+      this.host.nativeElement.disabled = !allowed;
+      this.host.nativeElement.title = allowed ? '' : 'You do not have permission';
+    });
+  }
+}
+```
+
+```html
+<button appRequiresPermission="Users.Delete" (click)="deleteUser()">Delete</button>
+```
+
+**How it works after this pattern:** Permission presentation is consistent and reusable. The API must still enforce authorization; the directive improves user experience but is not a security boundary.
+
+**When not to use it:** If behavior changes the meaning or structure of an entire feature, a dedicated component is usually clearer than a directive.
+
+### Practical walkthrough — Decorator/directive/pipe: attach one reusable behavior to many elements
+
+#### Before the pattern
+
+Every delete button repeats `permissions.can`, disabled state, tooltip text, and click guards. One forgets the tooltip; another uses a different permission key.
+
+#### After the pattern
+
+`appRequiresPermission` consistently adjusts presentation and interaction. A pipe/decorator can similarly add formatting behavior without changing every host component.
+
+**What changed:** orthogonal UI behavior becomes composable. It is only a usability enhancement: the server must independently authorize delete requests. Prefer a dedicated component when behavior changes the entire feature layout rather than one host concern.
+
+**Build it:** attach the directive to menu item and button; test forbidden state and ensure a manual HTTP request is still rejected server-side.
+
+---
+
+## FDP-Q14. Composite Pattern for Recursive UI
+
+**Question:** How does the Composite pattern simplify trees such as menus, comments, folders, or permission hierarchies?
+
+**Answer:** Composite gives individual items and groups a compatible interface so callers can treat a leaf and a nested collection uniformly.
+
+**What problem does this concept solve?** It removes separate rendering and operation logic for every nesting level and supports arbitrarily deep trees.
+
+**Before this pattern:** The application had separate code for root menu items, child items, and grandchildren. Adding another level required another loop and template.
+
+❌ **Wrong example — hard-coded depth:**
+
+```html
+@for (parent of menu; track parent.id) {
+  <div>{{ parent.label }}</div>
+  @for (child of parent.children; track child.id) {
+    <div class="level-2">{{ child.label }}</div>
+    <!-- A third level needs another copied block. -->
+  }
+}
+```
+
+✅ **Correct example — one recursive component handles leaves and groups:**
+
+```typescript
+interface MenuNode {
+  id: string;
+  label: string;
+  route?: string;
+  children?: MenuNode[];
+}
+
+@Component({
+  selector: 'app-menu-node',
+  imports: [RouterLink],
+  template: `
+    <a [routerLink]="node().route ?? null">{{ node().label }}</a>
+    @if (node().children?.length) {
+      <ul>
+        @for (child of node().children; track child.id) {
+          <li><app-menu-node [node]="child" /></li>
+        }
+      </ul>
+    }
+  `
+})
+export class MenuNodeComponent {
+  node = input.required<MenuNode>();
+}
+```
+
+**How it works after this pattern:** The same component renders a leaf or a branch. Filtering, permission checks, and keyboard navigation can operate on the common `MenuNode` structure.
+
+**When not to use it:** A fixed two-level layout with very different designs at each level may be clearer with separate components.
+
+### Practical walkthrough — Composite: render a deep navigation tree
+
+#### Before the pattern
+
+The template has nested loops for parent, child, and grandchild. A fourth level requires copied HTML, accessibility attributes diverge, and a recursive permission filter is impossible to reuse cleanly.
+
+#### After the pattern
+
+One `MenuNodeComponent` receives a `MenuNode` and recursively renders each child. Leaf and branch share the same data contract, while leaf-only behavior uses optional `route` and branch-only behavior uses `children`.
+
+**What changed:** arbitrary depth needs no new template structure. Add cycle protection/server validation—recursive rendering assumes the tree is acyclic—and consider virtual rendering for very large trees.
+
+**Build it:** provide a five-level menu and test that keyboard focus/ARIA levels remain correct at every depth.
+
+---

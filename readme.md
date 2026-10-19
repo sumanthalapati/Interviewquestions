@@ -51,6 +51,17 @@
 
 ---
 
+## Pattern Deep-Dive Guides
+
+- [Frontend Design Patterns](angular.md#frontend-design-patterns) - Angular and TypeScript component, state, adapter, facade, command, strategy, and composition patterns.
+- [Backend Design Patterns](backend-design-patterns.md) - 16 ASP.NET Core and C# application patterns.
+- [Distributed Systems Patterns](distributed-systems-patterns.md) - 20 resilience, messaging, consistency, partitioning, and recovery patterns.
+- [Dependency Injection](dependency-injection.md) - 22 frontend and backend DI types, scopes, provider patterns, and anti-patterns.
+
+Each guide uses the same learning format: the problem, how code worked before, a wrong example, a correct example, and how the system behaves afterward.
+
+---
+
 # 1. C# Core Concepts
 
 ---
@@ -4608,4 +4619,3 @@ class Child2 : Base2 { public override void Log() => Console.WriteLine("Child");
 Base2 obj2 = new Child2();
 obj2.Log(); // "Child" — correct polymorphic call
 ```
-

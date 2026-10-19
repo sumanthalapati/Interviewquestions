@@ -3352,3 +3352,989 @@ sequenceDiagram
 **Why this matters:** AI system design is now standard at FAANG. Understanding inference infrastructure (vLLM, continuous batching, PagedAttention) differentiates senior candidates.
 
 **💡 Production Example:** OpenAI serves 100M users/week. They use custom NVIDIA H100 clusters with vLLM-style continuous batching to achieve ~40 tokens/second throughput per user while serving thousands concurrently. Cold start latency < 300ms (first token).
+
+---
+
+## System Design Academy — Additional Interview Questions
+
+> Inspired by the case-study and interview topic index in [systemdesign42/system-design-academy](https://github.com/systemdesign42/system-design-academy). Questions are rewritten as original practice prompts; answers below are concise interview frameworks rather than copies of the linked articles.
+
+### Academy Interview Coverage Map
+
+| Academy topic | Coverage in this guide |
+|---|---|
+| Design Airbnb | [Q54](#q54-design-airbnb) |
+| Design ChatGPT | [Q59](#q59-design-chatgpt--ai-chat-service) |
+| Design Spotify | [Q55](#q55-design-spotify) |
+| Design Web Crawler and Search Engine | [Q58](#q58-design-a-web-crawler) plus Google Search in the Big Tech section |
+| Design Amazon S3 | [Q56](#q56-design-amazon-s3-object-storage) |
+| Design Twitter/X Timeline | [Q57](#q57-design-twitter-timeline) |
+| Design WhatsApp | Chat System and Meta/WhatsApp sections above |
+| Design YouTube | Google/YouTube section above |
+
+The following questions turn additional Academy case studies into interview-ready exercises.
+
+### Q60: Design a Virtual Waiting Room for Flash Sales
+
+**Q:** Design a waiting room that protects ticketing or commerce systems when millions of users arrive at once. Preserve fairness, resist bots, and never admit more traffic than checkout can handle.
+
+**What problem does this concept solve?** It prevents a sudden traffic spike from exhausting checkout threads, database connections, and inventory locks while giving users a fair, understandable admission process.
+
+**Before this concept:** Every visitor went directly to checkout. Autoscaling reacted after the spike had already overloaded shared dependencies, and aggressive refreshes made the failure worse.
+
+❌ **Wrong example:** Route all sale traffic directly to checkout and retry every failure immediately. More retries create a retry storm, healthy requests time out, and bots win by opening more connections.
+
+✅ **After applying the concept:** The waiting room absorbs arrivals, gives each session a signed queue token, and admits only the number of users that current checkout capacity can handle.
+
+**How it works now:** Checkout sees controlled traffic instead of the full crowd. Capacity feedback adjusts admission, and a user can reconnect without losing position because queue identity is durable.
+
+**A:** Separate uncontrolled arrival traffic from the protected purchase path. The edge issues a signed queue token, the queue service assigns an immutable position or randomized batch, and an admission controller releases users according to live checkout capacity.
+
+**Core flow:**
+1. CDN absorbs static traffic and routes sale requests to the waiting room.
+2. Queue service creates a signed token containing event, user/session, issue time, and nonce.
+3. Clients poll with jitter or receive SSE updates; polling must not change position.
+4. Admission controller consumes capacity signals and issues a short-lived admission token.
+5. Checkout validates the token and enforces a hard concurrency limit.
+
+```mermaid
+flowchart LR
+    U[Users] --> CDN[CDN and Bot Filter]
+    CDN --> Q[Waiting Room]
+    Q --> QS[(Durable Queue State)]
+    Q --> AC[Admission Controller]
+    C[Checkout Capacity Metrics] --> AC
+    AC -->|Signed admission token| CO[Checkout]
+    CO --> I[(Inventory)]
+```
+
+**Scaling and failure handling:**
+- Partition by sale or event ID so one launch cannot starve another.
+- Replicate queue state and make token issuance idempotent.
+- Fail closed when capacity telemetry is stale; slow admission rather than overload checkout.
+- Rate-limit token creation by account, device, IP reputation, and behavioral signals.
+- Do not expose exact global position if doing so creates synchronized polling spikes.
+
+**Key trade-off:** Strict first-come-first-served ordering looks fair but rewards network proximity and bots. Randomizing users who arrive within a published pre-sale window can be fairer and easier to scale.
+
+**Interviewer follow-ups:** How do you prevent token sharing? What happens if Redis fails? How would you support accessible users or priority memberships without creating an invisible bypass?
+
+#### Implementation comparison — Virtual waiting room
+
+```csharp
+// BEFORE: every browser reaches scarce checkout capacity directly.
+[HttpPost("checkout")]
+public async Task<IActionResult> Checkout(CheckoutRequest request) =>
+    Ok(await checkout.PlaceOrderAsync(request)); // flash crowd overloads all downstream pools
+
+// AFTER: admission is a durable, rate-controlled operation.
+[HttpPost("waiting-room/enter")]
+public async Task<QueueTicket> Enter(string saleId, string anonymousId, CancellationToken ct) =>
+    await queue.EnqueueOnceAsync(saleId, anonymousId, ct); // stable identity -> one position
+
+public async Task AdmitLoop(CancellationToken ct) {
+    while (!ct.IsCancellationRequested)
+        await queue.AdmitNextAsync("sale-2026", checkoutCapacity.AvailableSlots, ct);
+}
+```
+
+**Before flow:** refresh creates more direct checkout calls; the fastest/retrying users get an advantage; database locks and connection pools collapse. **After flow:** the ticket is durable, the admission worker releases a bounded number of signed admission tokens, and checkout rejects missing/expired tokens. The queue is not inventory: reserve inventory only when the admitted customer starts a short checkout hold.
+
+---
+
+### Q61: Design Dropbox-Style File Synchronization
+
+**Q:** Synchronize files across desktop and mobile clients, including offline edits, large files, resumable uploads, deduplication, and conflict recovery.
+
+**What problem does this concept solve?** It keeps several device copies convergent without repeatedly transferring whole files or silently losing offline changes.
+
+**Before this concept:** A client uploaded the complete file whenever it changed, and the most recent upload overwrote the earlier version. Slow networks restarted from zero, and simultaneous offline edits lost data.
+
+❌ **Wrong example:** `PUT /files/report.docx` replaces the current object with no base version, manifest, checksum, or conflict check.
+
+✅ **After applying the concept:** Files become immutable versions composed of content-addressed chunks. Commits include the base version, uploads resume by chunk, and conflicting edits are preserved.
+
+**How it works now:** Devices fetch a change cursor, upload only missing chunks, and atomically commit a manifest. Optimistic concurrency either advances the version or creates an explicit conflict copy.
+
+**A:** Separate metadata from blob content. Clients watch the local filesystem, chunk changed files, hash chunks, upload only missing content, and commit a new immutable file version through the metadata service.
+
+**Data model:**
+- `File(file_id, namespace_id, path, current_version, deleted_at)`
+- `Version(file_id, version, manifest_hash, actor, created_at)`
+- `Manifest(manifest_hash, ordered_chunk_hashes)`
+- `Chunk(chunk_hash, size, storage_location, reference_count)`
+- `Cursor(namespace_id, sequence)` for incremental change feeds
+
+```mermaid
+sequenceDiagram
+    participant C as Sync Client
+    participant M as Metadata Service
+    participant B as Blob Service
+    participant O as Object Storage
+    C->>M: Compare manifest and base version
+    M-->>C: Missing chunk hashes
+    C->>B: Upload missing chunks
+    B->>O: Store content-addressed chunks
+    C->>M: Commit manifest with expected base version
+    M-->>C: New version and change cursor
+```
+
+**Conflict handling:** An optimistic version check detects two offline clients editing the same base version. Preserve both results as conflict copies instead of silently overwriting data. Tombstones represent deletion so offline devices do not resurrect removed files.
+
+**Scaling and reliability:**
+- Content-addressed chunks provide deduplication and integrity checks.
+- Multipart upload plus per-chunk checksums makes retries inexpensive.
+- A monotonic per-namespace change log enables efficient incremental sync.
+- Garbage-collect unreferenced chunks only after a retention window and backup verification.
+
+**Key trade-off:** Smaller chunks improve deduplication but increase manifests, metadata operations, and request overhead. Content-defined chunking preserves reuse when bytes are inserted near the beginning of a file.
+
+**Interviewer follow-ups:** How are renames detected? Can global deduplication leak whether another user owns a file? How do you restore a folder to an earlier point in time?
+
+#### Implementation comparison — Dropbox-style file synchronization
+
+```text
+BEFORE
+PUT /files/report.docx (entire bytes)
+  -> overwrite current file row              # last writer silently wins
+
+AFTER
+GET /changes?cursor=814 -> manifest/version changes
+PUT /chunks/{hash}     -> content-addressed immutable chunks
+POST /files/{id}/commit { baseVersion: 7, chunkHashes: [...] }
+  -> atomically append manifest version 8 OR return 409 conflict
+```
+
+**Before failure:** a 1 GB upload restarts after a network break and two offline devices overwrite one another. **After flow:** client hashes/chunks locally, uploads only missing chunks, and commits a new manifest using compare-and-swap. The server increments reference counts transactionally; a garbage collector deletes unreferenced chunks only after a retention window. A version mismatch creates a conflict record or merge flow rather than destroying data.
+
+---
+
+### Q62: Design Zoom-Style Video Conferencing
+
+**Q:** Design a video meeting service supporting hundreds of participants, screen sharing, recording, weak networks, and regional failures.
+
+**What problem does this concept solve?** It delivers real-time media to many participants without requiring every device to upload a separate stream to every other device.
+
+**Before this concept:** A full-mesh call connected every participant directly to all others. Upload bandwidth and CPU usage grew rapidly with meeting size.
+
+❌ **Wrong example:** In a 100-person meeting, ask every browser to encode and upload 99 separate video streams. Most clients and home networks fail long before that point.
+
+✅ **After applying the concept:** Each participant publishes a small set of quality layers to a regional SFU, which forwards an appropriate layer to every receiver.
+
+**How it works now:** Clients upload a bounded number of streams. The SFU adapts forwarding to bandwidth, preserves audio first, and supports regional failover without server-side composition of every meeting.
+
+**A:** Use a Selective Forwarding Unit (SFU) for interactive meetings. Each client uploads one or a few simulcast layers; the SFU forwards the best layer for each receiver instead of decoding and recomposing every stream.
+
+**Architecture:**
+- Signaling service: meeting membership, SDP exchange, permissions
+- STUN/TURN: NAT traversal and relay fallback
+- Regional SFU cluster: media forwarding and congestion control
+- Meeting coordinator: assigns participants and manages failover
+- Recording pipeline: authorized media fork to durable processing and object storage
+
+```mermaid
+flowchart TD
+    P1[Participant] -->|WebRTC media| SFU[Regional SFU]
+    P2[Participant] -->|WebRTC media| SFU
+    SFU -->|Selected layers| P1
+    SFU -->|Selected layers| P2
+    S[Signaling Service] --> SFU
+    SFU --> R[Recording Pipeline]
+    R --> O[(Object Storage)]
+```
+
+**Network adaptation:** Combine simulcast or scalable video coding with receiver bandwidth estimates. Prefer preserving audio, then screen-share readability, then camera resolution. Use packet-loss concealment, jitter buffers, negative acknowledgements, and selective retransmission.
+
+**Failure handling:** Keep media state soft and reconstructable. If an SFU fails, clients reconnect using a new assignment and fresh short-lived credentials. A cascading SFU topology limits expensive inter-region streams for global meetings.
+
+**Key trade-off:** Mesh is simple but upload grows with every participant. An MCU minimizes client work but adds server-side transcoding cost and latency. An SFU is usually the practical middle ground.
+
+**Interviewer follow-ups:** How do end-to-end encryption and recording coexist? How do you prevent meeting abuse? Which quality metrics trigger a regional handoff?
+
+#### Implementation comparison — Zoom-style video conferencing
+
+```text
+BEFORE: full mesh for 6 participants
+Each browser sends its video to five peers: O(n²) connections and upload demand.
+
+AFTER: SFU forwarding
+Client --one/two uplinks--> SFU --selected simulcast layer--> each receiving client
+```
+
+```typescript
+// BEFORE: add a peer connection for every new participant.
+for (const peer of meeting.participants) createPeerConnection(peer).addTrack(cameraTrack);
+
+// AFTER: publish once to the selected SFU; subscribe to requested quality layers.
+await signaling.joinRoom(roomId, { publish: [cameraTrack, micTrack], subscribe: visibleSpeakerIds });
+```
+
+**Before failure:** participant upload/CPU grows with every peer and NAT failures multiply. **After flow:** clients connect with ICE/STUN/TURN as needed, publish simulcast layers, and the SFU forwards audio first and appropriate video quality based on receiver bandwidth. Media stays data-plane local; signaling/control can fail over separately.
+
+---
+
+### Q63: Design a Zapier-Style Workflow Automation Platform
+
+**Q:** Execute user-defined trigger/action workflows reliably across third-party APIs. Support retries, long delays, rate limits, secrets, and billions of task executions.
+
+**What problem does this concept solve?** It makes multi-step automation durable when processes restart, providers fail, steps wait for hours, or the same message is delivered twice.
+
+**Before this concept:** One HTTP request executed every integration step in memory. A process crash lost progress, long delays occupied resources, and retrying the request repeated successful actions.
+
+❌ **Wrong example:** Use one controller method to call CRM, email, and spreadsheet APIs sequentially, then return success only after all calls finish.
+
+✅ **After applying the concept:** Compile the workflow into immutable steps, store execution state durably, and let a scheduler release ready work to idempotent connector workers.
+
+**How it works now:** Each completed step becomes a checkpoint. Failed steps retry independently, delayed steps consume no worker, and an execution resumes after a restart without repeating acknowledged work.
+
+**A:** Compile each workflow version into an immutable directed acyclic graph. Trigger adapters create execution records; a durable scheduler releases ready steps; workers invoke connectors and persist every transition before scheduling downstream work.
+
+**Execution state:** `Pending -> Running -> Succeeded | RetryScheduled | Failed | WaitingForInput | Cancelled`.
+
+```mermaid
+flowchart LR
+    T[Trigger Adapters] --> E[Execution Service]
+    E --> DB[(Execution Log)]
+    E --> Q[Partitioned Work Queue]
+    Q --> W[Connector Workers]
+    W --> X[External APIs]
+    W --> S[Durable Scheduler]
+    S --> Q
+    V[Encrypted Secret Vault] --> W
+```
+
+**Correctness and isolation:**
+- Each step uses an execution-scoped idempotency key.
+- Store a checkpoint before acknowledging queue messages.
+- Apply exponential backoff with jitter and honor provider `Retry-After` headers.
+- Enforce per-provider, per-tenant, and global concurrency limits.
+- Pin active runs to an immutable workflow version so editing a workflow does not change in-flight behavior.
+- Redact credentials and sensitive payload fields from logs.
+
+**Key trade-off:** Exactly-once execution cannot be guaranteed across arbitrary third-party APIs. Provide effectively-once behavior where connectors accept idempotency keys; otherwise expose duplicate risk and offer reconciliation tools.
+
+**Interviewer follow-ups:** How do you schedule a step six months from now? How does a user replay from a failed step? How do you prevent one noisy tenant from exhausting a provider quota?
+
+#### Implementation comparison — Workflow automation
+
+```csharp
+// BEFORE: an entire workflow exists only in one web process's memory.
+foreach (var step in recipe.Steps)
+    await integrations.ExecuteAsync(step, payload, ct); // crash loses completed-step knowledge
+
+// AFTER: every state transition is persisted before the next dispatch.
+await executions.MarkStepRunningAsync(executionId, stepId, idempotencyKey, ct);
+await outbox.EnqueueAsync(new ExecuteStep(executionId, stepId), ct);
+// worker: execute once/retry safely -> persist Succeeded/Failed/Waiting checkpoint
+```
+
+**Before failure:** a 24-hour delay occupies a thread and a retry repeats already-created external records. **After flow:** a scheduler wakes `WaitingUntil` records; workers use step-specific idempotency keys; state history says exactly which step completed. Human approval is simply a persisted waiting state, not a sleeping request.
+
+---
+
+### Q64: Design Slack-Style Searchable Team Messaging
+
+**Q:** Design persistent team chat with channels, threads, multi-device sync, mentions, file attachments, presence, and full-text search.
+
+**What problem does this concept solve?** It provides durable ordered conversation history while also delivering new messages quickly to many online devices and searchable projections.
+
+**Before this concept:** Clients repeatedly polled a single messages table, and message creation synchronously updated search, notifications, and every recipient. One slow dependency delayed sending.
+
+❌ **Wrong example:** Insert a message, update the search index, send all push notifications, and wait for every WebSocket delivery inside one database transaction.
+
+✅ **After applying the concept:** Persist the message first, assign a channel sequence, and publish it to a durable channel event log consumed by fan-out, search, and notification workers.
+
+**How it works now:** The message source of truth remains available even if a projection is delayed. Clients reconnect with cursors, fill sequence gaps, and then resume live delivery.
+
+**A:** A message receives a server-assigned channel sequence number. The durable message store is authoritative; a channel log fans events out to online connection servers, search indexing, notifications, and compliance pipelines.
+
+**Core APIs:**
+```text
+POST /channels/{channelId}/messages       Idempotency-Key: <uuid>
+GET  /channels/{channelId}/messages?after=<sequence>&limit=100
+GET  /sync?cursor=<workspace-sequence>
+POST /messages/{messageId}/reactions
+```
+
+```mermaid
+flowchart LR
+    C[Clients] --> G[API and WebSocket Gateway]
+    G --> M[Message Service]
+    M --> DB[(Message Store)]
+    M --> K[Channel Event Log]
+    K --> F[Fan-out Service]
+    K --> SI[Search Indexer]
+    K --> N[Notification Service]
+    F --> G
+```
+
+**Ordering and sync:** Guarantee total order only within a channel, not across a workspace. Clients optimistically display a temporary message ID, then reconcile it with the server ID and sequence. Reconnect uses a cursor to fill gaps before resuming live delivery.
+
+**Security and compliance:** Authorize every channel read, encrypt transport and storage, scan files asynchronously, retain an immutable audit stream, and apply workspace-specific retention or legal holds without relying on search indexes as the source of truth.
+
+**Key trade-off:** Pushing every event to every device provides freshness but wastes bandwidth. Send lightweight invalidations to inactive clients and fetch deltas when they return.
+
+**Interviewer follow-ups:** How are edited and deleted messages indexed? How do private-channel membership changes affect historical access? How do you prevent mention storms?
+
+#### Implementation comparison — Slack-style messaging/search
+
+```text
+BEFORE
+POST message -> INSERT message -> update search -> notify every user -> return
+                    (one slow search or notification blocks sending)
+
+AFTER
+POST message -> append (channelId, sequence) + outbox -> return ack(sequence)
+Relay -> WebSocket fan-out, search-index projection, notification subscriptions
+Reconnect -> GET /channels/{id}/messages?afterSequence=lastSeen
+```
+
+**Before failure:** polling an unpartitioned table is slow, and a search outage makes chat sending fail. **After flow:** one ordered channel partition assigns sequence numbers, the message store is authoritative, and projections are replayable. Clients use cursors to fill a gap after reconnect; search result freshness is monitored rather than assumed.
+
+---
+
+### Q65: Design a Stock Exchange Matching Engine
+
+**Q:** Design an exchange that accepts, cancels, and matches orders with deterministic price-time priority, extremely low latency, and a complete audit trail.
+
+**What problem does this concept solve?** It guarantees that the same ordered input produces the same trades while preserving fairness, recovery, and auditability at very low latency.
+
+**Before this concept:** Several workers updated the same order book concurrently using locks. Thread timing could change which equally priced order matched first, and recovery could not reliably reproduce the result.
+
+❌ **Wrong example:** Put buy and sell orders on a general worker queue and allow any worker to mutate the shared order book after acquiring a database lock.
+
+✅ **After applying the concept:** Sequence every command and process one instrument's order book through a deterministic single-writer state machine backed by a replicated journal.
+
+**How it works now:** Price-time priority follows the command sequence, replay reconstructs identical state, and scale comes from assigning different instruments to different matching shards.
+
+**A:** Partition instruments across single-writer matching-engine shards. Each shard processes a totally ordered command log and keeps its order books in memory. A write-ahead journal makes the deterministic state machine replayable.
+
+**Order book structures:**
+- Bid prices: descending balanced tree; ask prices: ascending balanced tree
+- FIFO queue at each price level for time priority
+- Hash map from order ID to its queue node for efficient cancellation
+- Pre-trade risk check before sequencing; market-data and clearing events after matching
+
+```mermaid
+flowchart LR
+    C[Clients] --> GW[Order Gateway]
+    GW --> R[Risk Checks]
+    R --> S[Sequencer]
+    S --> ME[Single-Writer Matching Shard]
+    ME --> J[(Replicated Journal)]
+    ME --> MD[Market Data Feed]
+    ME --> CL[Clearing and Settlement]
+```
+
+**Correctness and recovery:**
+- Sequence new, cancel, and replace commands through the same ordered path.
+- Replicate the journal before acknowledging according to the exchange's durability policy.
+- Periodically snapshot books and recover by replaying commands after the snapshot.
+- Use integer ticks and quantities; never floating-point money.
+- Reject duplicates using session sequence numbers and client order IDs.
+
+**Key trade-off:** Adding workers inside one order book destroys deterministic ordering. Scale by assigning different instruments to different shards; migrate an instrument only at a coordinated sequence boundary.
+
+**Interviewer follow-ups:** How are market orders protected from extreme fills? What happens during a trading halt? How can a hot instrument exceed one core's capacity without breaking price-time priority?
+
+#### Implementation comparison — Matching engine
+
+```text
+BEFORE: several concurrent workers mutate the same order book
+lock(orderBook) { find match; change levels; emit trade; }  # lock timing affects fairness
+
+AFTER: one single-writer command log per instrument shard
+sequence N -> validate -> match price-time queue -> append trade -> publish market data
+```
+
+```csharp
+// AFTER: deterministic command application; recovery replays the log in sequence.
+foreach (var command in journal.ReadFrom(lastSnapshot.Sequence + 1))
+    orderBook.Apply(command); // same ordered input => same state/trades
+```
+
+**Before failure:** Equal-price orders can match in different orders when thread scheduling changes. Recovery also cannot explain or reproduce trades reliably.
+
+**After flow:** Partition by instrument so independent books scale, use a sequence/audit log and snapshots for recovery, and fence leader ownership so two writers never commit the same shard. Risk checks may be parallel, but the final book mutation is ordered.
+
+---
+
+## Resume-Driven System Design Questions
+
+> These questions target the systems and responsibilities demonstrated in Sumanth's resume: enterprise SaaS onboarding, GCP object storage, booking and payment products, third-party integrations, Angular performance, .NET APIs, SQL Server, and CI/CD delivery.
+
+### Q66: Design Multi-Tenant SaaS Onboarding
+
+**Q:** Design an onboarding workflow that creates a new enterprise customer, administrator, configuration, storage area, and default roles without exposing one customer's data to another.
+
+**In simple words:** A tenant is one customer organization using a shared SaaS product. Onboarding must prepare everything that customer needs, and it must be safe to retry if one step fails.
+
+**Everyday analogy:** Think of preparing an apartment for a new tenant. The building is shared, but the key, mailbox, electricity account, and belongings must belong to the correct resident.
+
+**What problem does this concept solve?** It provisions several dependent resources safely while preserving tenant isolation and allowing a failed or duplicated request to resume.
+
+**Before this concept:** Support staff ran database scripts, created storage folders, assigned roles, and emailed credentials manually. Partial completion left tenants in an unknown state.
+
+❌ **Wrong example:** A controller creates the database row, bucket, administrator, and configuration in one long request with no workflow record. Retrying after a timeout creates duplicates.
+
+✅ **After applying the concept:** A durable onboarding state machine runs idempotent provisioning steps and records each checkpoint under one tenant ID.
+
+**How it works now:** Users can see progress, workers resume after failure, and every database row, cache key, storage path, and permission remains tenant-scoped.
+
+**Functional requirements:**
+- Create the organization and its first administrator.
+- Apply a subscription plan, regional settings, and feature configuration.
+- Provision storage, database records, roles, and optional integrations.
+- Show onboarding progress and allow safe retry.
+- Suspend, reactivate, export, and eventually delete a tenant.
+
+**Workflow state machine:**
+
+```text
+Requested -> Validating -> Provisioning -> Configuring -> Active
+                |              |               |
+                +-----------> Failed <---------+
+                                  |
+                               Retrying
+```
+
+**Architecture:**
+
+```mermaid
+flowchart LR
+    A[Admin Portal] --> API[Onboarding API]
+    API --> DB[(Tenant and Workflow DB)]
+    API --> Q[Durable Work Queue]
+    Q --> W[Provisioning Worker]
+    W --> ID[Identity and Roles]
+    W --> ST[Storage Provisioner]
+    W --> CFG[Configuration Service]
+    W --> AUDIT[Audit Log]
+```
+
+**Key design choices:**
+
+| Area | Simple starting point | Higher-isolation option |
+|---|---|---|
+| Database | Shared tables with `TenantId` | Schema or database per tenant |
+| Storage | Shared bucket with tenant prefixes | Bucket/project per tenant |
+| Compute | Shared service instances | Dedicated cells for large tenants |
+| Encryption | Shared managed key | Customer-specific encryption key |
+
+**Correctness and security:**
+- Derive `TenantId` from the authenticated identity, never trust a tenant ID supplied only in the request body.
+- Include `TenantId` in primary/unique keys, indexes, cache keys, events, logs, and object paths.
+- Make every provisioning step idempotent: “ensure bucket exists” rather than “create a new bucket.”
+- Persist step status before moving forward so a crashed worker resumes from the last durable checkpoint.
+- Use compensation only when safe. Do not delete a resource if it might contain customer data from a later successful step.
+- Apply per-tenant quotas and rate limits to control noisy neighbors.
+
+**Concrete example:** A worker creates tenant `T-1042`, then loses its connection before recording that the storage folder exists. On retry, it looks up the deterministic path `tenants/T-1042/`, sees it already exists, and continues. It does not create a second folder or a second administrator.
+
+**Interviewer follow-ups:** How would you migrate one large customer to a dedicated database? How do background jobs preserve tenant context? How do you prove tenant isolation with automated tests?
+
+#### Implementation comparison — Multi-tenant onboarding
+
+```text
+BEFORE: support checklist
+create tenant row -> manually create storage -> add roles -> email credentials
+crash after storage: tenant status unknown; retry creates duplicate resources
+
+AFTER: durable onboarding saga
+Pending -> DatabaseReady -> StorageReady -> RolesReady -> Active
+each step has tenantId + idempotency key and writes progress before sending next command
+```
+
+```csharp
+if (await steps.TryStartAsync(tenantId, "create-storage", ct))
+{
+    await storage.CreateTenantPrefixAsync(tenantId, ct);
+    await steps.CompleteAsync(tenantId, "create-storage", ct);
+}
+```
+
+**Before failure:** support cannot tell whether it is safe to rerun a failed tenant. **After flow:** the user sees a status, workers resume at the first unfinished step, and every resource name/key/role contains the tenant scope. A cleanup/compensation policy handles failed inactive tenants.
+
+---
+
+### Q67: Design Secure File Uploads with GCP Cloud Storage or S3
+
+**Q:** Let enterprise users upload and download large files without sending all file bytes through the .NET API. Support retries, access control, malware scanning, and cleanup.
+
+**In simple words:** The API grants temporary permission, and the browser uploads directly to object storage. The application still controls who may upload, which files become visible, and how long access lasts.
+
+**Everyday analogy:** A receptionist gives a visitor a one-time loading-dock pass. The visitor delivers the package directly to the warehouse, but staff inspect it before placing it on a public shelf.
+
+**What problem does this concept solve?** It removes large byte streams from application servers while keeping authorization, integrity, malware checks, and tenant ownership under application control.
+
+**Before this concept:** The .NET API buffered entire files in memory and saved them under user-provided filenames. Large uploads exhausted memory, retries restarted from zero, and unsafe files became immediately visible.
+
+❌ **Wrong example:** Accept `IFormFile`, concatenate its original filename to a disk or bucket path, trust its MIME type, and return a permanent public URL.
+
+✅ **After applying the concept:** The API creates a pending record and short-lived signed URL for a server-generated object key. The client uploads directly, and a worker verifies and scans the quarantined object.
+
+**How it works now:** Application servers handle metadata rather than file bytes. Only authorized, checksum-verified, clean objects transition to `Available`, and abandoned uploads expire automatically.
+
+**Upload flow:**
+
+```mermaid
+sequenceDiagram
+    participant C as Angular Client
+    participant API as .NET API
+    participant O as Object Storage
+    participant S as Scanner Worker
+    participant DB as SQL Server
+    C->>API: Request upload (name, size, type)
+    API->>DB: Create Pending upload record
+    API-->>C: Short-lived signed upload URL
+    C->>O: Upload bytes directly
+    C->>API: Complete upload with object key
+    API->>O: Verify object size and checksum
+    API->>S: Queue malware scan
+    S->>O: Scan quarantined object
+    S->>DB: Mark Available or Rejected
+```
+
+**Important rules:**
+- Generate the object key on the server; never use an untrusted filename as the storage path.
+- Keep uploads in a quarantine prefix or bucket until scanning succeeds.
+- Restrict signed URLs by operation, object, content type, maximum size, and short expiry.
+- Store metadata and business ownership in SQL Server; store file bytes in object storage.
+- Verify checksum and size after upload. Do not trust the browser's completion message.
+- Use resumable or multipart uploads for large files and retry individual chunks.
+- Download through a short-lived signed URL after checking tenant and object authorization.
+- Apply lifecycle rules to delete abandoned multipart uploads and expired files.
+
+**Concrete example:** A user named a file `../../admin/config.json`. The API ignores this as a path, stores the display name as metadata, and creates an object key such as `tenant/T-1042/uploads/01J...`. The object remains unavailable until its scan status becomes `Clean`.
+
+**GCP/AWS mapping:**
+
+| Concept | GCP | AWS |
+|---|---|---|
+| Object store | Cloud Storage bucket | S3 bucket |
+| Temporary access | Signed URL | Pre-signed URL |
+| Workload identity | Service account / Workload Identity | IAM role |
+| Event trigger | Pub/Sub notification | S3 event notification |
+| Encryption key | Cloud KMS | AWS KMS |
+
+**Interviewer follow-ups:** How do you revoke a signed URL before it expires? How do you prevent cross-tenant object access? What happens when scanning is unavailable for an hour?
+
+#### Implementation comparison — Secure file upload
+
+```text
+BEFORE
+Browser -> API receives whole file in memory -> save user filename -> make downloadable
+
+AFTER
+Browser -> API asks for authorized signed upload URL
+Browser -> object storage multipart upload with checksum
+Storage event -> scanner -> state PendingScan/Available/Rejected
+Browser downloads only when API authorizes Available object
+```
+
+```csharp
+// AFTER: server authorizes metadata; object bytes bypass web memory.
+if (!policy.CanUpload(user, request.ContentType, request.Length)) return Forbid();
+var upload = await uploads.CreatePendingAsync(tenantId, request, ct);
+return Ok(storage.CreateSignedUploadUrl(upload.ObjectKey, upload.Checksum));
+```
+
+**Before failure:** memory exhaustion, path traversal/name collisions, and malware becomes visible immediately. **After flow:** server-generated object keys enforce tenant prefix, content length/type/checksum are constrained, scanner result transitions state, and expired pending records/objects are cleaned up. Signed URL scope and lifetime are minimal.
+
+---
+
+### Q68: Design Payment Links and Gift Cards
+
+**Q:** Design payment links that customers can open safely and gift cards that can be issued, redeemed, refunded, and audited without double spending.
+
+**In simple words:** A payment link requests money for an order. A gift card represents stored value. Both need an explicit lifecycle and an unchangeable financial history.
+
+**Everyday analogy:** A payment link is a digital invoice with a secure checkout door. A gift card is a wallet: every load, purchase, refund, and adjustment must appear in its statement.
+
+**What problem does this concept solve?** It prevents duplicate charges and gift-card double spending while keeping an auditable history of every money movement.
+
+**Before this concept:** Applications stored one mutable balance and trusted browser redirects as payment confirmation. Concurrent requests could spend the same balance, and edits erased financial history.
+
+❌ **Wrong example:** `card.Balance -= amount; SaveChanges();` with no transaction, version check, unique redemption reference, or ledger entry.
+
+✅ **After applying the concept:** Payment links use explicit states and provider reconciliation; gift cards use append-only entries, idempotency keys, and atomic concurrency control.
+
+**How it works now:** Every retry returns the original outcome, concurrent redemptions cannot overspend, and the current balance can be explained by its immutable transaction history.
+
+**Payment-link state machine:**
+
+```text
+Draft -> Active -> Processing -> Paid
+           |           |          |
+           v           v          v
+        Expired      Active    Refunded/PartiallyRefunded
+```
+
+**Gift-card model:**
+
+```sql
+GiftCard(CardId, TenantId, Status, Currency, Version, ExpiresAt)
+GiftCardEntry(EntryId, CardId, Type, Amount, ReferenceId, CreatedAt)
+
+-- Examples of Type: Issue, Redeem, Refund, Adjustment, Expire
+-- Balance = SUM(signed Amount); entries are appended, never edited.
+```
+
+**Correct redemption transaction:**
+1. Hash the card secret; do not store the redeemable code in plain text.
+2. Start a short database transaction.
+3. Lock or version-check the gift-card record.
+4. Confirm status, currency, expiry, and available balance.
+5. Insert one ledger entry under a unique `ReferenceId`.
+6. Commit, then publish an event through an outbox.
+
+**Concrete example:** Two checkout requests try to redeem the final ₹500 simultaneously. Both read the original balance, but only one update succeeds with the expected version. The other reloads the balance and is rejected. A unique reference ID makes a network retry return the first outcome instead of redeeming again.
+
+**Payment-link security:**
+- Use a long random public token, not a sequential database ID.
+- Store only a hash of the public token when practical.
+- Never place card details in your application logs or database; use the payment provider's hosted/tokenized flow.
+- Verify the provider's webhook signature using the raw request body.
+- Treat the browser redirect as user experience, not proof of payment. The signed webhook or reconciliation job confirms the final state.
+- Make webhook processing idempotent using the provider event ID.
+
+**Failure handling:** A payment can succeed at the provider while your webhook is delayed. Keep the link in `Processing`, retry webhook delivery, and run periodic reconciliation against provider transactions.
+
+**Interviewer follow-ups:** How do partial redemption and split tender work? What happens when a refund arrives after card expiry? How would you support multiple currencies without corrupting balances?
+
+#### Implementation comparison — Payment links and gift cards
+
+```sql
+-- BEFORE: mutable balance permits a race.
+SELECT balance FROM GiftCards WHERE code = @code; -- both requests read 50
+UPDATE GiftCards SET balance = balance - @amount WHERE code = @code;
+
+-- AFTER: all statements below run in one short transaction.
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+-- UNIQUE(TenantId, IdempotencyKey) lets only one retry claim the operation.
+INSERT INTO PaymentAttempts
+    (PaymentAttemptId, TenantId, IdempotencyKey, RequestHash, Status)
+VALUES
+    (@attemptId, @tenantId, @idempotencyKey, @requestHash, 'Processing');
+
+UPDATE GiftCards
+SET Balance = Balance - @amount,
+    Version = Version + 1
+WHERE CardId = @cardId
+  AND TenantId = @tenantId
+  AND Balance >= @amount
+  AND Version = @expectedVersion;
+
+IF @@ROWCOUNT <> 1
+BEGIN
+    ROLLBACK;
+    THROW 50001, 'Gift card cannot be redeemed', 1;
+END;
+
+-- UNIQUE(ReferenceId) prevents a retry from appending a second redemption.
+INSERT INTO GiftCardEntries
+    (EntryId, CardId, Type, Amount, ReferenceId, CreatedAt)
+VALUES
+    (@entryId, @cardId, 'Redeem', -@amount, @attemptId, SYSUTCDATETIME());
+
+INSERT INTO OutboxMessages (MessageId, Type, Payload)
+VALUES (@messageId, 'GiftCardRedeemed', @eventPayload);
+
+UPDATE PaymentAttempts
+SET Status = 'Succeeded'
+WHERE PaymentAttemptId = @attemptId;
+
+COMMIT;
+```
+
+**Before failure:** A browser redirect is treated as payment success or two redemptions overspend.
+
+**After flow:** First check whether the idempotency record already contains a result. If it does, return that result. Otherwise, claim the key and execute the guarded balance update, ledger append, attempt status, and outbox insert in one transaction. Check the update's affected-row count before inserting the ledger entry; on zero rows, roll back and return the appropriate conflict. Provider webhooks are separately signature-verified and deduplicated by provider event ID.
+
+---
+
+### Q69: Design Reliable Third-Party Integrations
+
+**Q:** Integrate with Google Calendar, Shopify, Facebook, or another external API while handling OAuth, rate limits, webhooks, downtime, duplicates, and data reconciliation.
+
+**In simple words:** Your application does not control the other company's API. Assume calls can be slow, repeated, rejected, delivered out of order, or changed over time.
+
+**Everyday analogy:** Working with an outside delivery company requires tracking numbers, delivery receipts, retry rules, and a way to compare records when your systems disagree.
+
+**What problem does this concept solve?** It isolates unreliable provider behavior and keeps local state recoverable when calls time out, tokens expire, webhooks repeat, or schemas change.
+
+**Before this concept:** User requests synchronously called the provider and treated any timeout as total failure. OAuth tokens lived in browser storage, and webhook handlers processed events before verifying them.
+
+❌ **Wrong example:** Retry every failed `POST` immediately and indefinitely, accept unsigned webhooks, and assume delivery order is guaranteed.
+
+✅ **After applying the concept:** Durable outbox workers call providers with timeouts, bounded retry, idempotency, and rate control; an inbox verifies and deduplicates webhooks; reconciliation repairs missed events.
+
+**How it works now:** Users are not blocked by temporary provider outages, duplicate events are harmless, encrypted credentials remain server-side, and drift is detected rather than silently accumulating.
+
+**Integration architecture:**
+
+```mermaid
+flowchart LR
+    APP[Application] --> OUT[(Integration Outbox)]
+    OUT --> W[Provider Worker]
+    W --> P[External Provider API]
+    P --> WH[Webhook Endpoint]
+    WH --> IN[(Webhook Inbox)]
+    IN --> C[Idempotent Consumer]
+    R[Reconciliation Job] --> P
+    R --> DB[(Local Integration State)]
+```
+
+**OAuth lifecycle:**
+- Redirect users with a random `state` value and PKCE where supported.
+- Exchange the authorization code only on the trusted backend.
+- Encrypt refresh tokens using a managed key; never send them to the browser.
+- Store granted scopes and token expiry.
+- Refresh with single-flight locking so several requests do not rotate the same token concurrently.
+- Handle revoked consent by marking the connection `ActionRequired` and guiding the user to reconnect.
+
+**Outbound calls:**
+- Set a timeout on every request.
+- Retry only transient failures and safe/idempotent operations with exponential backoff and jitter.
+- Respect `429` and `Retry-After`.
+- Add a circuit breaker and a per-provider concurrency limit.
+- Use a stable idempotency or external reference key when the provider supports it.
+
+**Inbound webhooks:**
+- Verify signature, timestamp, and replay window before parsing business data.
+- Store the provider event ID under a unique constraint.
+- Acknowledge quickly after durable storage; process asynchronously.
+- Expect duplicates and out-of-order delivery.
+
+**Calendar example:** Store all instants in UTC plus the original IANA/Windows time-zone identifier. Recurring appointments need recurrence rules and exceptions, not a list generated forever. A synchronization cursor fetches only changes; expired cursors trigger a bounded full resync.
+
+**Concrete example:** A booking is created locally, but the Calendar API times out. The integration stays `Pending` and the outbox worker retries. If the provider created the event before timing out, the stable external reference lets the worker find and reuse it instead of creating a duplicate calendar event.
+
+**Interviewer follow-ups:** How do you rotate webhook secrets without downtime? How do you backfill after a six-hour provider outage? What happens when the provider removes a field your code expects?
+
+#### Implementation comparison — Third-party integration
+
+```csharp
+// BEFORE: user request directly calls provider and assumes timeout means failure.
+var result = await provider.CreateEventAsync(request, ct);
+return Ok(result);
+
+// AFTER: local intent is durable; sync worker owns resilience and reconciliation.
+await outbox.AddAsync(new CalendarSyncRequested(localEvent.Id), ct);
+return Accepted(new { localEvent.Id, status = "PendingSync" });
+```
+
+**Before failure:** a timed-out provider may have created the event, retries duplicate it, browser-held OAuth tokens leak, and an unverified webhook mutates state. **After flow:** encrypted server-side credentials, provider idempotency/external IDs, deadlines/retries/circuit breaker, signed webhook verification, inbox deduplication, and scheduled reconciliation make drift observable and repairable.
+
+---
+
+### Q70: Design Tenant-Aware Roles and Permissions
+
+**Q:** Build an admin application where each organization defines roles and assigns permissions, while support staff have carefully audited access.
+
+**In simple words:** Authentication proves who a user is. Authorization decides what that user may do, to which tenant and resource.
+
+**Everyday analogy:** An employee badge identifies its owner. Door rules decide whether that badge can open the main entrance, finance room, or one customer's office.
+
+**What problem does this concept solve?** It ensures a role grants actions only within the correct tenant and resource scope, with evidence of sensitive administrative activity.
+
+**Before this concept:** Components hid buttons based on a role name, and APIs checked only whether the user was an `Admin`. An administrator from one tenant could change a URL and target another tenant's resource.
+
+❌ **Wrong example:** `if (User.IsInRole("Admin")) return Update(request.UserId);` without checking the target tenant or resource ownership.
+
+✅ **After applying the concept:** Policy-based API authorization combines named permission, tenant membership, resource ownership, and optional conditions such as step-up authentication.
+
+**How it works now:** The server enforces every operation, revoked permissions expire quickly, cross-tenant identifiers are rejected, and an append-only audit record explains who changed what.
+
+**Data model:**
+
+```text
+User --------< TenantMembership >-------- Tenant
+                      |
+                      +----< MembershipRole >---- Role
+                                                       |
+                                                       +----< RolePermission >---- Permission
+```
+
+**Authorization example:**
+
+```csharp
+[Authorize]
+[HttpPut("tenants/{tenantId}/users/{userId}")]
+public async Task<IActionResult> UpdateUser(
+    Guid tenantId,
+    Guid userId,
+    UpdateUserRequest request,
+    CancellationToken ct)
+{
+    // Scope the lookup itself so another tenant's resource is never loaded accidentally.
+    var target = await _users.GetForTenantAsync(tenantId, userId, ct);
+    if (target is null) return NotFound();
+
+    // Resource authorization can evaluate both the route tenant and loaded resource.
+    var decision = await _authorization.AuthorizeAsync(
+        User,
+        new TenantResource(tenantId, target.Id),
+        "Users.Manage");
+    if (!decision.Succeeded) return Forbid();
+
+    await _users.UpdateAsync(target, request, ct);
+    await _audit.RecordAsync(User, tenantId, "Users.Manage", target.Id, ct);
+    return NoContent();
+}
+```
+
+The `Users.Manage` handler verifies that the authenticated user has an active membership in `TenantResource.TenantId` and that the membership grants the named permission. For resource types with ownership rules, the handler checks those conditions too. The controller never trusts a tenant ID merely because it appears in the URL.
+
+**Security rules:**
+- Default to deny; grant named permissions such as `Bookings.Read` or `Users.Manage`.
+- Check resource ownership as well as role. An administrator of tenant A is not an administrator of tenant B.
+- Do not rely on hidden Angular buttons for security; the API enforces every action.
+- Version permission data or use short cache TTLs so role removal takes effect quickly.
+- Require step-up authentication for sensitive actions such as payout changes.
+- Record actor, tenant, target, action, timestamp, reason, and correlation ID in an append-only audit log.
+- Give support impersonation a visible banner, short expiry, explicit reason, and separate audit event.
+
+**Concrete example:** A user changes the URL from `/tenants/A/users/1` to `/tenants/B/users/1`. The API derives allowed tenants from the authenticated membership and rejects the request even though the user holds the `Admin` role in tenant A.
+
+**Interviewer follow-ups:** RBAC or ABAC—which fits temporary access? How do permission changes invalidate tokens? How do you test for insecure direct object references across tenants?
+
+#### Implementation comparison — Tenant-aware authorization
+
+```csharp
+// BEFORE: role-only check trusts route tenant ID.
+if (User.IsInRole("Admin")) await users.DeleteAsync(routeTenantId, userId, ct);
+
+// AFTER: policy derives scope from authenticated membership and resource ownership.
+var actor = await memberships.GetActorAsync(User, ct);
+var target = await users.GetForTenantAsync(routeTenantId, userId, ct);
+if (target is null) return NotFound();
+if (!actor.Can("Users.Delete", target.TenantId)) return Forbid();
+await users.DeleteAsync(target, actor, ct); // audit event includes actor/tenant/target
+```
+
+**Before failure:** tenant A administrator changes the URL to tenant B and succeeds. **After flow:** UI may hide forbidden actions, but API checks action + authenticated tenant membership + resource scope every time; permissions are versioned/short-cached and sensitive changes produce append-only audit records.
+
+---
+
+### Q71: Diagnose and Improve Angular SPA Performance
+
+**Q:** An Angular application has a slow initial load. Explain how you would measure it, find the cause, improve it, and prove the change helped users.
+
+**In simple words:** Lazy loading helps, but performance work should begin and end with measurements. A smaller first download is useful only if the page becomes usable sooner without making later navigation frustrating.
+
+**Everyday analogy:** Do not move every item in a house before letting someone enter. Prepare the rooms they need first, then bring other items when requested or during quiet time.
+
+**What problem does this concept solve?** It reduces the time and work required to show a usable first screen while preventing performance regressions from returning unnoticed.
+
+**Before this concept:** Every feature and large dependency loaded at startup. Developers declared success based on local impressions rather than production-like measurements.
+
+❌ **Wrong example:** Add lazy loading randomly, test once on a fast laptop, and report “40% faster” without naming the metric, baseline, device, or network.
+
+✅ **After applying the concept:** Measure Web Vitals and bundle composition, target the actual bottleneck, lazy-load appropriate routes, and enforce performance budgets in CI.
+
+**How it works now:** The critical route downloads and executes less code, later routes can preload deliberately, and dashboards plus CI budgets prove whether user performance remains within target.
+
+**Investigation order:**
+1. Capture production-like Web Vitals and a browser performance trace.
+2. Inspect the bundle report to find large libraries, duplicate packages, and eagerly loaded routes.
+3. Separate network, JavaScript execution, rendering, API, and image delays.
+4. Set a target, make one meaningful change, and compare the same measurements.
+
+**Common improvements:**
+- Lazy-load route-level features with dynamic imports.
+- Use selective preloading for routes users are likely to open next.
+- Replace large dependencies or import only required functions.
+- Add bundle-size budgets to CI so performance does not regress.
+- Use `OnPush`, signals, `trackBy`, or the modern `track` syntax to reduce unnecessary rendering.
+- Virtualize large lists and paginate API results.
+- Compress and correctly size images; serve static assets through a CDN.
+- Cache stable API responses carefully and cancel obsolete RxJS requests with `switchMap`.
+- Render critical public pages on the server only when product requirements justify SSR complexity.
+
+**Concrete example:** The booking feature was included in the initial JavaScript bundle even when users landed on the dashboard. Moving it behind a lazy route reduced initial transferred bytes and script parse time. A bundle budget prevented another dependency from silently reversing the improvement.
+
+**How to report impact:** Compare median and p75/p95 values for Largest Contentful Paint, Interaction to Next Paint, initial bundle bytes, and route transition time. Include device and network conditions; “40% faster” is incomplete without the measured metric and baseline.
+
+**Interviewer follow-ups:** Lazy loading or preloading—which would you choose? Why can an `async` pipe be safer than manual subscriptions? How would you diagnose a page that becomes slower after being open for an hour?
+
+#### Implementation comparison — Angular SPA performance
+
+```typescript
+// BEFORE: booking feature and heavy chart are bundled eagerly and whole lists rerender.
+import { BookingFeatureModule } from './booking/booking-feature.module';
+import * as Charts from 'heavy-charts';
+@for (booking of bookings) { <app-booking-row [booking]="booking" /> }
+
+// AFTER: route code is loaded when needed and list identity is stable.
+{ path: 'bookings', loadComponent: () => import('./booking/page').then(m => m.BookingPage) }
+@for (booking of bookings(); track booking.id) { <app-booking-row [booking]="booking" /> }
+```
+
+**Before failure:** fast laptop testing misses parse/execution cost on real mobile devices; every incoming refresh recreates DOM rows. **After flow:** establish field/lab baseline (LCP, INP, bundle bytes, route time), inspect waterfall/bundle, change one bottleneck, compare equivalent conditions, and enforce budgets in CI. Lazy loading is not enough if images, APIs, or change detection remain the bottleneck.
+
+---
+
+### Q72: Modernize a Legacy .NET Application Safely
+
+**Q:** How would you modernize a large ASP.NET MVC or older .NET application without stopping feature delivery or performing a risky rewrite?
+
+**In simple words:** Improve the application in controlled pieces while users continue using it. Preserve behavior with tests, measure progress, and keep rollback possible.
+
+**Everyday analogy:** Renovate a working hospital one wing at a time. A complete demolition may promise a perfect building later, but it creates unacceptable risk and delay.
+
+**What problem does this concept solve?** It improves architecture and delivery without discarding undocumented business behavior or blocking product work during a high-risk rewrite.
+
+**Before this concept:** Teams planned a complete replacement, paused feature development, and discovered late that the new system missed edge cases accumulated over years.
+
+❌ **Wrong example:** Create a new repository, rewrite every feature with the newest framework, migrate all data in one weekend, and switch all users at once.
+
+✅ **After applying the concept:** Characterization tests preserve behavior, a strangler boundary replaces one capability at a time, and feature flags move traffic gradually with measurable rollback conditions.
+
+**How it works now:** Old and new paths coexist temporarily, backward-compatible schemas support mixed versions, and each migration step delivers value without requiring a single irreversible cutover.
+
+**Safe modernization path:**
+1. Baseline production behavior, latency, errors, dependencies, and deployment frequency.
+2. Add characterization tests around important existing behavior—even behavior that looks unusual.
+3. Improve build automation, observability, configuration, secrets, and repeatable deployment first.
+4. Identify a boundary with business value and low coupling.
+5. Route that capability through an abstraction or strangler facade.
+6. Build the replacement behind a feature flag and compare results.
+7. Migrate traffic gradually, monitor guardrails, and keep a rollback path.
+8. Remove the old code only after the replacement is stable and data migration is verified.
+
+```mermaid
+flowchart LR
+    U[Users] --> F[Strangler Facade]
+    F -->|Unmigrated routes| L[Legacy Application]
+    F -->|Migrated routes| N[Modern .NET Service or Module]
+    L --> DB[(Existing Database)]
+    N --> DB
+```
+
+**Data strategy:** Avoid splitting the database before ownership is clear. Use expand-and-contract schema changes so old and new versions run together. If data must move, backfill in batches, verify counts and checksums, then change the source of truth deliberately.
+
+**Concrete example:** Instead of rewriting an entire booking platform, first extract calendar synchronization behind `ICalendarProvider`. Characterization tests preserve recurrence and cancellation behavior. The new provider runs in shadow mode, results are compared, and a feature flag moves one tenant at a time.
+
+**What not to do:** Do not begin with “rewrite everything using the newest framework.” A rewrite can recreate known features while losing undocumented rules, production fixes, and years of edge-case knowledge.
+
+**Interviewer follow-ups:** How do you test code with no tests? When is a modular monolith better than microservices? How do you measure whether modernization is producing business value?
+
+#### Implementation comparison — Legacy .NET modernization
+
+```csharp
+// BEFORE: big-bang switch; every path is replaced at once.
+app.MapFallbackToController("{controller=NewBooking}/{action=Index}");
+
+// AFTER: one strangler boundary routes a flagged capability.
+app.Map("/calendar/{**path}", calendarProxy.HandleAsync);
+public Task HandleAsync(HttpContext ctx) => flags.IsEnabled("new-calendar", ctx.User)
+    ? modernCalendar.HandleAsync(ctx)
+    : legacyCalendar.HandleAsync(ctx);
+```
+
+**Before failure:** the rewrite discovers undocumented behavior only after users lose it; data migration and rollback are all-or-nothing. **After flow:** establish characterization tests/telemetry, place a facade boundary, use expand-contract schemas compatible with both versions, run shadow comparisons where safe, shift traffic by tenant/percentage, monitor explicit guardrails, and remove legacy only after verified stability.
+
+---
