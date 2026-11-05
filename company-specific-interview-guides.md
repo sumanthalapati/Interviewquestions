@@ -26,7 +26,8 @@ Comprehensive guide covering 15+ major tech companies with UNIQUE interview patt
 
 ---
 
-## Google {#google}
+<a id="google"></a>
+## Google
 
 ### Interview Process
 - **Round 1**: Phone screen (1 hour, coding)
@@ -79,7 +80,8 @@ Sample problems (NOT found in other companies' interviews):
 
 ---
 
-## Amazon {#amazon}
+<a id="amazon"></a>
+## Amazon
 
 ### Interview Process
 - **Phone Screen**: 45 min, coding (medium difficulty)
@@ -132,7 +134,8 @@ Sample problems:
 
 ---
 
-## Meta/Facebook {#meta}
+<a id="meta"></a>
+## Meta/Facebook
 
 ### Interview Process
 - **Phone**: 45 min, coding (medium)
@@ -185,7 +188,8 @@ Sample problems:
 
 ---
 
-## Microsoft {#microsoft}
+<a id="microsoft"></a>
+## Microsoft
 
 ### Interview Process
 - **Phone**: 45 min coding
@@ -238,7 +242,8 @@ Sample problems:
 
 ---
 
-## Apple {#apple}
+<a id="apple"></a>
+## Apple
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -291,7 +296,8 @@ Sample problems:
 
 ---
 
-## Netflix {#netflix}
+<a id="netflix"></a>
+## Netflix
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -344,7 +350,8 @@ Sample problems:
 
 ---
 
-## Uber {#uber}
+<a id="uber"></a>
+## Uber
 
 ### Interview Process
 - **Phone**: 45 min, coding (often medium-hard)
@@ -397,7 +404,8 @@ Sample problems:
 
 ---
 
-## Stripe {#stripe}
+<a id="stripe"></a>
+## Stripe
 
 ### Interview Process
 - **Phone**: 45 min, coding + design blend
@@ -450,7 +458,8 @@ Sample problems:
 
 ---
 
-## Airbnb {#airbnb}
+<a id="airbnb"></a>
+## Airbnb
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -503,7 +512,8 @@ Sample problems:
 
 ---
 
-## Twitter/X {#twitter}
+<a id="twitter"></a>
+## Twitter/X
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -556,7 +566,8 @@ Sample problems:
 
 ---
 
-## Lyft {#lyft}
+<a id="lyft"></a>
+## Lyft
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -606,7 +617,8 @@ Sample problems:
 
 ---
 
-## Snap {#snap}
+<a id="snap"></a>
+## Snap
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -655,7 +667,8 @@ Sample problems:
 
 ---
 
-## TikTok {#tiktok}
+<a id="tiktok"></a>
+## TikTok
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -707,7 +720,8 @@ Sample problems:
 
 ---
 
-## Databricks {#databricks}
+<a id="databricks"></a>
+## Databricks
 
 ### Interview Process
 - **Phone**: 45 min, coding + design
@@ -758,7 +772,8 @@ Sample problems:
 
 ---
 
-## Canva {#canva}
+<a id="canva"></a>
+## Canva
 
 ### Interview Process
 - **Phone**: 45 min, coding
@@ -1074,7 +1089,8 @@ Score each mock answer from 0-2 in every category (maximum 12):
 
 ---
 
-## Comparison Matrix {#matrix}
+<a id="matrix"></a>
+## Comparison Matrix
 
 | Company | Core Strength | Question Focus | Salary Range | Difficulty |
 |---------|---------------|-----------------|--------------|------------|

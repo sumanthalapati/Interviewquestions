@@ -1053,7 +1053,7 @@ Production monitoring:
 
 ---
 
-# ⚖️ AI in .NET Comparisons — Side-by-Side Differences
+# Core AI in .NET Comparisons — Side-by-Side Differences
 
 ---
 
@@ -1268,7 +1268,7 @@ var result = await kernel.InvokePromptAsync(
 
 ---
 
-# ⚖️ AI in .NET Comparisons — Side-by-Side Differences
+# Extended AI in .NET Comparisons — Side-by-Side Differences
 
 ---
 
@@ -1471,4 +1471,3 @@ var results = await vectorDb.SearchAsync(queryVector, topK: 5, minScore: 0.75f);
 var sql = "SELECT * FROM Docs WHERE CONTAINS(Content, '\"refund\" OR \"return\"')";
 // Misses: "money-back", "reimbursement", "exchange" — different words
 ```
-

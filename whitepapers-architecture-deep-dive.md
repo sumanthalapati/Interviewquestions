@@ -13,7 +13,8 @@ In-depth analysis of three foundational distributed systems whitepapers that inf
 
 ---
 
-## Amazon Dynamo {#dynamo}
+<a id="dynamo"></a>
+## Amazon Dynamo
 
 ### Problem Statement
 
@@ -209,7 +210,8 @@ NOT acceptable for:
 
 ---
 
-## Google Spanner {#spanner}
+<a id="spanner"></a>
+## Google Spanner
 
 ### Problem Statement
 
@@ -398,7 +400,8 @@ Spanner classification:
 
 ---
 
-## Meta XFaaS (Serverless Architecture) {#xfaas}
+<a id="xfaas"></a>
+## Meta XFaaS (Serverless Architecture)
 
 ### Problem Statement
 
@@ -649,7 +652,8 @@ Tools: CloudWatch (AWS), Datadog, New Relic
 
 ---
 
-## Comparison & Trade-offs {#comparison}
+<a id="comparison"></a>
+## Comparison & Trade-offs
 
 | System | Consistency | Availability | Latency | Scalability | Use Case |
 |--------|-------------|--------------|---------|-------------|----------|
@@ -704,7 +708,8 @@ Bad for:
 
 ---
 
-## Interview Preparation {#interview}
+<a id="interview"></a>
+## Interview Preparation
 
 ### Common Questions
 

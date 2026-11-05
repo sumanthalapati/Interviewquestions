@@ -12,10 +12,12 @@ Complete guide to advanced patterns and technologies: Entity Framework Core, Sig
 5. [Event-Driven Architecture](#events)
 6. [Logging & Observability](#observability)
 7. [Building & Deploying](#deployment)
+8. [Applied Advanced ASP.NET Core](#aspx-mastery)
 
 ---
 
-## Entity Framework Core {#ef-core}
+<a id="ef-core"></a>
+## Entity Framework Core
 
 ### What is EF Core?
 
@@ -225,7 +227,8 @@ public UserDto GetUser(int id)
 
 ---
 
-## Performance & Caching {#performance}
+<a id="performance"></a>
+## Performance & Caching
 
 ### Query Optimization
 
@@ -288,7 +291,8 @@ public class UserService
 
 ---
 
-## SignalR (Real-Time) {#signalr}
+<a id="signalr"></a>
+## SignalR (Real-Time)
 
 ### What is SignalR?
 
@@ -390,7 +394,8 @@ await Clients.Caller.SendAsync(...);
 
 ---
 
-## Background Jobs & Scheduling {#background-jobs}
+<a id="background-jobs"></a>
+## Background Jobs & Scheduling
 
 ### Hangfire (Job Queue)
 
@@ -458,7 +463,8 @@ RecurringJob.AddOrUpdate<NotificationService>(
 
 ---
 
-## Event-Driven Architecture {#events}
+<a id="events"></a>
+## Event-Driven Architecture
 
 ### Domain Events
 
@@ -524,7 +530,8 @@ public class UserService
 
 ---
 
-## Logging & Observability {#observability}
+<a id="observability"></a>
+## Logging & Observability
 
 ### Structured Logging
 
@@ -589,7 +596,8 @@ builder.Services.AddOpenTelemetry()
 
 ---
 
-## Building & Deploying {#deployment}
+<a id="deployment"></a>
+## Building & Deploying
 
 ### Docker
 
@@ -675,3 +683,313 @@ else
 ---
 
 **Key Takeaway**: Master EF Core for data access, SignalR for real-time features, background jobs for async work, and observability for production readiness.
+
+---
+
+<a id="aspx-mastery"></a>
+# Applied Advanced ASP.NET Core
+
+These walkthroughs cover work that outlives a request, real-time reconnect behavior, useful telemetry, and safe orchestration during startup and shutdown.
+
+References: [hosted services](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services), [SignalR groups](https://learn.microsoft.com/en-us/aspnet/core/signalr/groups), and [health checks](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/health-checks).
+
+## ASPX-M1 — Queue Background Work with Backpressure and Fresh Scopes
+
+**Question:** Why is `Task.Run` inside a controller unsafe for important background work?
+
+**Answer:** The task is not owned by the host, may capture request-scoped services that are disposed when the response ends, has no durable retry, and can grow without a capacity limit. A bounded queue and hosted worker give the process explicit ownership and backpressure.
+
+**What problem does it solve?** It prevents lost fire-and-forget work, disposed `DbContext` access, unbounded memory growth, and shutdown that abandons in-flight jobs silently.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```csharp
+[HttpPost("reports")]
+public IActionResult CreateReport(CreateReport request)
+{
+    _ = Task.Run(async () =>
+    {
+        db.Reports.Add(await generator.Build(request)); // captures scoped db
+        await db.SaveChangesAsync();
+    });
+
+    return Accepted();
+}
+```
+
+✅ **After/correct example:**
+
+```csharp
+public sealed record ReportJob(Guid JobId, Guid TenantId, CreateReport Request);
+
+public sealed class ReportJobQueue
+{
+    private readonly Channel<ReportJob> channel = Channel.CreateBounded<ReportJob>(
+        new BoundedChannelOptions(500)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+    public bool TryEnqueue(ReportJob job) => channel.Writer.TryWrite(job);
+    public IAsyncEnumerable<ReportJob> ReadAll(CancellationToken ct) =>
+        channel.Reader.ReadAllAsync(ct);
+}
+
+public sealed class ReportWorker(
+    ReportJobQueue queue,
+    IServiceScopeFactory scopeFactory,
+    ILogger<ReportWorker> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var job in queue.ReadAll(stoppingToken))
+        {
+            try
+            {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var processor = scope.ServiceProvider.GetRequiredService<ReportProcessor>();
+                await processor.Process(job, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Report job {JobId} failed", job.JobId);
+            }
+        }
+    }
+}
+
+builder.Services.AddSingleton<ReportJobQueue>();
+builder.Services.AddScoped<ReportProcessor>();
+builder.Services.AddHostedService<ReportWorker>();
+```
+
+```csharp
+app.MapPost("/reports", (CreateReport request, ReportJobQueue queue, ClaimsPrincipal user) =>
+{
+    var job = new ReportJob(Guid.NewGuid(), user.GetRequiredTenantId(), request);
+    return queue.TryEnqueue(job)
+        ? Results.Accepted($"/reports/{job.JobId}", new { job.JobId })
+        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+});
+```
+
+**How it works now:** The bounded channel limits memory and exposes overload. The host starts and stops the worker. Each job creates a fresh DI scope, so `DbContext` and other scoped services are valid only for that unit of work.
+
+**Trade-offs and when not to use it:** An in-memory queue loses queued jobs when the process crashes and cannot coordinate several replicas. Use a durable broker/database queue when work must survive restarts or scale across instances. With `Wait`, `TryWrite` returns `false` when the bounded queue is full, so this API rejects immediately; an alternative producer can call `WriteAsync` when it is safe to wait for capacity.
+
+**Production checks:** Persist job status, make processing idempotent, define retry and poison-job behavior, monitor queue depth/oldest age, and ensure shutdown time allows safe checkpointing.
+
+**Try it:** Fill the queue to capacity, restart the process during a job, and document exactly which work is accepted, rejected, completed, or lost.
+
+---
+
+## ASPX-M2 — Treat SignalR as Live Delivery, Not Durable History
+
+**Question:** How should a SignalR client recover messages and group membership after reconnecting?
+
+**Answer:** Store important events durably with a sequence number. SignalR delivers the live notification; after reconnect, the client reauthorizes and rejoins groups, then requests events after its last confirmed sequence.
+
+**What problem does it solve?** It prevents silent gaps caused by transient connections, server restarts, mobile network changes, or group membership that is not preserved across a new connection.
+
+**Before this concept:** The server broadcasts an important update only through a hub and assumes connected clients receive it exactly once.
+
+❌ **Wrong/before example:**
+
+```csharp
+await hub.Clients.Group($"order:{order.Id}")
+    .SendAsync("OrderChanged", order.Status, ct);
+// No durable event: disconnected clients can never recover this transition.
+```
+
+✅ **After/correct example:**
+
+```csharp
+var notification = OrderNotification.Create(
+    order.TenantId, order.Id, order.NextSequence(), "status-changed", order.Status);
+
+db.OrderNotifications.Add(notification);
+await db.SaveChangesAsync(ct); // durable history first
+
+await hub.Clients.Group($"order:{order.Id}").SendAsync(
+    "OrderChanged",
+    new { notification.Sequence, notification.Type, notification.Payload },
+    ct);
+```
+
+```csharp
+[Authorize]
+public sealed class OrdersHub(
+    IOrderReader orders,
+    IAuthorizationService authorization) : Hub
+{
+    public async Task JoinOrder(Guid orderId)
+    {
+        var tenantId = Context.User!.GetRequiredTenantId();
+        var order = await orders.Find(tenantId, orderId, Context.ConnectionAborted)
+            ?? throw new HubException("Order not found");
+
+        var result = await authorization.AuthorizeAsync(
+            Context.User, order, new ViewOrderRequirement());
+        if (!result.Succeeded) throw new HubException("Forbidden");
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, $"order:{orderId}");
+    }
+}
+```
+
+```typescript
+connection.onreconnected(async () => {
+  await connection.invoke('JoinOrder', orderId);
+  const missed = await api.getNotifications(orderId, lastSequence);
+  for (const event of missed) applyInSequence(event);
+});
+```
+
+**How it works now:** The database is the recoverable source. SignalR reduces latency for connected clients. Reconnect creates a new transport context, repeats authorization/group joining, and fills sequence gaps through an ordinary API.
+
+**Trade-offs and when not to use it:** Presence and typing indicators may be safely ephemeral and need no durable history. Durable event streams require retention, pagination, deduplication, and an ordering scope such as one order or conversation.
+
+**Production checks:** Never treat a group as an authorization boundary, remove/revalidate access when permissions change, test out-of-order/duplicate events, and use a scale-out service/backplane when several app instances host connections.
+
+**Try it:** Disconnect a client, publish three updates, reconnect it to a different server instance, and prove it converges without duplicating effects.
+
+---
+
+## ASPX-M3 — Correlate Logs, Traces, and Metrics
+
+**Question:** What telemetry should one order request produce?
+
+**Answer:** Emit a trace for causality and latency, structured logs for discrete diagnostic facts, and low-cardinality metrics for aggregate health. Share correlation context automatically and avoid identifiers or error messages as metric dimensions.
+
+**What problem does it solve?** Operators can move from “latency is high” to the responsible dependency and then to the relevant structured events without searching unrelated text logs.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```csharp
+logger.LogInformation("Starting order " + order.Id + " for " + customer.Email);
+logger.LogInformation("Finished");
+// No duration, trace relationship, outcome, or safe aggregation.
+```
+
+✅ **After/correct example:**
+
+```csharp
+public static class OrderTelemetry
+{
+    public static readonly ActivitySource ActivitySource = new("Store.Orders");
+    public static readonly Meter Meter = new("Store.Orders");
+    public static readonly Counter<long> Completed = Meter.CreateCounter<long>("orders.completed");
+    public static readonly Histogram<double> Duration =
+        Meter.CreateHistogram<double>("orders.create.duration", "ms");
+}
+
+public async Task<Result<OrderId>> Place(CreateOrder command, CancellationToken ct)
+{
+    using var activity = OrderTelemetry.ActivitySource.StartActivity("orders.place");
+    activity?.SetTag("order.channel", command.Channel); // bounded vocabulary
+    var started = Stopwatch.GetTimestamp();
+
+    try
+    {
+        var result = await handler.Handle(command, ct);
+        var outcome = result.IsSuccess ? "success" : "rejected";
+        OrderTelemetry.Completed.Add(1,
+            new KeyValuePair<string, object?>("outcome", outcome));
+        activity?.SetTag("order.outcome", outcome);
+        return result;
+    }
+    catch (Exception exception)
+    {
+        activity?.SetStatus(ActivityStatusCode.Error, exception.GetType().Name);
+        logger.LogError(exception, "Order placement failed; TraceId={TraceId}",
+            Activity.Current?.TraceId.ToString());
+        throw;
+    }
+    finally
+    {
+        OrderTelemetry.Duration.Record(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    }
+}
+```
+
+**How it works now:** Distributed tracing relates inbound requests, database calls, and outbound calls. Logs attach to the active trace. Metrics answer rate, error, and duration questions without storing one time series per customer or order.
+
+**Trade-offs and when not to use it:** Recording every payload or span is expensive and unsafe. Sample high-volume traces, keep audit logs separate from diagnostic logs, and use exemplars/correlation to connect aggregates to traces.
+
+**Production checks:** Redact personal/payment data, cap tag vocabulary, define service-level indicators from metrics, propagate trace context through messages, and alert on symptoms rather than individual exceptions.
+
+**Try it:** Follow one request from gateway to database and background consumer using one trace ID, then answer which dependency consumed most latency.
+
+---
+
+## ASPX-M4 — Separate Liveness, Readiness, and Graceful Shutdown
+
+**Question:** Why should a database outage normally fail readiness but not liveness?
+
+**Answer:** Liveness asks whether the process is stuck and should be restarted. Readiness asks whether it can currently receive traffic. Restarting every healthy process during a shared database outage creates churn without repairing the dependency.
+
+**What problem does it solve?** Orchestrators stop routing traffic to unready instances without turning a dependency incident into a restart storm, and rolling deployments wait until new instances are actually usable.
+
+**Before this concept:** One `/health` endpoint checks every dependency and is used for both probes.
+
+❌ **Wrong/before example:**
+
+```csharp
+app.MapGet("/health", async (AppDbContext db) =>
+    await db.Database.CanConnectAsync()
+        ? Results.Ok()
+        : Results.StatusCode(500));
+// The orchestrator restarts a healthy process whenever the shared DB is unavailable.
+```
+
+✅ **After/correct example:**
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy(), tags: ["live"])
+    .AddDbContextCheck<AppDbContext>("database", tags: ["ready"]);
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("live")
+});
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+```
+
+`AddDbContextCheck<TContext>` is provided by the `Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore` package; use the package version that matches the application target framework.
+
+```csharp
+public sealed class SubscriptionWorker : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var message in subscription.ReadAll(stoppingToken))
+        {
+            await ProcessIdempotently(message, stoppingToken);
+            await subscription.Acknowledge(message, stoppingToken);
+        }
+    }
+}
+```
+
+**How it works now:** The liveness probe verifies the process can answer. Readiness includes traffic-critical dependencies. During shutdown, the host cancels workers; they stop taking new work, finish or checkpoint safely, and exit before the orchestrator’s grace period ends.
+
+**Trade-offs and when not to use it:** Deep readiness checks can overload dependencies if probed too often. A service that can operate in a degraded mode may remain ready while advertising dependency health through metrics instead.
+
+**Production checks:** Protect detailed health output, set probe timeouts/thresholds, align host shutdown timeout with the orchestrator grace period, stop accepting traffic before termination, verify health-check package versions match the target framework, and test rolling deployment plus forced kill.
+
+**Try it:** Disable the database and verify readiness fails while liveness stays healthy; then send termination and confirm the worker stops without acknowledging unfinished work.

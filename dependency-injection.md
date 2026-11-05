@@ -39,11 +39,11 @@
 
 **Answer:** Inversion of Control means object creation and wiring are moved out of business classes. Dependency Injection is the technique used to supply those dependencies through constructors, parameters, factories, or other explicit mechanisms.
 
-**What problem does this concept solve?** Classes stop controlling the creation of infrastructure they use. Implementations can change, lifetimes can be managed centrally, and tests can provide controlled substitutes.
+**What problem does it solve?** Classes stop controlling the creation of infrastructure they use. Implementations can change, lifetimes can be managed centrally, and tests can provide controlled substitutes.
 
 **Before this concept:** Angular components and .NET services used `new` to construct HTTP clients, repositories, loggers, and provider SDKs.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```typescript
 export class BookingComponent {
@@ -59,7 +59,7 @@ public sealed class BookingService
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```typescript
 @Component({ /* ... */ })
@@ -78,9 +78,11 @@ public sealed class BookingService(
 }
 ```
 
-**How it works after this pattern:** Angular and ASP.NET Core build object graphs from registrations, reuse or dispose instances according to scope, and make dependencies visible in contracts.
+**How it works now:** Angular and ASP.NET Core build object graphs from registrations, reuse or dispose instances according to scope, and make dependencies visible in contracts.
 
-**Trade-off:** A container reduces wiring code but can hide complexity if registrations are scattered. Keep one clear composition root and small dependency lists.
+**Trade-offs and when not to use it:** A container reduces wiring code but can hide complexity if registrations are scattered. Keep one clear composition root and small dependency lists.
+
+**Production checks:** Validate the complete object graph at startup, keep secrets and environment choices in configuration providers, enable scope validation, and fail deployment before serving traffic when required dependencies cannot be built.
 
 ### Practical walkthrough — Inversion of Control: stop `Checkout` from creating its world
 
@@ -99,7 +101,7 @@ After:  Composition root -> Checkout(IPaymentGateway, IClock, IOrderRepository)
 
 **What changed:** control of construction moved outward to one configuration boundary. DI is not “using a container everywhere”; it is making dependencies explicit and having a composition root wire them.
 
-**Practice:** replace `new Date()` in one feature with a `Clock` abstraction and write a test for an expiry boundary.
+**Try it:** replace `new Date()` in one feature with a `Clock` abstraction and write a test for an expiry boundary.
 
 ---
 
@@ -109,18 +111,18 @@ After:  Composition root -> Checkout(IPaymentGateway, IClock, IOrderRepository)
 
 **Answer:** Required dependencies are constructor parameters. An object cannot be created without everything needed to be valid.
 
-**What problem does this concept solve?** It makes dependencies explicit, supports immutability, and fails early when configuration is incomplete.
+**What problem does it solve?** It makes dependencies explicit, supports immutability, and fails early when configuration is incomplete.
 
 **Before this concept:** Dependencies were created internally or assigned later, allowing partially initialized objects.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var service = new PaymentService();
 service.Gateway = gateway; // calling Charge before assignment causes failure
 ```
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 @Injectable({ providedIn: 'root' })
@@ -131,7 +133,7 @@ export class PaymentFacade {
 }
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 public sealed class PaymentService(
@@ -144,9 +146,11 @@ public sealed class PaymentService(
 }
 ```
 
-**How it works after this pattern:** The container resolves each parameter recursively and returns a fully constructed object. Tests instantiate the class with fakes directly.
+**How it works now:** The container resolves each parameter recursively and returns a fully constructed object. Tests instantiate the class with fakes directly.
 
-**Trade-off:** Many constructor parameters often reveal too many responsibilities. Do not hide that signal by injecting the container itself.
+**Trade-offs and when not to use it:** Many constructor parameters often reveal too many responsibilities. Do not hide that signal by injecting the container itself.
+
+**Production checks:** Reject null dependencies, keep constructors free of I/O, review classes with large dependency lists, and test that every required collaborator is registered in the real composition root.
 
 ### Practical walkthrough — Constructor injection: state required collaborators
 
@@ -169,7 +173,7 @@ public sealed class CheckoutService(IPaymentGateway paymentGateway, IClock clock
 
 The object cannot exist until all required collaborators exist. Tests construct it with explicit fakes. Keep the constructor focused: if it reaches eight or ten dependencies, look for a missing cohesive service rather than hiding them with a service locator.
 
-**Practice:** list every dependency required to run `Charge`. Anything absent from that list should not be a constructor parameter.
+**Try it:** list every dependency required to run `Charge`. Anything absent from that list should not be a constructor parameter.
 
 ---
 
@@ -179,11 +183,11 @@ The object cannot exist until all required collaborators exist. Tests construct 
 
 **Answer:** `inject()` asks Angular's active injection context for a dependency. It works in field initializers, factories, guards, interceptors, and other context-aware code.
 
-**What problem does this concept solve?** It enables DI where no class constructor exists and makes functional Angular APIs possible.
+**What problem does it solve?** It enables DI where no class constructor exists and makes functional Angular APIs possible.
 
 **Before this concept:** Functional guards and interceptors required wrapper classes primarily to receive dependencies.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```typescript
 function loadData() {
@@ -192,7 +196,7 @@ function loadData() {
 }
 ```
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export const authGuard: CanActivateFn = () => {
@@ -209,9 +213,11 @@ export class ProductFacade {
 
 ✅ **Backend equivalent:** ASP.NET Core typically uses constructor injection for classes and parameter injection for endpoints; it has no direct equivalent that should be called from arbitrary business code.
 
-**How it works after this pattern:** Angular resolves the token from the current environment/element injector without requiring a constructor-only API.
+**How it works now:** Angular resolves the token from the current environment/element injector without requiring a constructor-only API.
 
-**Trade-off:** `inject()` still creates a dependency. Do not scatter it through ordinary helper functions or use it to disguise excessive coupling.
+**Trade-offs and when not to use it:** `inject()` still creates a dependency. Do not scatter it through ordinary helper functions or use it to disguise excessive coupling.
+
+**Production checks:** Call `inject()` only in a valid Angular injection context, keep dependencies discoverable near the class boundary, override tokens in focused tests, and verify tree-shakable providers are not retained accidentally.
 
 ### Practical walkthrough — Angular `inject()`: use it where constructor parameters do not fit
 
@@ -232,7 +238,7 @@ export const canPay: CanActivateFn = () => {
 
 **Backend equivalent:** minimal-API route parameters or a handler constructor receive dependencies from the request’s service provider. Do not keep `IServiceProvider` and call it inside business methods.
 
-**Practice:** convert one Angular functional interceptor from a global import to `inject(AuthTokenSource)` and override it in a test.
+**Try it:** convert one Angular functional interceptor from a global import to `inject(AuthTokenSource)` and override it in a test.
 
 ---
 
@@ -242,13 +248,13 @@ export const canPay: CanActivateFn = () => {
 
 **Answer:** Use parameter injection when the dependency is needed only for one operation and the framework owns that method invocation.
 
-**What problem does this concept solve?** It avoids storing request-specific or rarely used dependencies on a long-lived object.
+**What problem does it solve?** It avoids storing request-specific or rarely used dependencies on a long-lived object.
 
 **Before this concept:** Controllers injected every possible handler into the constructor even if each endpoint used only one.
 
-❌ **Wrong example:** Pass infrastructure manually through every internal method until signatures become plumbing rather than domain APIs.
+❌ **Wrong/before example:** Pass infrastructure manually through every internal method until signatures become plumbing rather than domain APIs.
 
-✅ **Correct frontend example:** Angular functional providers receive dependencies through a factory's parameters or `inject()` context; component event methods themselves are not automatically parameter-injected.
+✅ **After/correct example — frontend:** Angular functional providers receive dependencies through a factory's parameters or `inject()` context; component event methods themselves are not automatically parameter-injected.
 
 ```typescript
 export const API_CLIENT = new InjectionToken<ApiClient>('API_CLIENT', {
@@ -257,7 +263,7 @@ export const API_CLIENT = new InjectionToken<ApiClient>('API_CLIENT', {
 });
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 app.MapGet("/orders/{id:guid}", async (
@@ -270,9 +276,11 @@ app.MapGet("/orders/{id:guid}", async (
 });
 ```
 
-**How it works after this pattern:** The framework resolves operation-specific dependencies at invocation time while request data remains ordinary parameters.
+**How it works now:** The framework resolves operation-specific dependencies at invocation time while request data remains ordinary parameters.
 
-**Trade-off:** Prefer constructor injection when several methods share the dependency or the class logically requires it.
+**Trade-offs and when not to use it:** Prefer constructor injection when several methods share the dependency or the class logically requires it.
+
+**Production checks:** Keep operation-specific dependencies explicit, propagate cancellation and request context deliberately, avoid parameter lists that expose infrastructure everywhere, and test alternate callers using the same method contract.
 
 ### Practical walkthrough — Method/parameter injection: inject only for one operation
 
@@ -294,7 +302,7 @@ In Angular, a factory or event handler can inject inside a valid context, or rec
 
 **What changed:** the dependency’s scope mirrors actual use. This is useful for rare collaborators, but do not use method injection to hide a core requirement of every call.
 
-**Practice:** decide whether `CancellationToken`, `ILogger`, and `IClock` belong to constructor or method signatures in a given service.
+**Try it:** decide whether `CancellationToken`, `ILogger`, and `IClock` belong to constructor or method signatures in a given service.
 
 ---
 
@@ -304,11 +312,11 @@ In Angular, a factory or event handler can inject inside a valid context, or rec
 
 **Answer:** The object is created first, then the container or caller assigns a dependency through a writable property or setter.
 
-**What problem does this concept solve?** It can support genuinely optional collaborators or legacy frameworks that construct objects before dependencies are available.
+**What problem does it solve?** It can support genuinely optional collaborators or legacy frameworks that construct objects before dependencies are available.
 
 **Before this concept:** Some framework-created objects had no constructor hook for supplying a collaborator.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public sealed class InvoiceService
@@ -318,9 +326,9 @@ public sealed class InvoiceService
 }
 ```
 
-✅ **Correct frontend guidance:** Angular normally uses constructor injection or `inject()`. An `@Input()` is component data binding, not dependency injection.
+✅ **After/correct example — frontend guidance:** Angular normally uses constructor injection or `inject()`. An `@Input()` is component data binding, not dependency injection.
 
-✅ **Correct backend exception:**
+✅ **After/correct example — controlled backend exception:**
 
 ```csharp
 public sealed class LegacyPlugin
@@ -330,9 +338,11 @@ public sealed class LegacyPlugin
 }
 ```
 
-**How it works after this pattern:** The object has a safe default and explicitly accepts an optional capability when the legacy host can provide it.
+**How it works now:** The object has a safe default and explicitly accepts an optional capability when the legacy host can provide it.
 
-**Trade-off:** Required property injection creates invalid intermediate state. The built-in .NET container does not perform general property injection; prefer constructors.
+**Trade-offs and when not to use it:** Required property injection creates invalid intermediate state. The built-in .NET container does not perform general property injection; prefer constructors.
+
+**Production checks:** Ensure optional properties have safe defaults, prevent concurrent mutation after construction, document framework-driven setters, and add tests proving the object remains valid before and after optional configuration.
 
 ### Practical walkthrough — Property/setter injection: understand why it is usually unsafe
 
@@ -352,7 +362,7 @@ A host framework may set optional plugin metadata after construction, or a test 
 
 **What changed when you choose constructor injection instead:** invalid objects become impossible to create. A setter is not “simpler DI”; it transfers correctness from the type system to caller discipline.
 
-**Practice:** take a nullable injected property from a class and replace it with either a required constructor dependency or an explicit `NoOp...` implementation.
+**Try it:** take a nullable injected property from a class and replace it with either a required constructor dependency or an explicit `NoOp...` implementation.
 
 ---
 
@@ -362,13 +372,13 @@ A host framework may set optional plugin metadata after construction, or a test 
 
 **Answer:** The consumer implements an interface containing a method through which an injector supplies a dependency.
 
-**What problem does this concept solve?** It gives a plugin framework a standardized callback for supplying a capability after object creation.
+**What problem does it solve?** It gives a plugin framework a standardized callback for supplying a capability after object creation.
 
 **Before this concept:** Plugin hosts used reflection or concrete-type checks to configure plugins.
 
-❌ **Wrong example:** Make every domain class implement framework-specific injection interfaces, coupling the domain to the container.
+❌ **Wrong/before example:** Make every domain class implement framework-specific injection interfaces, coupling the domain to the container.
 
-✅ **Correct example for a plugin boundary:**
+✅ **After/correct example — plug-in boundary:**
 
 ```csharp
 public interface IRequireLogger
@@ -385,9 +395,11 @@ public sealed class ExportPlugin : IRequireLogger
 
 ✅ **Frontend equivalent:** Angular does not use interface injection because TypeScript interfaces do not exist at runtime. Use `InjectionToken<T>` plus constructor injection or `inject()`.
 
-**How it works after this pattern:** A plugin host configures all objects implementing one capability contract without knowing concrete types.
+**How it works now:** A plugin host configures all objects implementing one capability contract without knowing concrete types.
 
-**Trade-off:** This is rare and framework-coupled. Constructor injection is clearer for normal application services.
+**Trade-offs and when not to use it:** This is rare and framework-coupled. Constructor injection is clearer for normal application services.
+
+**Production checks:** Keep the injected capability narrow, prevent plugins from receiving an unrestricted service provider, version the host interface compatibly, and test untrusted or partially compatible implementations.
 
 ### Practical walkthrough — Interface injection: recognize the narrow case
 
@@ -408,7 +420,7 @@ The plugin contract explicitly says the host will supply a capability. TypeScrip
 
 **What changed:** a framework/plugin lifecycle becomes visible in the type contract. For ordinary application classes, constructor injection is clearer and safer; interface injection is primarily a legacy or framework extensibility technique.
 
-**Practice:** if a plugin needs database, logging, and HTTP access, design one constrained host capability rather than injecting the whole service provider.
+**Try it:** if a plugin needs database, logging, and HTTP access, design one constrained host capability rather than injecting the whole service provider.
 
 ---
 
@@ -418,11 +430,11 @@ The plugin contract explicitly says the host will supply a capability. TypeScrip
 
 **Answer:** Some frameworks write directly into annotated fields. It works technically but hides required dependencies and complicates direct construction and testing.
 
-**What problem does this concept solve?** It reduces constructor syntax, but mostly at the cost of object clarity.
+**What problem does it solve?** It reduces constructor syntax, but mostly at the cost of object clarity.
 
 **Before this concept:** Large constructors looked uncomfortable, so dependencies were moved into invisible field annotations rather than reducing responsibilities.
 
-❌ **Wrong backend example:**
+❌ **Wrong/before example — backend:**
 
 ```csharp
 public sealed class OrderService
@@ -440,11 +452,13 @@ class PlainHelper {
 }
 ```
 
-✅ **Correct example:** Declare required dependencies through a constructor, or use Angular `inject()` only in a documented injection context.
+✅ **After/correct example:** Declare required dependencies through a constructor, or use Angular `inject()` only in a documented injection context.
 
-**How it works after this pattern:** Dependencies are visible and direct unit construction either supplies them or fails at compile time.
+**How it works now:** Dependencies are visible and direct unit construction either supplies them or fails at compile time.
 
-**Trade-off:** Angular field initializers using `inject()` are supported context resolution, not reflection-based field mutation; still keep the dependency count small.
+**Trade-offs and when not to use it:** Angular field initializers using `inject()` are supported context resolution, not reflection-based field mutation; still keep the dependency count small.
+
+**Production checks:** Avoid reflection-based mutation and service-location helpers, keep initialization order deterministic, make dependencies visible to reviewers, and test construction through the actual framework path.
 
 ### Practical walkthrough — Field injection and hidden dependencies: avoid a disguised service locator
 
@@ -465,7 +479,7 @@ Use constructor injection for core, required collaborators. Reserve Angular fiel
 
 **What changed:** dependencies are discoverable and tests can supply them deliberately. The rule is not “never use Angular `inject()`”; it is “never hide the dependency graph.”
 
-**Practice:** open a class and identify its dependencies without reading method bodies. If you cannot, make them explicit.
+**Try it:** open a class and identify its dependencies without reading method bodies. If you cannot, make them explicit.
 
 ---
 
@@ -475,13 +489,13 @@ Use constructor injection for core, required collaborators. Reserve Angular fiel
 
 **Answer:** It is the application location where concrete implementations, decorators, lifetimes, configuration, and object graphs are wired.
 
-**What problem does this concept solve?** It keeps construction policy out of business code and makes runtime architecture inspectable.
+**What problem does it solve?** It keeps construction policy out of business code and makes runtime architecture inspectable.
 
 **Before this concept:** Registrations and `new` calls appeared throughout modules, controllers, and services.
 
-❌ **Wrong example:** Register services conditionally from inside a request handler or import an Angular provider array into random feature classes.
+❌ **Wrong/before example:** Register services conditionally from inside a request handler or import an Angular provider array into random feature classes.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 bootstrapApplication(AppComponent, {
@@ -493,7 +507,7 @@ bootstrapApplication(AppComponent, {
 });
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -503,9 +517,11 @@ builder.Services.AddHttpClient<IPaymentGateway, StripeGateway>();
 var app = builder.Build();
 ```
 
-**How it works after this pattern:** Business classes declare abstractions; the startup boundary decides concrete runtime policy.
+**How it works now:** Business classes declare abstractions; the startup boundary decides concrete runtime policy.
 
-**Trade-off:** Large startup files become hard to navigate. Group registrations by cohesive feature, but call them from one visible root.
+**Trade-offs and when not to use it:** Large startup files become hard to navigate. Group registrations by cohesive feature, but call them from one visible root.
+
+**Production checks:** Run container validation in CI and startup, detect duplicate or missing registrations, keep environment-specific substitutions explicit, and verify every application entry point uses the same approved composition modules.
 
 ### Practical walkthrough — Composition root: one place chooses real implementations
 
@@ -527,7 +543,7 @@ Business classes do not register or resolve themselves. Tests create a smaller c
 
 **What changed:** implementation selection is centralized, reviewable, and environment-specific without contaminating domain code. Keep the root declarative; avoid writing business decisions in registration lambdas.
 
-**Practice:** trace one `IPaymentGateway` from its registration to an endpoint, then replace it in an integration test without editing production code.
+**Try it:** trace one `IPaymentGateway` from its registration to an endpoint, then replace it in an integration test without editing production code.
 
 ---
 
@@ -537,13 +553,13 @@ Business classes do not register or resolve themselves. Tests create a smaller c
 
 **Answer:** The container needs a runtime key. .NET interfaces and classes are runtime types; TypeScript interfaces disappear, so Angular uses classes or `InjectionToken<T>`.
 
-**What problem does this concept solve?** Consumers depend on stable capabilities instead of constructing specific implementations.
+**What problem does it solve?** Consumers depend on stable capabilities instead of constructing specific implementations.
 
 **Before this concept:** Components imported environment constants or concrete SDKs directly, and backend services depended on provider classes.
 
-❌ **Wrong frontend example:** Use a string token such as `'API_URL'`; strings collide and lose type safety.
+❌ **Wrong/before example — frontend:** Use a string token such as `'API_URL'`; strings collide and lose type safety.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export const API_BASE_URL = new InjectionToken<string>('API_BASE_URL');
@@ -555,16 +571,18 @@ providers: [
 ]
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 public interface IStorageGateway { Task<Uri> UploadAsync(Stream stream, CancellationToken ct); }
 services.AddScoped<IStorageGateway, GcpStorageGateway>();
 ```
 
-**How it works after this pattern:** The consumer knows the contract; the composition root chooses the environment-specific implementation.
+**How it works now:** The consumer knows the contract; the composition root chooses the environment-specific implementation.
 
-**Trade-off:** An interface for every class adds noise. Introduce an abstraction at a meaningful boundary or when multiple implementations/testing justify it.
+**Trade-offs and when not to use it:** An interface for every class adds noise. Introduce an abstraction at a meaningful boundary or when multiple implementations/testing justify it.
+
+**Production checks:** Give tokens stable ownership, prevent string-key collisions, keep browser-safe configuration separate from server secrets, and fail clearly when a required implementation is absent.
 
 ### Practical walkthrough — Tokens and abstractions: distinguish two payment implementations at runtime
 
@@ -586,7 +604,7 @@ Consumers depend on a capability defined in their language. The composition root
 
 **What changed:** callers no longer need provider DTOs or SDK constructors. Do not invent abstractions for every internal class—put them at external, variable, or independently testable boundaries.
 
-**Practice:** define an abstraction in language of the application (`Charge`, `Refund`, `GetStatus`) rather than mirroring a provider SDK method-for-method.
+**Try it:** define an abstraction in language of the application (`Charge`, `Refund`, `GetStatus`) rather than mirroring a provider SDK method-for-method.
 
 ---
 
@@ -602,15 +620,15 @@ Consumers depend on a capability defined in their language. The composition root
 | One per request/subtree | Scoped per HTTP request | One per element/environment injector subtree |
 | One for application root | Singleton | `providedIn: 'root'` |
 
-**What problem does this concept solve?** It matches object reuse to state ownership and resource safety.
+**What problem does it solve?** It matches object reuse to state ownership and resource safety.
 
 **Before this concept:** Objects were global by accident or created repeatedly, causing state leaks, connection misuse, or duplicated caches.
 
-❌ **Wrong backend example:** A singleton captures scoped `DbContext`, keeping one context across requests.
+❌ **Wrong/before example — backend:** A singleton captures scoped `DbContext`, keeping one context across requests.
 
-❌ **Wrong frontend example:** Provide a supposed global cart store in every page component, creating a different cart per route subtree.
+❌ **Wrong/before example — frontend:** Provide a supposed global cart store in every page component, creating a different cart per route subtree.
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 services.AddSingleton<ISystemClock, SystemClock>();
@@ -619,7 +637,7 @@ services.AddScoped<IOrderService, OrderService>();
 services.AddTransient<IEmailFormatter, EmailFormatter>();
 ```
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 @Injectable({ providedIn: 'root' })
@@ -629,9 +647,11 @@ export class SessionStore {}
 export class CheckoutWizardComponent {} // isolated state per wizard instance
 ```
 
-**How it works after this pattern:** Global stateless services are reused, request/subtree state remains isolated, and disposable backend resources end with their scope.
+**How it works now:** Global stateless services are reused, request/subtree state remains isolated, and disposable backend resources end with their scope.
 
-**Trade-off:** Lifetime bugs are correctness bugs. Enable scope validation and document where Angular providers are registered.
+**Trade-offs and when not to use it:** Lifetime bugs are correctness bugs. Enable scope validation and document where Angular providers are registered.
+
+**Production checks:** Enable .NET scope validation, never capture request-scoped state in singletons, dispose owned resources, create a fresh scope per background operation, and test concurrent users for state leakage.
 
 ### Practical walkthrough — Lifetimes and scopes: prevent request data leaking between users
 
@@ -653,7 +673,7 @@ Register stateful request work—such as `DbContext`, tenant context, or unit of
 
 **What changed:** object lifetime matches the state it owns. Lifetimes are behavior, not an optimization knob; draw two concurrent request diagrams before choosing one.
 
-**Practice:** label `HttpClient`, `DbContext`, current-user context, clock, cache client, and validator with a justified lifetime.
+**Try it:** label `HttpClient`, `DbContext`, current-user context, clock, cache client, and validator with a justified lifetime.
 
 ---
 
@@ -663,13 +683,13 @@ Register stateful request work—such as `DbContext`, tenant context, or unit of
 
 **Answer:** Angular resolves from the nearest element/environment injector and then walks upward. A child can override a parent token. ASP.NET Core uses nested scopes but does not normally override registrations per controller subtree.
 
-**What problem does this concept solve?** A feature subtree can own isolated state or substitute a local implementation without changing the whole application.
+**What problem does it solve?** A feature subtree can own isolated state or substitute a local implementation without changing the whole application.
 
 **Before this concept:** Wizard instances accidentally shared progress, or test/demo features changed global providers.
 
-❌ **Wrong example:** Register a mutable wizard state in root and assume each open wizard gets a separate instance.
+❌ **Wrong/before example:** Register a mutable wizard state in root and assume each open wizard gets a separate instance.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 @Component({
@@ -689,9 +709,11 @@ var processor = scope.ServiceProvider.GetRequiredService<JobProcessor>();
 await processor.RunAsync(job, ct); // fresh scoped graph for one job
 ```
 
-**How it works after this pattern:** State follows the UI subtree or backend operation scope rather than leaking globally.
+**How it works now:** State follows the UI subtree or backend operation scope rather than leaking globally.
 
-**Trade-off:** Shadowed Angular providers can be surprising. Use root services by default and local providers intentionally.
+**Trade-offs and when not to use it:** Shadowed Angular providers can be surprising. Use root services by default and local providers intentionally.
+
+**Production checks:** Document every local override, verify destruction releases subscriptions and resources, test sibling and nested component resolution, and avoid storing user-global state in a component-scoped instance.
 
 ### Practical walkthrough — Hierarchical Angular injection: override a component subtree safely
 
@@ -711,7 +733,7 @@ Root injector: CurrencyFormatter(en-IN)
 
 **Backend analogy:** a request scope provides per-request dependencies, but it is not a general nested override tree in the same way. Use an explicit scoped context or factory for a sub-operation rather than mutating global registrations.
 
-**Practice:** provide a fake API only to one Angular component test and confirm sibling components still receive the real test default.
+**Try it:** provide a fake API only to one Angular component test and confirm sibling components still receive the real test default.
 
 ---
 
@@ -721,13 +743,13 @@ Root injector: CurrencyFormatter(en-IN)
 
 **Answer:** A factory creates an implementation when construction depends on configuration or other injected services.
 
-**What problem does this concept solve?** It centralizes conditional construction without pushing container logic into consumers.
+**What problem does it solve?** It centralizes conditional construction without pushing container logic into consumers.
 
 **Before this concept:** Components and services read configuration and manually chose concrete implementations.
 
-❌ **Wrong example:** Inject `IServiceProvider` or Angular `Injector` and switch on environment inside business methods.
+❌ **Wrong/before example:** Inject `IServiceProvider` or Angular `Injector` and switch on environment inside business methods.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export const storageProvider: Provider = {
@@ -740,7 +762,7 @@ export const storageProvider: Provider = {
 };
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 services.AddSingleton<IClock>(sp =>
@@ -749,9 +771,11 @@ services.AddSingleton<IClock>(sp =>
         : TimeProvider.System.AsClock());
 ```
 
-**How it works after this pattern:** Consumers receive one stable abstraction; construction policy remains in provider registration.
+**How it works now:** Consumers receive one stable abstraction; construction policy remains in provider registration.
 
-**Trade-off:** Complex factories are difficult to test and validate. Move substantial creation rules into a dedicated typed factory.
+**Trade-offs and when not to use it:** Complex factories are difficult to test and validate. Move substantial creation rules into a dedicated typed factory.
+
+**Production checks:** Validate all configuration branches at startup, avoid unbounded per-request object creation, dispose factory-owned resources correctly, and test unknown regions, tenants, or provider selections.
 
 ### Practical walkthrough — Factory/provider injection: construct from runtime configuration
 
@@ -769,7 +793,7 @@ public interface ITaxGatewayFactory { ITaxGateway For(Region region); }
 
 **What changed:** construction policy is named, centralized, and testable. The factory must not quietly choose a wrong fallback for a missing region; reject invalid configuration at startup or return an explicit unsupported result.
 
-**Practice:** write the table of valid regions/providers and unit-test the selector without any HTTP calls.
+**Try it:** write the table of valid regions/providers and unit-test the selector without any HTTP calls.
 
 ---
 
@@ -779,13 +803,13 @@ public interface ITaxGatewayFactory { ITaxGateway For(Region region); }
 
 **Answer:** Register implementations with distinct runtime keys or inject all implementations and select through a typed router.
 
-**What problem does this concept solve?** It supports several providers without concrete-type dependencies or giant conditional constructors.
+**What problem does it solve?** It supports several providers without concrete-type dependencies or giant conditional constructors.
 
 **Before this concept:** Callers injected Stripe, PayPal, and Razorpay classes separately and switched manually.
 
-❌ **Wrong example:** Select by fragile class name or resolve arbitrary services from the container inside domain code.
+❌ **Wrong/before example:** Select by fragile class name or resolve arbitrary services from the container inside domain code.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export const PRIMARY_ANALYTICS = new InjectionToken<Analytics>('PRIMARY_ANALYTICS');
@@ -797,7 +821,7 @@ providers: [
 ]
 ```
 
-✅ **Correct backend example (.NET 8+):**
+✅ **After/correct example — backend (.NET 8+):**
 
 ```csharp
 services.AddKeyedScoped<IPaymentGateway, StripeGateway>("stripe");
@@ -814,9 +838,11 @@ app.MapPost("/pay/stripe", async (
 });
 ```
 
-**How it works after this pattern:** The key expresses configuration-time selection. For runtime user data, a typed strategy router is usually safer than injecting the raw container.
+**How it works now:** The key expresses configuration-time selection. For runtime user data, a typed strategy router is usually safer than injecting the raw container.
 
-**Trade-off:** String keys can drift. Prefer constants, enums with mapping, or a typed provider router.
+**Trade-offs and when not to use it:** String keys can drift. Prefer constants, enums with mapping, or a typed provider router.
+
+**Production checks:** Centralize keys, reject unknown selections, authorize tenant-specific implementations, verify every key resolves during startup tests, and emit bounded telemetry for selection failures.
 
 ### Practical walkthrough — Keyed/named/qualified services: select one of several legitimate implementations
 
@@ -837,7 +863,7 @@ The checkout service receives a `NotificationSelector`, not arbitrary strings fr
 
 **What changed:** multiplicity is explicit. For a small fixed set, separate interfaces like `IEmailSender` and `ISmsSender` may be even clearer than keys.
 
-**Practice:** decide who owns mapping `"sms"` from an API request to the correct sender and why it should not be scattered.
+**Try it:** decide who owns mapping `"sms"` from an API request to the correct sender and why it should not be scattered.
 
 ---
 
@@ -847,28 +873,30 @@ The checkout service receives a `NotificationSelector`, not arbitrary strings fr
 
 **Answer:** A dependency is optional only when the object has a complete, valid fallback behavior without it.
 
-**What problem does this concept solve?** Reusable libraries can integrate with capabilities that may not exist in every host.
+**What problem does it solve?** Reusable libraries can integrate with capabilities that may not exist in every host.
 
 **Before this concept:** Applications registered meaningless placeholder services only to satisfy constructors.
 
-❌ **Wrong example:** Mark a payment gateway optional and use `gateway!` later even though payment cannot work without it.
+❌ **Wrong/before example:** Mark a payment gateway optional and use `gateway!` later even though payment cannot work without it.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 const analytics = inject(ANALYTICS, { optional: true });
 analytics?.track('page_view'); // feature remains valid without analytics
 ```
 
-✅ **Correct backend example:** Prefer the Null Object pattern because ASP.NET Core constructor resolution treats missing required services as configuration errors.
+✅ **After/correct example — backend:** Prefer the Null Object pattern because ASP.NET Core constructor resolution treats missing required services as configuration errors.
 
 ```csharp
 services.TryAddSingleton<IAnalytics, NullAnalytics>();
 ```
 
-**How it works after this pattern:** Truly optional behavior disappears safely, while required capabilities still fail fast during startup.
+**How it works now:** Truly optional behavior disappears safely, while required capabilities still fail fast during startup.
 
-**Trade-off:** Excessive optional dependencies create many runtime paths. Use them mainly in libraries or plug-in capabilities.
+**Trade-offs and when not to use it:** Excessive optional dependencies create many runtime paths. Use them mainly in libraries or plug-in capabilities.
+
+**Production checks:** Define behavior for absence explicitly, prefer a no-op implementation when callers should not branch, expose disabled capabilities to operators, and test both installed and missing-provider paths.
 
 ### Practical walkthrough — Optional injection: model a feature that is truly optional
 
@@ -887,7 +915,7 @@ Optional analytics reporter: NoOp implementation is valid behavior.
 
 **What changed:** optionality becomes a product decision rather than an accidental null. Treat required services as fail-fast startup errors.
 
-**Practice:** classify email, audit logging, loyalty analytics, and payment capture as required/optional for your product, including outage behavior.
+**Try it:** classify email, audit logging, loyalty analytics, and payment capture as required/optional for your product, including outage behavior.
 
 ---
 
@@ -897,13 +925,13 @@ Optional analytics reporter: NoOp implementation is valid behavior.
 
 **Answer:** Resolve or create an expensive dependency only when the operation that needs it runs.
 
-**What problem does this concept solve?** It avoids startup cost or circular construction for a rarely used capability.
+**What problem does it solve?** It avoids startup cost or circular construction for a rarely used capability.
 
 **Before this concept:** Every request or component eagerly created a heavy SDK client even when most paths never used it.
 
-❌ **Wrong example:** Inject the root container and call `GetService` throughout business code under the name “lazy.”
+❌ **Wrong/before example:** Inject the root container and call `GetService` throughout business code under the name “lazy.”
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 async openAdvancedEditor() {
@@ -912,7 +940,7 @@ async openAdvancedEditor() {
 }
 ```
 
-✅ **Correct backend example with an explicit factory:**
+✅ **After/correct example — backend with an explicit factory:**
 
 ```csharp
 services.AddScoped<Func<IReportRenderer>>(sp =>
@@ -924,9 +952,11 @@ public sealed class ReportService(Func<IReportRenderer> rendererFactory)
 }
 ```
 
-**How it works after this pattern:** Expensive code or objects appear only on the path that needs them, while the dependency remains explicit through a typed factory.
+**How it works now:** Expensive code or objects appear only on the path that needs them, while the dependency remains explicit through a typed factory.
 
-**Trade-off:** Resolution failures move from startup to runtime. Do not use laziness to conceal circular or oversized designs.
+**Trade-offs and when not to use it:** Resolution failures move from startup to runtime. Do not use laziness to conceal circular or oversized designs.
+
+**Production checks:** Make lazy initialization thread-safe, cache only when lifetime rules permit it, surface first-use failures with context, warm critical paths when latency matters, and dispose the realized value correctly.
 
 ### Practical walkthrough — Lazy injection: defer a rare expensive dependency
 
@@ -940,7 +970,7 @@ Inject an explicit factory such as `Func<IFraudModel>` in .NET or use a delibera
 
 **What changed:** cost is paid only if the behavior is used. Lazy creation does not make a dependency optional; failures still need handling, and it can hide a slow first-use path.
 
-**Practice:** measure whether a dependency is actually expensive enough to justify laziness; otherwise prefer ordinary eager constructor injection.
+**Try it:** measure whether a dependency is actually expensive enough to justify laziness; otherwise prefer ordinary eager constructor injection.
 
 ---
 
@@ -950,13 +980,13 @@ Inject an explicit factory such as `Func<IFraudModel>` in .NET or use a delibera
 
 **Answer:** Register each implementation and inject the collection. Angular uses `multi: true`; ASP.NET Core resolves `IEnumerable<T>`.
 
-**What problem does this concept solve?** Pipelines and plug-in systems can discover implementations without a central switch statement.
+**What problem does it solve?** Pipelines and plug-in systems can discover implementations without a central switch statement.
 
 **Before this concept:** A coordinator directly constructed every validator, exporter, or notification channel.
 
-❌ **Wrong example:** Edit the coordinator whenever a new handler is added.
+❌ **Wrong/before example:** Edit the coordinator whenever a new handler is added.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export const FORM_VALIDATORS = new InjectionToken<FormValidator[]>('FORM_VALIDATORS');
@@ -966,7 +996,7 @@ providers: [
 ]
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 services.AddScoped<IOrderRule, CreditLimitRule>();
@@ -986,9 +1016,11 @@ public sealed class OrderPolicy(IEnumerable<IOrderRule> rules)
 }
 ```
 
-**How it works after this pattern:** Adding an implementation requires registration, not coordinator modification.
+**How it works now:** Adding an implementation requires registration, not coordinator modification.
 
-**Trade-off:** Ordering may matter. Define priority explicitly rather than relying accidentally on registration order.
+**Trade-offs and when not to use it:** Ordering may matter. Define priority explicitly rather than relying accidentally on registration order.
+
+**Production checks:** Define deterministic ordering, isolate one plug-in failure when appropriate, validate duplicate registrations, cap plug-in execution time, and test the empty, single, and multiple implementation cases.
 
 ### Practical walkthrough — Collection/multi-binding: run validation rules or plugins
 
@@ -1006,7 +1038,7 @@ Checkout -> [StockRule, FraudRule, AddressRule, PromotionRule] -> results
 
 **What changed:** extensions are additive. But order, conflicts, and short-circuit semantics must be explicit—an unordered set of plugins is not a business workflow.
 
-**Practice:** add a rule that applies only to an EU tenant and decide whether a rule failure stops later rules.
+**Try it:** add a rule that applies only to an EU tenant and decide whether a rule failure stops later rules.
 
 ---
 
@@ -1016,13 +1048,13 @@ Checkout -> [StockRule, FraudRule, AddressRule, PromotionRule] -> results
 
 **Answer:** One .NET registration supplies a generic implementation for many closed service types. Angular tokens are runtime values and do not automatically vary by TypeScript generic argument.
 
-**What problem does this concept solve?** It avoids repeating identical registrations for repositories, validators, or handlers across entity types.
+**What problem does it solve?** It avoids repeating identical registrations for repositories, validators, or handlers across entity types.
 
 **Before this concept:** Every entity registered `IRepository<Customer>`, `IRepository<Order>`, and so on separately.
 
-❌ **Wrong example:** Assume `InjectionToken<Repository<Order>>` and `InjectionToken<Repository<Customer>>` are different at runtime when they use the same token object.
+❌ **Wrong/before example:** Assume `InjectionToken<Repository<Order>>` and `InjectionToken<Repository<Customer>>` are different at runtime when they use the same token object.
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 services.AddScoped(typeof(IRepository<>), typeof(EfRepository<>));
@@ -1038,9 +1070,11 @@ export const ORDER_REPOSITORY = new InjectionToken<Repository<Order>>('ORDER_REP
 export const CUSTOMER_REPOSITORY = new InjectionToken<Repository<Customer>>('CUSTOMER_REPOSITORY');
 ```
 
-**How it works after this pattern:** .NET closes the generic registration automatically; Angular uses explicit runtime identity despite compile-time generics.
+**How it works now:** .NET closes the generic registration automatically; Angular uses explicit runtime identity despite compile-time generics.
 
-**Trade-off:** Generic repositories can erase domain meaning. Use domain-specific interfaces when operations differ.
+**Trade-offs and when not to use it:** Generic repositories can erase domain meaning. Use domain-specific interfaces when operations differ.
+
+**Production checks:** Constrain supported generic types, verify open registrations resolve for every closed type used by the application, enforce tenant filters, and avoid exposing generic CRUD where domain invariants require specialized operations.
 
 ### Practical walkthrough — Open generic injection: apply one policy to many entity types
 
@@ -1056,7 +1090,7 @@ Angular TypeScript generics are erased at runtime, so it needs explicit tokens/f
 
 **What changed:** shared type-safe behavior is wired once on the backend. Do not use it to hide aggregate-specific repositories whose methods or loading rules differ.
 
-**Practice:** list which CRUD operations are genuinely uniform and which deserve a domain-specific repository.
+**Try it:** list which CRUD operations are genuinely uniform and which deserve a domain-specific repository.
 
 ---
 
@@ -1066,19 +1100,19 @@ Angular TypeScript generics are erased at runtime, so it needs explicit tokens/f
 
 **Answer:** Register a decorator that implements the same interface and receives the inner implementation.
 
-**What problem does this concept solve?** Cross-cutting behavior is composed without modifying core service code.
+**What problem does it solve?** Cross-cutting behavior is composed without modifying core service code.
 
 **Before this concept:** Each service duplicated cache and timing logic.
 
-❌ **Wrong example:** Add logging, retry, cache, authorization, and domain behavior to one implementation until it has several reasons to change.
+❌ **Wrong/before example:** Add logging, retry, cache, authorization, and domain behavior to one implementation until it has several reasons to change.
 
-✅ **Correct frontend example:** Angular HTTP interceptors form a decorator-like chain around `HttpClient` requests.
+✅ **After/correct example — frontend:** Angular HTTP interceptors form a decorator-like chain around `HttpClient` requests.
 
 ```typescript
 provideHttpClient(withInterceptors([authInterceptor, timingInterceptor]));
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 services.AddScoped<IProductReader, ProductReader>();
@@ -1086,9 +1120,11 @@ services.Decorate<IProductReader, CachedProductReader>(); // using Scrutor
 services.Decorate<IProductReader, TimedProductReader>();
 ```
 
-**How it works after this pattern:** The consumer receives one `IProductReader`; DI builds an ordered wrapper chain around the core implementation.
+**How it works now:** The consumer receives one `IProductReader`; DI builds an ordered wrapper chain around the core implementation.
 
-**Trade-off:** Order changes behavior. Document and test the chain; too many wrappers complicate tracing.
+**Trade-offs and when not to use it:** Order changes behavior. Document and test the chain; too many wrappers complicate tracing.
+
+**Production checks:** Assert decorator order in composition tests, prevent duplicate caching or retries, propagate cancellation and correlation context through every layer, and ensure metrics describe one logical operation consistently.
 
 ### Practical walkthrough — Decorator injection: add resilience without mixing it into payment logic
 
@@ -1106,7 +1142,7 @@ Every wrapper implements `IPaymentGateway` and delegates to the next. Angular ca
 
 **What changed:** cross-cutting behavior is composable. Do not decorate non-idempotent payment calls with automatic retry unless the gateway sends an idempotency key.
 
-**Practice:** choose decorator order and write a test showing how many metrics are emitted when the first attempt times out.
+**Try it:** choose decorator order and write a test showing how many metrics are emitted when the first attempt times out.
 
 ---
 
@@ -1116,17 +1152,17 @@ Every wrapper implements `IPaymentGateway` and delegates to the next. Angular ca
 
 **Answer:** Bind and validate configuration at the composition root, then inject a typed, purpose-specific object.
 
-**What problem does this concept solve?** It centralizes parsing, validation, defaults, and reload behavior.
+**What problem does it solve?** It centralizes parsing, validation, defaults, and reload behavior.
 
 **Before this concept:** Services used string keys, parsed values repeatedly, and discovered missing configuration only on rare code paths.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var timeout = int.Parse(Environment.GetEnvironmentVariable("TIMEOUT")!);
 ```
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 export interface AppConfig { apiBaseUrl: string; supportUrl: string; }
@@ -1134,7 +1170,7 @@ export const APP_CONFIG = new InjectionToken<AppConfig>('APP_CONFIG');
 providers: [{ provide: APP_CONFIG, useValue: environment }]
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 builder.Services.AddOptions<PaymentOptions>()
@@ -1148,9 +1184,11 @@ public sealed class PaymentClient(IOptions<PaymentOptions> options)
 }
 ```
 
-**How it works after this pattern:** Invalid configuration fails during startup, and consumers use typed values rather than global string lookup.
+**How it works now:** Invalid configuration fails during startup, and consumers use typed values rather than global string lookup.
 
-**Trade-off:** Use `IOptionsSnapshot` for per-request refresh and `IOptionsMonitor` for change notifications only when dynamic reload is truly required.
+**Trade-offs and when not to use it:** Use `IOptionsSnapshot` for per-request refresh and `IOptionsMonitor` for change notifications only when dynamic reload is truly required.
+
+**Production checks:** Validate options at startup, keep secrets out of logs and client bundles, define reload failure behavior, avoid reading raw configuration throughout business code, and test invalid production-like settings in CI.
 
 ### Practical walkthrough — Configuration/options injection: validate once, use typed settings
 
@@ -1168,7 +1206,7 @@ Raw environment/config -> validate -> typed options/token -> consumer
 
 **What changed:** configuration is a dependency with a lifecycle and validation rules. Never inject secrets into an Angular bundle; browser config is public by definition.
 
-**Practice:** define validation for base URL, timeout, and required secret, then decide which values can safely be sent to Angular.
+**Try it:** define validation for base URL, timeout, and required secret, then decide which values can safely be sent to Angular.
 
 ---
 
@@ -1178,11 +1216,11 @@ Raw environment/config -> validate -> typed options/token -> consumer
 
 **Answer:** The class hides what it needs and discovers dependencies imperatively at runtime.
 
-**What problem does this concept solve?** Service locator appears to make constructors shorter and permit dynamic lookup, but the important lesson is recognizing that it transfers complexity into hidden runtime behavior rather than solving coupling.
+**What problem does it solve?** Service locator appears to make constructors shorter and permit dynamic lookup, but the important lesson is recognizing that it transfers complexity into hidden runtime behavior rather than solving coupling.
 
 **Before this concept:** Dependency graphs were explicit but a large constructor exposed that the class had too many responsibilities.
 
-❌ **Wrong frontend example:**
+❌ **Wrong/before example — frontend:**
 
 ```typescript
 export class OrderFacade {
@@ -1191,7 +1229,7 @@ export class OrderFacade {
 }
 ```
 
-❌ **Wrong backend example:**
+❌ **Wrong/before example — backend:**
 
 ```csharp
 public sealed class OrderService(IServiceProvider services)
@@ -1200,11 +1238,13 @@ public sealed class OrderService(IServiceProvider services)
 }
 ```
 
-✅ **Correct example:** Inject the exact abstraction, a typed factory, or a typed strategy router.
+✅ **After/correct example:** Inject the exact abstraction, a typed factory, or a typed strategy router.
 
-**How it works after this pattern:** Dependencies are visible to readers, construction is validated early, and unit tests do not need a container.
+**How it works now:** Dependencies are visible to readers, construction is validated early, and unit tests do not need a container.
 
-**Trade-off:** Framework boundaries such as middleware activation or background scope creation may legitimately use a scope factory. Keep lookup at that boundary.
+**Trade-offs and when not to use it:** Framework boundaries such as middleware activation or background scope creation may legitimately use a scope factory. Keep lookup at that boundary.
+
+**Production checks:** Search for `IServiceProvider` use in application code, constrain legitimate lookup to composition boundaries, create and dispose scopes explicitly, and test that missing dependencies fail during startup rather than mid-request.
 
 ### Practical walkthrough — Service locator: see the hidden dependency failure
 
@@ -1223,7 +1263,7 @@ Make the gateway a constructor parameter, or inject an explicit factory/selector
 
 **What changed:** missing wiring fails at construction/startup and the object’s API tells the truth. Framework adapters can use a service provider at a boundary; core application code should not.
 
-**Practice:** search for container lookups in business services and replace one with an explicit dependency. Note what becomes visible in the test.
+**Try it:** search for container lookups in business services and replace one with an explicit dependency. Note what becomes visible in the test.
 
 ---
 
@@ -1233,20 +1273,20 @@ Make the gateway a constructor parameter, or inject an explicit factory/selector
 
 **Answer:** A captive dependency occurs when a long-lived object holds a shorter-lived object. Containers must also dispose owned resources and reject circular graphs.
 
-**What problem does this concept solve?** Correct graph design prevents cross-request state leaks, disposed-object errors, memory leaks, and construction recursion.
+**What problem does it solve?** Correct graph design prevents cross-request state leaks, disposed-object errors, memory leaks, and construction recursion.
 
 **Before this concept:** Singleton services captured request DbContexts, components provided subscriptions without cleanup, and circular services depended on each other.
 
-❌ **Wrong backend example:**
+❌ **Wrong/before example — backend:**
 
 ```csharp
 services.AddScoped<AppDbContext>();
 services.AddSingleton<OrderCache>(); // OrderCache constructor takes AppDbContext: captive dependency
 ```
 
-❌ **Wrong frontend example:** `ServiceA -> ServiceB -> ServiceA`, or a root service holds a component-scoped object beyond the component's life.
+❌ **Wrong/before example — frontend:** `ServiceA -> ServiceB -> ServiceA`, or a root service holds a component-scoped object beyond the component's life.
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 public sealed class CleanupJob(IServiceScopeFactory scopes)
@@ -1260,11 +1300,13 @@ public sealed class CleanupJob(IServiceScopeFactory scopes)
 }
 ```
 
-✅ **Correct frontend example:** Break circular responsibilities using a lower-level shared abstraction and clean subscriptions with `takeUntilDestroyed()`.
+✅ **After/correct example — frontend:** Break circular responsibilities using a lower-level shared abstraction and clean subscriptions with `takeUntilDestroyed()`.
 
-**How it works after this pattern:** Each operation owns a valid scope, disposables end with that scope, and the dependency graph remains acyclic.
+**How it works now:** Each operation owns a valid scope, disposables end with that scope, and the dependency graph remains acyclic.
 
-**Trade-off:** Do not create scopes casually to bypass lifetime rules. Scope creation belongs at operation boundaries such as jobs or messages.
+**Trade-offs and when not to use it:** Do not create scopes casually to bypass lifetime rules. Scope creation belongs at operation boundaries such as jobs or messages.
+
+**Production checks:** Enable scope and build validation, inspect the dependency graph for longer-to-shorter lifetime edges, break cycles through better ownership rather than lazy lookup, and load-test concurrent scopes for leaks.
 
 ### Practical walkthrough — Captive dependencies, disposal, and cycles: make lifetimes valid
 
@@ -1283,7 +1325,7 @@ Valid:   Background worker -> creates scope -> Scoped handler + DbContext -> dis
 
 **What changed:** lifetime ownership becomes safe and the graph is acyclic. Creating scopes is not a loophole for injecting anything anywhere—it must align to a meaningful operation.
 
-**Practice:** draw the dependency graph for a request and color singleton/scoped/transient nodes. Any arrow from a longer to shorter life needs redesign.
+**Try it:** draw the dependency graph for a request and color singleton/scoped/transient nodes. Any arrow from a longer to shorter life needs redesign.
 
 ---
 
@@ -1293,13 +1335,13 @@ Valid:   Background worker -> creates scope -> Scoped handler + DbContext -> dis
 
 **Answer:** Tests replace boundary dependencies with controlled fakes while constructing the real class under test.
 
-**What problem does this concept solve?** Tests become deterministic and do not call real payment, storage, clock, or network services.
+**What problem does it solve?** Tests become deterministic and do not call real payment, storage, clock, or network services.
 
 **Before this concept:** Classes constructed real SDKs internally, so unit tests needed network credentials or unsafe global patches.
 
-❌ **Wrong example:** Mock every internal class and assert implementation details, producing tests that pass while integration contracts fail.
+❌ **Wrong/before example:** Mock every internal class and assert implementation details, producing tests that pass while integration contracts fail.
 
-✅ **Correct frontend example:**
+✅ **After/correct example — frontend:**
 
 ```typescript
 await TestBed.configureTestingModule({
@@ -1310,7 +1352,7 @@ await TestBed.configureTestingModule({
 }).compileComponents();
 ```
 
-✅ **Correct backend example:**
+✅ **After/correct example — backend:**
 
 ```csharp
 var fakeGateway = new FakePaymentGateway(PaymentResult.Success("p-123"));
@@ -1319,9 +1361,11 @@ var result = await service.ChargeAsync(payment, CancellationToken.None);
 Assert.True(result.IsSuccess);
 ```
 
-**How it works after this pattern:** Unit tests replace unstable boundaries; integration tests override the composition root with containers or test implementations while exercising real framework wiring.
+**How it works now:** Unit tests replace unstable boundaries; integration tests override the composition root with containers or test implementations while exercising real framework wiring.
 
-**Trade-off:** DI enables testing but does not require mocking everything. Prefer real value objects and pure domain logic; fake only external boundaries.
+**Trade-offs and when not to use it:** DI enables testing but does not require mocking everything. Prefer real value objects and pure domain logic; fake only external boundaries.
+
+**Production checks:** Include a composition-root smoke test, keep fakes behaviorally compatible with real adapters, reset test overrides between cases, and retain contract or integration tests for databases, queues, HTTP providers, and framework scopes.
 
 ### Practical walkthrough — Testing and overrides: replace boundaries, keep behavior real
 
@@ -1340,7 +1384,7 @@ Unit test:  Checkout + FakeGateway   + FixedClock
 
 **What changed:** the test controls unstable boundaries but continues to exercise real domain decisions. Do not mock every internal method; use real value objects and add contract tests for adapters so fakes do not drift from production behavior.
 
-**Practice:** write one unit test for declined payment, one adapter contract test, and one integration test that verifies the real composition root resolves the graph.
+**Try it:** write one unit test for declined payment, one adapter contract test, and one integration test that verifies the real composition root resolves the graph.
 
 ---
 

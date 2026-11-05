@@ -13,10 +13,12 @@ Comprehensive guide to ASP.NET Core essentials covering architecture, project ty
 6. [Filters & Attributes](#filters)
 7. [Dependency Injection](#di)
 8. [Best Practices](#best-practices)
+9. [Applied ASP.NET Core Fundamentals](#aspf-mastery)
 
 ---
 
-## ASP.NET Core Basics {#basics}
+<a id="basics"></a>
+## ASP.NET Core Basics
 
 ### What is ASP.NET Core?
 
@@ -66,7 +68,8 @@ Comprehensive guide to ASP.NET Core essentials covering architecture, project ty
 
 ---
 
-## Project Types & Templates {#project-types}
+<a id="project-types"></a>
+## Project Types & Templates
 
 ### ASP.NET Core Web API
 
@@ -169,7 +172,8 @@ Example: Process queue jobs, scheduled tasks
 
 ---
 
-## Application Host & Startup {#host}
+<a id="host"></a>
+## Application Host & Startup
 
 ### IHost vs IWebHost
 
@@ -271,7 +275,8 @@ public class UserController
 
 ---
 
-## Controllers vs Minimal APIs {#controllers-minimal}
+<a id="controllers-minimal"></a>
+## Controllers vs Minimal APIs
 
 ### Controllers (Traditional)
 
@@ -356,7 +361,8 @@ async Task<IResult> CreateUser(CreateUserRequest request, IUserService userServi
 
 ---
 
-## Middleware Pipeline {#middleware}
+<a id="middleware"></a>
+## Middleware Pipeline
 
 ### What is Middleware?
 
@@ -464,7 +470,8 @@ app.UseMiddleware<RequestLoggingMiddleware>();
 
 ---
 
-## Filters & Attributes {#filters}
+<a id="filters"></a>
+## Filters & Attributes
 
 ### Types of Filters
 
@@ -612,7 +619,8 @@ Response sent
 
 ---
 
-## Dependency Injection {#di}
+<a id="di"></a>
+## Dependency Injection
 
 ### Registering Services
 
@@ -721,7 +729,8 @@ public class GoodService
 
 ---
 
-## Best Practices {#best-practices}
+<a id="best-practices"></a>
+## Best Practices
 
 ### Naming Conventions
 
@@ -844,3 +853,231 @@ public IActionResult GetUser(int id)
 ---
 
 **Key Takeaway**: ASP.NET Core is powerful and flexible. Master the fundamentals (middleware, DI, filters), choose your pattern (controllers vs minimal), and follow conventions for maintainability.
+
+---
+
+<a id="aspf-mastery"></a>
+# Applied ASP.NET Core Fundamentals
+
+These walkthroughs connect hosting fundamentals to the production failures caused by incorrect middleware order, dependency lifetimes, abandoned requests, and invalid configuration.
+
+References: [Middleware ordering](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/), [request cancellation](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/use-http-context#requestaborted), and [the options pattern](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/configuration/options).
+
+## ASPF-M1 — Build the Middleware Pipeline in Dependency Order
+
+**Question:** Why does middleware order affect security and behavior?
+
+**Answer:** Requests execute middleware in registration order and responses unwind in reverse order. A middleware can only use state established earlier, and a terminal middleware can prevent everything after it from running.
+
+**What problem does it solve?** Correct ordering ensures exceptions are caught, routing metadata exists before endpoint-specific policies, authentication establishes the principal before authorization, and endpoints execute only after cross-cutting policies.
+
+**Before this concept:** Middleware is added in a convenient-looking order without considering dependencies.
+
+❌ **Wrong/before example:**
+
+```csharp
+app.UseAuthorization();     // no authenticated principal yet
+app.MapControllers();      // endpoints become terminal
+app.UseAuthentication();   // too late for mapped endpoints
+app.UseExceptionHandler(); // cannot catch earlier failures
+```
+
+✅ **After/correct example:**
+
+```csharp
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler();
+    app.UseHsts();
+}
+
+app.UseHttpsRedirection();
+app.UseStaticFiles();
+app.UseRouting();
+app.UseCors("trusted-clients");
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+app.MapControllers();
+```
+
+**How it works now:** Error handling surrounds downstream work. Routing identifies the endpoint, CORS applies before authorization responses are returned, authentication constructs `HttpContext.User`, authorization evaluates endpoint requirements, and the selected endpoint runs last.
+
+**Trade-offs and when not to use it:** The exact order depends on the application. Static files placed early are efficient but public unless protected by a different design. Compression and caching order changes what representation is cached. Document intentional deviations next to the pipeline.
+
+**Production checks:** Test anonymous, forbidden, CORS preflight, rate-limited, and exception responses. Verify security headers on failures as well as successes, and add an integration test that would fail if authentication/authorization order is reversed.
+
+**Try it:** Move authentication after authorization in a test application, call a protected endpoint, and trace which middleware sees an authenticated principal.
+
+---
+
+## ASPF-M2 — Match Dependency Lifetime to Ownership
+
+**Question:** What happens when a singleton captures a scoped dependency such as `DbContext`?
+
+**Answer:** The singleton outlives the request scope that created the scoped object. It may retain disposed state, share a non-thread-safe context across requests, and mix request-specific data between users.
+
+**What problem does it solve?** Correct lifetimes align creation, sharing, and disposal with ownership: transient for short independent objects, scoped for one request/unit of work, and singleton only for thread-safe application-wide services.
+
+**Before this concept:** A “manager” is made singleton for performance even though it depends on request-scoped persistence.
+
+❌ **Wrong/before example:**
+
+```csharp
+builder.Services.AddDbContext<AppDbContext>();          // scoped
+builder.Services.AddSingleton<OrderManager>();          // captures scoped DbContext
+
+public sealed class OrderManager(AppDbContext db)
+{
+    public Task<Order?> Find(Guid id, CancellationToken ct) =>
+        db.Orders.FindAsync([id], ct).AsTask();
+}
+```
+
+✅ **After/correct example:**
+
+```csharp
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(connectionString));
+builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddSingleton<ISystemClock, SystemClock>(); // stateless/thread-safe
+
+public sealed class OrderService(AppDbContext db, ISystemClock clock)
+{
+    public async Task<Order?> Find(Guid tenantId, Guid id, CancellationToken ct) =>
+        await db.Orders.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == id, ct);
+}
+```
+
+**How it works now:** Each request receives one context and one order service. They share one unit of work and are disposed together. The singleton clock holds no request or mutable tenant state.
+
+**Trade-offs and when not to use it:** Do not make every service scoped automatically. Stateless formatters and expensive thread-safe clients can be singleton; typed `HttpClient` instances are created through the factory. A very large constructor graph signals design coupling, not a reason to inject `IServiceProvider`.
+
+**Production checks:** Enable scope validation, avoid storing `HttpContext`, user claims, or tenant IDs in singletons, and create an explicit scope when singleton background infrastructure must execute scoped application work.
+
+**Try it:** Write two parallel request tests and prove no mutable per-user value is stored in a singleton service.
+
+---
+
+## ASPF-M3 — Propagate Request Cancellation
+
+**Question:** Why should endpoint cancellation flow into database and HTTP calls?
+
+**Answer:** ASP.NET Core binds a `CancellationToken` parameter to the request-aborted signal. Passing it through allows expensive I/O to stop when the client disconnects, an upstream deadline expires, or the server begins shutting down.
+
+**What problem does it solve?** It prevents abandoned requests from continuing to consume database connections, outbound sockets, CPU, and queue capacity after nobody can use the response.
+
+**Before this concept:** The endpoint accepts cancellation but lower layers ignore it.
+
+❌ **Wrong/before example:**
+
+```csharp
+app.MapGet("/reports/{id:guid}", async (Guid id, ReportService reports) =>
+{
+    var report = await reports.Build(id); // request cancellation is lost
+    return Results.Ok(report);
+});
+
+public Task<Report> Build(Guid id) =>
+    db.Reports.SingleAsync(x => x.Id == id); // no token
+```
+
+✅ **After/correct example:**
+
+```csharp
+app.MapGet("/reports/{id:guid}", async (
+    Guid id, ReportService reports, CancellationToken ct) =>
+{
+    var report = await reports.Build(id, ct);
+    return report is null ? Results.NotFound() : Results.Ok(report);
+});
+
+public sealed class ReportService(AppDbContext db, HttpClient pricing)
+{
+    public async Task<ReportDto?> Build(Guid id, CancellationToken ct)
+    {
+        var report = await db.Reports
+            .AsNoTracking()
+            .Where(x => x.Id == id)
+            .Select(x => new ReportDto(x.Id, x.Total))
+            .SingleOrDefaultAsync(ct);
+
+        if (report is null) return null;
+        var rates = await pricing.GetFromJsonAsync<Rates>("/rates", ct)
+            ?? throw new InvalidOperationException("Pricing returned an empty response.");
+        return report with { ConvertedTotal = report.Total * rates.Usd };
+    }
+}
+```
+
+**How it works now:** Request cancellation reaches EF Core and `HttpClient`. Cooperative operations throw `OperationCanceledException`; the framework stops producing a response for a disconnected client instead of treating cancellation as an application failure.
+
+**Trade-offs and when not to use it:** Do not cancel a durable operation merely because the client disconnected after it was accepted. For payments or queued jobs, commit an idempotent command and let its lifecycle continue independently. Cancellation is cooperative, not a transaction rollback mechanism.
+
+**Production checks:** Combine request cancellation with explicit outbound timeouts, distinguish cancellation from faults in telemetry, and test a disconnected client against a deliberately slow dependency.
+
+**Try it:** Cancel a request while EF Core is waiting and confirm the connection returns to the pool promptly.
+
+---
+
+## ASPF-M4 — Bind and Validate Configuration at Startup
+
+**Question:** Why is reading configuration strings throughout business code risky?
+
+**Answer:** Raw string lookups are untyped, easy to misspell, and often fail only when a rarely used path executes. Bind related settings to a focused options type and validate required values and ranges during startup.
+
+**What problem does it solve?** Invalid configuration prevents the instance from becoming ready instead of causing delayed null errors, insecure defaults, or partially working deployments.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```csharp
+public sealed class ReceiptSender(IConfiguration configuration)
+{
+    public Task Send(Receipt receipt) => smtp.SendAsync(
+        configuration["Smtp:Host"] ?? "localhost",
+        int.Parse(configuration["Smtp:Port"] ?? "25"),
+        receipt);
+}
+```
+
+✅ **After/correct example:**
+
+```csharp
+public sealed class SmtpOptions
+{
+    public const string SectionName = "Smtp";
+
+    [Required, MinLength(3)]
+    public required string Host { get; init; }
+
+    [Range(1, 65535)]
+    public int Port { get; init; }
+
+    [Required]
+    public required string CredentialReference { get; init; }
+}
+
+builder.Services.AddOptions<SmtpOptions>()
+    .Bind(builder.Configuration.GetRequiredSection(SmtpOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+public sealed class ReceiptSender(IOptions<SmtpOptions> options)
+{
+    private readonly SmtpOptions settings = options.Value;
+
+    public Task Send(Receipt receipt, CancellationToken ct) =>
+        smtp.SendAsync(settings.Host, settings.Port, receipt, ct);
+}
+```
+
+**How it works now:** Configuration providers populate one typed object. Startup validation fails the instance before it receives traffic when required settings are absent or invalid. Consumers depend only on the settings they use.
+
+**Trade-offs and when not to use it:** `IOptions<T>` is stable for the application lifetime, `IOptionsSnapshot<T>` is scoped and refreshed per request, and `IOptionsMonitor<T>` observes changes. Runtime reload is useful only when consumers can safely handle invalid or partially applied changes.
+
+**Production checks:** Store secrets in an approved secret provider, not source-controlled JSON; log option names but never secret values; validate in deployment tests; and decide whether configuration changes require restart or coordinated reload.
+
+**Try it:** Remove `Smtp:Host`, start the application, and verify deployment fails before the readiness probe succeeds.

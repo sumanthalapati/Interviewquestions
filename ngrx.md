@@ -1,21 +1,14 @@
 # 🏪 NgRx Interview Questions — Complete Guide
 
-> **100+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
+> Focused store questions and comparisons with definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
 > Use `Ctrl+F` / `Cmd+F` to jump to any topic.
 
 ---
 
 ## 📋 Table of Contents
 1. [Core Concepts & Store](#1-core-concepts--store)
-2. [Actions](#2-actions)
-3. [Reducers](#3-reducers)
-4. [Selectors](#4-selectors)
-5. [Effects](#5-effects)
-6. [NgRx Entity](#6-ngrx-entity)
-7. [Router Store](#7-router-store)
-8. [Component Store](#8-component-store)
-9. [Testing NgRx](#9-testing-ngrx)
-10. [Patterns & Best Practices](#10-patterns--best-practices)
+2. [NgRx Comparisons](#ngrx-comparisons)
+3. [Applied NgRx Mastery](#ngrx-mastery)
 
 ---
 
@@ -530,7 +523,8 @@ export class ProductsComponent implements OnInit {
 
 ---
 
-# ⚖️ NgRx Comparisons — Side-by-Side Differences
+<a id="ngrx-comparisons"></a>
+# Core NgRx Comparisons — Side-by-Side Differences
 
 ---
 
@@ -718,7 +712,7 @@ export class OrderTableStore extends ComponentStore<OrderTableState> {
 
 ---
 
-# ⚖️ NgRx Comparisons — Side-by-Side Differences
+# Extended NgRx Comparisons — Side-by-Side Differences
 
 ---
 
@@ -918,3 +912,344 @@ login$ = createEffect(() => this.actions$.pipe(
 ));
 ```
 
+---
+
+<a id="ngrx-mastery"></a>
+# Applied NgRx Mastery
+
+These walkthroughs use one order feature from UI intent through actions, reducers, selectors, effects, normalized state, and tests. The goal is to understand ownership and event flow—not merely memorize NgRx functions.
+
+References: [NgRx Effects](https://ngrx.io/guide/effects) and [NgRx Entity Adapter](https://ngrx.io/guide/entity/adapter).
+
+## NGRX-M1 — Design One Complete Feature Flow
+
+**Question:** How should data move from a component through NgRx and back to the UI?
+
+**Answer:** The component dispatches an event describing user intent. A reducer handles synchronous state transitions, an effect performs external work and emits a result event, and selectors derive the smallest view model the component needs.
+
+**What problem does it solve?** It replaces scattered subscriptions and mutable service state with an explicit event history and predictable state transitions.
+
+**Before this concept:** A component fetches data, mutates arrays, controls loading flags, and handles errors itself.
+
+❌ **Wrong/before example:**
+
+```typescript
+export class OrdersPage {
+  orders: Order[] = [];
+  loading = false;
+  error = '';
+
+  ngOnInit() {
+    this.loading = true;
+    this.api.getOrders().subscribe({
+      next: orders => {
+        this.orders = orders;
+        this.loading = false;
+      },
+      error: () => {
+        this.error = 'Could not load orders';
+        this.loading = false;
+      }
+    });
+  }
+}
+```
+
+✅ **After/correct example — events and reducer:**
+
+```typescript
+export const OrdersPageActions = createActionGroup({
+  source: 'Orders Page',
+  events: { Opened: emptyProps(), Refreshed: emptyProps() }
+});
+
+export const OrdersApiActions = createActionGroup({
+  source: 'Orders API',
+  events: {
+    'Load Succeeded': props<{ orders: readonly Order[] }>(),
+    'Load Failed': props<{ message: string }>(),
+    'Order Changed': props<{ order: Order }>()
+  }
+});
+
+export interface OrdersState {
+  orders: readonly Order[];
+  loading: boolean;
+  error: string | null;
+}
+
+const initialState: OrdersState = { orders: [], loading: false, error: null };
+
+export const ordersFeature = createFeature({
+  name: 'orders',
+  reducer: createReducer(
+    initialState,
+    on(OrdersPageActions.opened, OrdersPageActions.refreshed,
+      state => ({ ...state, loading: true, error: null })),
+    on(OrdersApiActions.loadSucceeded,
+      (state, { orders }) => ({ ...state, orders, loading: false })),
+    on(OrdersApiActions.loadFailed,
+      (state, { message }) => ({ ...state, loading: false, error: message }))
+  )
+});
+```
+
+✅ **Effect and component:**
+
+```typescript
+export const loadOrders = createEffect(
+  (actions$ = inject(Actions), api = inject(OrdersApi)) =>
+    actions$.pipe(
+      ofType(OrdersPageActions.opened, OrdersPageActions.refreshed),
+      exhaustMap(() => api.getOrders().pipe(
+        map(orders => OrdersApiActions.loadSucceeded({ orders })),
+        catchError(() => of(OrdersApiActions.loadFailed({
+          message: 'Could not load orders'
+        })))
+      ))
+    ),
+  { functional: true }
+);
+
+export class OrdersPage {
+  private readonly store = inject(Store);
+  readonly orders = this.store.selectSignal(ordersFeature.selectOrders);
+  readonly loading = this.store.selectSignal(ordersFeature.selectLoading);
+  readonly error = this.store.selectSignal(ordersFeature.selectError);
+
+  ngOnInit() { this.store.dispatch(OrdersPageActions.opened()); }
+  refresh() { this.store.dispatch(OrdersPageActions.refreshed()); }
+}
+```
+
+**How it works now:** The page states what happened. The effect converts that event into an API result event. The reducer is the only writer of feature state, and selectors expose read models. DevTools can show the exact transition that produced the screen.
+
+**Trade-offs and when not to use it:** A small isolated component does not need a global event architecture. Use local signals or component state when data is short-lived, unshared, and not restored across navigation.
+
+**Production checks:** Keep action payloads serializable, avoid secrets in actions/DevTools, map transport errors to safe domain messages, cancel work where latest-wins semantics are required, and log correlation IDs outside user-visible state.
+
+**Try it:** Add an `OrderCancelled` flow and prove the component never calls `OrdersApi` directly.
+
+---
+
+## NGRX-M2 — Keep Effects Alive and Choose Concurrency Deliberately
+
+**Question:** Why must `catchError` usually be inside the flattening operator in an effect?
+
+**Answer:** If the outer action stream errors, the effect subscription can terminate and stop responding to future actions. Catching the request error inside `switchMap`, `exhaustMap`, `concatMap`, or `mergeMap` converts that one failure into a failure action while leaving the long-running effect alive.
+
+**What problem does it solve?** One failed HTTP call no longer disables a feature until the application reloads.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```typescript
+load$ = createEffect(() => this.actions$.pipe(
+  ofType(OrdersPageActions.opened),
+  switchMap(() => this.api.getOrders()),
+  map(orders => OrdersApiActions.loadSucceeded({ orders })),
+  catchError(() => of(OrdersApiActions.loadFailed({ message: 'Failed' })))
+)); // catch belongs to the outer stream; future actions may no longer be processed
+```
+
+✅ **After/correct example:**
+
+```typescript
+load$ = createEffect(() => this.actions$.pipe(
+  ofType(OrdersPageActions.opened),
+  switchMap(() => this.api.getOrders().pipe(
+    map(orders => OrdersApiActions.loadSucceeded({ orders })),
+    catchError(error => of(OrdersApiActions.loadFailed({
+      message: toSafeMessage(error)
+    })))
+  ))
+));
+```
+
+**How it works now:** The inner request completes with either a success or failure action. The outer `Actions` subscription continues listening for the next page-open event.
+
+**Choose the operator by business semantics:**
+
+| Operator | New action while work is active | Suitable example |
+|---|---|---|
+| `switchMap` | Cancels previous work | Search or route-driven latest result |
+| `exhaustMap` | Ignores the new action | Login or initial load that must not double-submit |
+| `concatMap` | Queues in order | Ordered writes or drafts |
+| `mergeMap` | Runs concurrently | Independent deletes with idempotent endpoints |
+
+**Trade-offs and when not to use it:** Cancellation stops the client subscription, but the server may already be processing the request. Destructive operations still require server-side idempotency and concurrency controls.
+
+**Production checks:** Test rapid repeated actions, timeout/error responses, navigation cancellation, and whether a stale response may overwrite newer state.
+
+**Try it:** Fire three actions within 50 ms under each operator and write down which requests start, finish, or are ignored.
+
+---
+
+## NGRX-M3 — Normalize Collections with Entity Adapter
+
+**Question:** What does normalized entity state solve compared with storing one nested array?
+
+**Answer:** Normalized state stores entities by ID and maintains an ordered ID list. Updates can target one entity without rebuilding or duplicating nested object graphs, and adapter methods provide consistent immutable CRUD operations.
+
+**What problem does it solve?** It prevents duplicated entities drifting out of sync across lists, selections, and detail screens.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```typescript
+interface State {
+  orders: Order[];
+  selectedOrder: Order | null; // duplicate copy of an item in orders
+}
+
+// Only the list copy is updated; selectedOrder is now stale.
+const orders = state.orders.map(o => o.id === updated.id ? updated : o);
+```
+
+✅ **After/correct example:**
+
+```typescript
+export interface OrdersState extends EntityState<Order> {
+  selectedOrderId: string | null;
+  loading: boolean;
+}
+
+export const ordersAdapter = createEntityAdapter<Order>({
+  selectId: order => order.id,
+  sortComparer: (a, b) => b.createdAt.localeCompare(a.createdAt)
+});
+
+const initialState = ordersAdapter.getInitialState({
+  selectedOrderId: null,
+  loading: false
+});
+
+export const reducer = createReducer(
+  initialState,
+  on(OrdersApiActions.loadSucceeded,
+    (state, { orders }) => ordersAdapter.setAll(orders, { ...state, loading: false })),
+  on(OrdersApiActions.orderChanged,
+    (state, { order }) => ordersAdapter.upsertOne(order, state))
+);
+
+const entitySelectors = ordersAdapter.getSelectors();
+export const selectSelectedOrder = createSelector(
+  (state: OrdersState) => state,
+  state => state.selectedOrderId,
+  (state, id) => id ? entitySelectors.selectEntities(state)[id] ?? null : null
+);
+```
+
+**How it works now:** Each order has one canonical stored copy. Selection stores only an ID, and selectors join the data for the view. Adapter methods preserve the `ids`/`entities` invariants.
+
+**Trade-offs and when not to use it:** Normalization adds selectors and indirection. A short immutable list with no cross-feature references may be simpler as an array. Avoid storing every API response globally just because Entity exists.
+
+**Production checks:** Decide how deleted entities affect selection, avoid unstable sort functions, define cache freshness, and ensure tenant/account changes clear entity state.
+
+**Try it:** Load a list, select one order, process an update event, and prove both list and detail selectors return the new value from one stored entity.
+
+---
+
+## NGRX-M4 — Put State in the Right Owner
+
+**Question:** Should a value live in the URL, component state, a feature store, or server state?
+
+**Answer:** Ownership follows required lifetime and sharing. Put shareable navigation state in the URL, ephemeral visual state in the component, cross-component workflow state in a feature store, and durable truth on the server.
+
+**What problem does it solve?** It prevents the global store from becoming a second database or a dumping ground for modal flags and temporary form keystrokes.
+
+**Before this concept:** Every value is dispatched globally, including hover state, open menus, raw form controls, and server entities with no freshness policy.
+
+❌ **Wrong/before example:**
+
+```typescript
+store.dispatch(menuHovered({ menuId: 'orders' }));
+store.dispatch(searchTextChanged({ value: event.target.value }));
+store.dispatch(modalPixelOffsetChanged({ x: 14, y: 22 }));
+```
+
+✅ **After/correct example — explicit ownership:**
+
+```text
+URL:        /orders?status=pending&page=2  (shareable and restorable)
+Component:  menuOpen, hoveredRow, draft input before submit
+Feature:    selectedOrderId, loaded entities, workflow status
+Server:     authoritative order status, prices, permissions, audit history
+```
+
+```typescript
+readonly menuOpen = signal(false);
+readonly status = toSignal(
+  inject(ActivatedRoute).queryParamMap.pipe(map(p => p.get('status') ?? 'all'))
+);
+readonly orders = this.store.selectSignal(ordersFeature.selectOrders);
+```
+
+**How it works now:** Refreshing or sharing the URL restores filters. Local rendering changes remain cheap and isolated. Feature state coordinates screens, while server refresh/invalidation rules protect authoritative data.
+
+**Trade-offs and when not to use it:** Duplicating a value in URL and Store creates synchronization work. Choose one source of truth and derive the other representation.
+
+**Production checks:** Clear user-specific state on logout, do not store secrets in browser state, bound persisted caches, and define how stale data is invalidated after writes.
+
+**Try it:** Classify every property in one component by owner and remove at least one value that does not belong in the global store.
+
+---
+
+## NGRX-M5 — Test Transitions, Derivations, and Effects Separately
+
+**Question:** What should NgRx tests verify without re-testing the framework?
+
+**Answer:** Reducer tests verify state transitions, selector tests verify derivation, effect tests verify action-to-service-to-result behavior, and a small integration test verifies registration and component wiring.
+
+**What problem does it solve?** It creates fast failure localization: a broken transition, derivation, or external interaction points to one focused test.
+
+**Before this concept:** One large component test mocks Store internals and asserts private implementation details.
+
+❌ **Wrong/before example:**
+
+```typescript
+expect((component as any).store.source.value.orders.length).toBe(1);
+```
+
+✅ **After/correct examples:**
+
+```typescript
+it('records a load failure and stops loading', () => {
+  const loading = reducer(initialState, OrdersPageActions.opened());
+  const failed = reducer(loading, OrdersApiActions.loadFailed({ message: 'Unavailable' }));
+
+  expect(failed.loading).toBeFalse();
+  expect(failed.error).toBe('Unavailable');
+});
+
+it('derives the selected order from its id', () => {
+  const state = ordersAdapter.setAll(
+    [{ id: 'o-1', createdAt: '2026-01-01' } as Order],
+    { ...initialState, selectedOrderId: 'o-1' }
+  );
+
+  expect(selectSelectedOrder.projector(state, 'o-1')?.id).toBe('o-1');
+});
+```
+
+```typescript
+it('maps an API error to a failure action', () => {
+  actions$ = hot('-a', { a: OrdersPageActions.opened() });
+  api.getOrders.and.returnValue(cold('-#', {}, new Error('network')));
+  const output$ = loadOrders(actions$, api);
+
+  expect(output$).toBeObservable(cold('--b', {
+    b: OrdersApiActions.loadFailed({ message: 'Could not load orders' })
+  }));
+});
+```
+
+**How it works now:** Pure tests cover reducers and selector projectors without Angular. Marble or scheduler-based tests control effect timing. One shallow UI test confirms the component dispatches intent and renders selected state.
+
+**Trade-offs and when not to use it:** Over-testing every adapter method duplicates NgRx’s tests. Focus on your transition rules, operator choice, error mapping, and selector logic.
+
+**Production checks:** Include repeated-action timing, stale response, logout/reset, and effect error-survival cases. Avoid snapshots that hide the exact invariant under test.
+
+**Try it:** Introduce an outer `catchError` bug, prove a second action is ignored, then move error handling inward and make the test pass.

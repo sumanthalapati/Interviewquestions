@@ -9,13 +9,10 @@
 1. [OOP Pillars](#1-oop-pillars)
 2. [SOLID Principles](#2-solid-principles)
 3. [Creational Patterns](#3-creational-patterns)
-4. [Structural Patterns](#4-structural-patterns)
-5. [Behavioral Patterns](#5-behavioral-patterns)
-6. [Architectural Patterns](#6-architectural-patterns)
-7. [Concurrency Patterns](#7-concurrency-patterns)
-8. [Anti-Patterns](#8-anti-patterns)
-9. [Design Principles Beyond SOLID](#9-design-principles-beyond-solid)
-10. [Patterns in .NET & Angular](#10-patterns-in-net--angular)
+4. [OOP and Pattern Comparisons](#oop-comparisons)
+5. [Object-Oriented Analysis and Design](#ooad)
+6. [Senior Pattern Deep Dive](#senior-patterns)
+7. [FAANG Object-Oriented Design Questions](#oop-faang)
 
 ---
 
@@ -3128,6 +3125,7 @@ svc.PlaceOrder(new Order()); // No global state required
 
 ---
 
+<a id="oop-comparisons"></a>
 # ⚖️ OOP & Design Pattern Comparisons — Side-by-Side Differences
 
 ---
@@ -3241,6 +3239,7 @@ class OrderService { private SqlOrderRepo _repo = new SqlOrderRepo(); } // tight
 
 ---
 
+<a id="ooad"></a>
 ## 11. OOAD — Object-Oriented Analysis & Design Concepts
 
 📚 **References**
@@ -4286,6 +4285,7 @@ classDiagram
 
 ---
 
+<a id="senior-patterns"></a>
 # 11. Senior Engineer — Design Patterns & SOLID Deep Dive
 
 > This section covers senior-level design patterns and SOLID questions drawn from real interview guides. Each question targets tradeoff judgment and production reasoning.
@@ -4659,6 +4659,7 @@ flowchart LR
 
 ---
 
+<a id="oop-faang"></a>
 # 🏢 FAANG Object-Oriented Design Questions
 
 > These questions test how OOP principles apply at the scale and architectural context of FAANG companies. Expect system-level thinking, not just pattern recitation.
@@ -5138,4 +5139,3 @@ classDiagram
     note for CharacterStyle "Intrinsic state — shared\n(1 instance per unique style)"
     note for Character "Extrinsic state — unique\n(1 instance per character)"
 ```
-

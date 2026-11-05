@@ -15,7 +15,8 @@ Deep dive into real-time systems and collaborative editing. Covers Stock Exchang
 
 ---
 
-## Stock Exchange Architecture {#stock-exchange}
+<a id="stock-exchange"></a>
+## Stock Exchange Architecture
 
 ### Problem Statement
 
@@ -169,7 +170,6 @@ Disruptor (LMAX exchange open-source):
 Latency: 1-5 microseconds (vs 100-1000µs for traditional queue)
 
 Implementation:
-```
 Order -> [Ring Buffer] -> Disruptor -> Matching -> Ledger
          (producer)      (consumer)
 ```
@@ -222,7 +222,8 @@ If step 4 fails: Ledger already has it (replayed on recovery)
 
 ---
 
-## Google Docs Collaborative Editing {#google-docs}
+<a id="google-docs"></a>
+## Google Docs Collaborative Editing
 
 ### Problem Statement
 
@@ -372,7 +373,8 @@ User comes online
 
 ---
 
-## Real-Time Leaderboard {#leaderboard}
+<a id="leaderboard"></a>
+## Real-Time Leaderboard
 
 ### Problem Statement
 
@@ -506,7 +508,8 @@ Answer should cover:
 
 ---
 
-## Collaborative Editing Patterns {#collab-patterns}
+<a id="collab-patterns"></a>
+## Collaborative Editing Patterns
 
 ### CRDT Deep Dive
 
@@ -610,7 +613,8 @@ With tombstone:
 
 ---
 
-## Real-Time Architecture {#realtime-arch}
+<a id="realtime-arch"></a>
+## Real-Time Architecture
 
 ### Latency Tiers
 
@@ -702,7 +706,8 @@ Use: Large scale (1M+ users)
 
 ---
 
-## Consistency in Real-Time Systems {#realtime-consistency}
+<a id="realtime-consistency"></a>
+## Consistency in Real-Time Systems
 
 ### Strong Consistency
 
@@ -758,4 +763,13 @@ Causal order preserved
 
 ---
 
-**Key Takeaway**: Real-time systems require fundamentally different architecture than batch systems. Trade consistency for latency, synchronization for scalability, and optimize for network realities (partitions, latency).
+<a id="case-studies"></a>
+## Case Studies and Trade-offs
+
+| System | Primary invariant | Main scaling technique | Failure concern |
+|---|---|---|---|
+| Stock exchange | Deterministic price/time ordering | Single-writer matching shards by symbol | Safe replay without double execution |
+| Collaborative editor | All replicas converge | Operation or CRDT partitioning | Reconnect, causality, and tombstone growth |
+| Real-time leaderboard | Rank reflects accepted score events | Partitioned ingestion plus sorted indexes | Hot keys, late events, and rebuilds |
+
+**Key takeaway:** Real-time systems do not automatically trade away correctness for speed. Choose the required consistency per invariant, then design ordering, synchronization, partition handling, and recovery around it.

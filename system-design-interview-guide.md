@@ -18,7 +18,8 @@ Complete framework for acing system design interviews. Covers interview strategi
 
 ---
 
-## Interview Framework {#framework}
+<a id="framework"></a>
+## Interview Framework
 
 ### 5-Minute Breakdown
 
@@ -72,7 +73,8 @@ Complete framework for acing system design interviews. Covers interview strategi
 
 ---
 
-## Behavioral Interview Guide {#behavioral}
+<a id="behavioral"></a>
+## Behavioral Interview Guide
 
 ### Common Behavioral Questions
 
@@ -109,7 +111,8 @@ Complete framework for acing system design interviews. Covers interview strategi
 
 ---
 
-## Mobile System Design {#mobile}
+<a id="mobile"></a>
+## Mobile System Design
 
 ### Unique Challenges
 
@@ -170,7 +173,8 @@ Local persistence: Messages stored on device. On send → added to queue. Networ
 
 ---
 
-## Common Interview Questions {#common}
+<a id="common"></a>
+## Common Interview Questions
 
 ### Tier 1 (Easy, 20 minutes)
 
@@ -270,7 +274,8 @@ Key: Feed generation (fan-out on write), cache invalidation, real-time at scale
 
 ---
 
-## Design Patterns {#patterns}
+<a id="patterns"></a>
+## Design Patterns
 
 ### Caching Patterns
 
@@ -317,7 +322,8 @@ Best for: high throughput
 
 ---
 
-## Scaling Strategies {#scaling}
+<a id="scaling"></a>
+## Scaling Strategies
 
 ### Vertical Scaling
 - Add CPU, RAM to single server
@@ -369,7 +375,8 @@ Cost: Complex queries (cross-shard joins)
 
 ---
 
-## Trade-offs Cheatsheet {#tradeoffs}
+<a id="tradeoffs"></a>
+## Trade-offs Cheatsheet
 
 ### Consistency vs Availability
 
@@ -404,7 +411,8 @@ Cost: Complex queries (cross-shard joins)
 
 ---
 
-## Resume Tips {#resume}
+<a id="resume"></a>
+## Resume Tips
 
 ### What to Include
 
@@ -435,7 +443,8 @@ Cost: Complex queries (cross-shard joins)
 
 ---
 
-## Interview Do's & Don'ts {#dos-donts}
+<a id="dos-donts"></a>
+## Interview Do's & Don'ts
 
 ### DO's ✅
 
@@ -473,7 +482,8 @@ Cost: Complex queries (cross-shard joins)
 
 ---
 
-## Post-Interview {#post-interview}
+<a id="post-interview"></a>
+## Post-Interview
 
 ### Immediately After
 

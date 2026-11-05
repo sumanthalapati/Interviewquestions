@@ -2997,12 +2997,12 @@ flowchart TD
 
 ---
 
-## 19.5 Geo-Redundancy & Multi-Region Architecture
+## 19.6 Multi-Region Failure Walkthrough
 
-### Q36. What is geo-redundancy and how do you design a multi-region architecture?
+### Q37. How does traffic and data fail over during a regional outage?
 
 **Answer:**
-Geo-redundancy distributes your system across multiple geographic regions to survive regional outages (data-center fires, natural disasters, large-scale cloud provider incidents). It also reduces latency by serving users from the nearest region.
+This walkthrough applies the preceding geo-redundancy model to an actual regional outage. It follows traffic detection and routing, database promotion, recovery-point exposure, and the decision to fail back after the original region becomes healthy.
 
 **Two primary multi-region patterns:**
 

@@ -18,7 +18,8 @@ Quick reference for designing AI/ML systems at scale. Covers LLMs, agents, RAG, 
 
 ---
 
-## LLM Concepts {#llm-concepts}
+<a id="llm-concepts"></a>
+## LLM Concepts
 
 ### Definition
 Large Language Model (LLM): Neural network trained on trillions of tokens of text. Predicts next token given previous tokens. Examples: GPT-4, Claude, Llama.
@@ -73,7 +74,8 @@ Large Language Model (LLM): Neural network trained on trillions of tokens of tex
 
 ---
 
-## RAG (Retrieval-Augmented Generation) {#rag}
+<a id="rag"></a>
+## RAG (Retrieval-Augmented Generation)
 
 ### Definition
 Combine retrieval (find relevant documents) + generation (LLM writes answer). Reduces hallucination, adds external knowledge.
@@ -136,7 +138,8 @@ Response
 
 ---
 
-## AI Agents {#agents}
+<a id="agents"></a>
+## AI Agents
 
 ### Definition
 AI Agent: Autonomous system that perceives environment, decides actions, executes. Loop: Sense → Think → Act.
@@ -199,7 +202,8 @@ AI Agent: Autonomous system that perceives environment, decides actions, execute
 
 ---
 
-## Prompt Engineering {#prompt-engineering}
+<a id="prompt-engineering"></a>
+## Prompt Engineering
 
 ### Definition
 Prompt: Text sent to LLM. Prompt engineering: Optimize prompts for accuracy, consistency, task-specific behavior.
@@ -279,7 +283,8 @@ User: "How to reverse a list?"
 
 ---
 
-## LLM Evaluation {#evaluation}
+<a id="evaluation"></a>
+## LLM Evaluation
 
 ### Definition
 Evaluate LLM outputs on task metrics. Objective (exact match) vs subjective (quality).
@@ -339,7 +344,8 @@ Evaluate LLM outputs on task metrics. Objective (exact match) vs subjective (qua
 
 ---
 
-## Vector Databases {#vector-db}
+<a id="vector-db"></a>
+## Vector Databases
 
 ### Definition
 Vector database (Pinecone, Weaviate, Milvus) stores embeddings (vectors). Fast similarity search in high dimensions.
@@ -394,7 +400,8 @@ Vector database (Pinecone, Weaviate, Milvus) stores embeddings (vectors). Fast s
 
 ---
 
-## Fine-tuning vs Prompting {#fine-tuning}
+<a id="fine-tuning"></a>
+## Fine-tuning vs Prompting
 
 ### Definition
 **Fine-tuning**: Train model on task-specific data. **Prompting**: Give examples/instructions in prompt.
@@ -452,7 +459,8 @@ Accuracy 95%+ needed → Fine-tune
 
 ---
 
-## Context Engineering {#context-engineering}
+<a id="context-engineering"></a>
+## Context Engineering
 
 ### Definition
 Optimizing context (system prompt, examples, retrieval) to improve LLM output quality. Similar to prompt engineering but more structured.
@@ -514,7 +522,8 @@ Avoid numpy (use vanilla Python)."
 
 ---
 
-## Multi-Agent Systems {#multi-agent}
+<a id="multi-agent"></a>
+## Multi-Agent Systems
 
 ### Definition
 Multiple independent agents working together. Specialization, parallel execution, consensus.
@@ -569,7 +578,8 @@ Multiple independent agents working together. Specialization, parallel execution
 
 ---
 
-## Deployment & Monitoring {#deployment}
+<a id="deployment"></a>
+## Deployment & Monitoring
 
 ### Definition
 Deploy LLM app to production. Monitor quality, cost, latency.

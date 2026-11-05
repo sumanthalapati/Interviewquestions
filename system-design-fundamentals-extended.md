@@ -19,19 +19,22 @@ Comprehensive reference for fundamental concepts, calculations, and deep dives i
 
 ---
 
-## Back of the Envelope Calculations {#envelope}
+<a id="envelope"></a>
+## Back of the Envelope Calculations
 
-### Core Numbers (Memorize These)
+### Core Numbers (Use as Order-of-Magnitude Estimates)
 
-**Latencies (1 CPU cycle = ~0.3 nanoseconds)**
+Exact latency depends on hardware, distance, queueing, and workload. Use these values to compare orders of magnitude, then state your assumptions.
+
+**Illustrative latencies**
 ```
-L1 cache reference:           0.5 ns
-L2 cache reference:           7 ns
-Main memory reference:        100 ns
-SSD random read:             150 µs (microseconds)
-Disk random read:             10 ms (milliseconds)
-Network packet (local):        1 µs
-Network packet (internet):    100 ms
+L1 cache access:                    ~1 ns
+L2 cache access:                    ~4 ns
+Main-memory access:               ~100 ns
+NVMe SSD random read:          ~100-200 µs
+Same-region service round trip:  ~0.5-2 ms
+Hard-disk seek:                    ~5-10 ms
+Cross-region round trip:          ~50-200 ms
 ```
 
 **Practical Rule of Thumb**
@@ -41,14 +44,15 @@ Network packet (internet):    100 ms
 1 second = 1000 milliseconds
 ```
 
-**Powers of 2 (Critical for Storage)**
+**Binary storage units**
 ```
-2^10 = 1 KB (Kilobyte)
-2^20 = 1 MB (Megabyte)
-2^30 = 1 GB (Gigabyte)
-2^40 = 1 TB (Terabyte)
-2^50 = 1 PB (Petabyte)
-2^60 = 1 EB (Exabyte)
+2^10 bytes = 1 KiB (kibibyte)
+2^20 bytes = 1 MiB (mebibyte)
+2^30 bytes = 1 GiB (gibibyte)
+2^40 bytes = 1 TiB (tebibyte)
+
+Decimal storage and network rates use powers of 1000:
+1 kB = 1,000 bytes; 1 MB = 1,000,000 bytes; 1 GB = 1,000,000,000 bytes.
 ```
 
 ### Practical Calculations
@@ -64,16 +68,17 @@ Average bitrate for HD video: 5 Mbps
 1 hour = 3600 seconds
 1 hour video = 5 Mbps × 3600 sec = 18,000 Mb = 2.25 GB
 
-182,500 hours × 2.25 GB/hour = 410,625 TB ≈ 400 PB/year
+182,500 hours × 2.25 GB/hour = 410,625 GB ≈ 411 TB/year
 
-Reality: YouTube uses H.265 (compression), multiple quality levels
-Practical: Store 2-3 copies (replication) = 1.2 EB/year storage cost
+The 5 Mbps input is already a compressed bitrate. Multiple renditions, thumbnails,
+metadata, and replicas increase the total. Three full copies alone are ≈ 1.23 PB/year.
+State whether a “copy” means a full source, a transcoded rendition, or a replica.
 ```
 
 **Example 2: Twitter Tweet Rate**
 ```
-Problem: 500M users tweet on average once per day (not all active daily).
-DAU = 300M (Daily Active Users)
+Problem: 500M registered users; assume 300M daily active users each create
+one post per day on average.
 What's the QPS (Queries Per Second)?
 
 300M tweets/day ÷ 86,400 seconds = 3,472 tweets/second
@@ -104,21 +109,21 @@ After 5 years: 65 TB (fits on single machine, but replicate for resilience)
 
 **Example 4: Bandwidth Calculation**
 ```
-Problem: Photo sharing app. 1M DAU, each user uploads 5 photos/day.
+Problem: Photo-sharing app. 1M DAU, each user uploads 5 photos/day.
 Average photo size: 5 MB.
 Bandwidth needed?
 
-1M × 5 photos × 5 MB = 25 PB/day = 25 × 10^15 bytes/day
+1M × 5 photos × 5 MB = 25M MB/day = 25 TB/day
 
-Per second: 25 × 10^15 bytes ÷ 86,400 sec = 290 TB/second = 2.3 Pbps
+Average ingress: 25 TB ÷ 86,400 sec ≈ 289 MB/second ≈ 2.3 Gbps
+At a 5× peak factor: ≈ 1.45 GB/second ≈ 11.6 Gbps
 
-Wow! Need massive infrastructure.
-Reality: Use CDN, compression (5 MB → 1 MB after optimization) = 460 Tbps
+If client-side optimization reduces each upload from 5 MB to 1 MB:
+5 TB/day ÷ 86,400 sec ≈ 58 MB/second ≈ 463 Mbps average.
 
-Gigabit connection = 125 MB/second = 0.000125 Tbps
-So 460 Tbps ÷ 0.000125 = 3.68M Gbps lines needed
-1 Gbps link costs ~$1000/month, so 3.68B$/month infrastructure cost
-(Reality: Negotiated rates, much lower)
+This is upload ingress only. Feed and CDN egress require separate assumptions for
+views per photo, rendition size, and cache-hit ratio. Do not infer cost from a retail
+internet-link price; use the target cloud/CDN pricing model after estimating bytes.
 ```
 
 ### Estimation Framework (LASER Method)
@@ -160,7 +165,8 @@ R - Record assumptions:
 
 ---
 
-## Network Troubleshooting {#network-troubleshooting}
+<a id="network-troubleshooting"></a>
+## Network Troubleshooting
 
 ### What Happens When You Type a URL
 
@@ -318,7 +324,8 @@ Solutions:
 
 ---
 
-## System Design Interview Cheat Sheet {#cheatsheet}
+<a id="cheatsheet"></a>
+## System Design Interview Cheat Sheet
 
 ### Architecture Patterns Quick Reference
 
@@ -401,7 +408,8 @@ Storage = 100M × 100 × 250 × 90 = 225 PB (still large, shard across clusters)
 
 ---
 
-## The Computer Science Stack Explained {#cs-stack}
+<a id="cs-stack"></a>
+## The Computer Science Stack Explained
 
 ### The Seven Layers (Bottom to Top)
 
@@ -485,7 +493,8 @@ User clicks "Like" on Instagram photo
 
 ---
 
-## Storage & I/O Performance {#storage}
+<a id="storage"></a>
+## Storage & I/O Performance
 
 ### Storage Hierarchy (Speed vs Cost)
 
@@ -565,7 +574,8 @@ Example: Old messages, deleted posts
 
 ---
 
-## Concurrency vs Parallelism {#concurrency}
+<a id="concurrency"></a>
+## Concurrency vs Parallelism
 
 ### Core Difference
 
@@ -658,7 +668,8 @@ Result: Scales to millions
 
 ---
 
-## System Design Metrics & SLAs {#metrics}
+<a id="metrics"></a>
+## System Design Metrics & SLAs
 
 ### SLO, SLA, SLI (Critical Definitions)
 
@@ -721,7 +732,8 @@ High error rate indicates bugs, overload, or external issues
 
 ---
 
-## Common Estimation Problems {#estimation}
+<a id="estimation"></a>
+## Common Estimation Problems
 
 ### Problem 1: Estimate Facebook Storage
 
@@ -776,7 +788,8 @@ Reality: Massive infrastructure needed (CDN, multiple datacenters)
 
 ---
 
-## Capacity Planning {#capacity}
+<a id="capacity"></a>
+## Capacity Planning
 
 ### Growth Estimation
 
@@ -834,7 +847,8 @@ Reality check: $1M/year for 1M QPS reasonable for enterprise
 
 ---
 
-## Performance Optimization Checklist {#performance}
+<a id="performance"></a>
+## Performance Optimization Checklist
 
 ### Before Optimization
 - [ ] Measure (don't guess). Use profilers, benchmarks
@@ -875,7 +889,8 @@ Reality check: $1M/year for 1M QPS reasonable for enterprise
 
 ---
 
-## 25 Essential System Design Interview Questions {#essential-25}
+<a id="essential-25"></a>
+## 25 Essential System Design Interview Questions
 
 > Based on the curriculum in [Nikki Siapno's 25 System Design Concepts post](https://www.linkedin.com/posts/nikkisiapno_i-wrote-25-articles-for-25-system-design-activity-7425807821218439169-fF7U). These are original interview questions, answers, and examples organized to match this guide. The source list repeats “database types”; question 18 turns that repetition into a hands-on selection exercise.
 

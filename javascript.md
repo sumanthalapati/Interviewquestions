@@ -6381,7 +6381,7 @@ async function showNotification(title, options = {}) {
 
 ---
 
-# ⚖️ JavaScript Comparisons — Side-by-Side Differences
+# Core JavaScript Comparisons — Side-by-Side Differences
 
 ---
 
@@ -6608,11 +6608,11 @@ console.log(a.nested.y); // still 99 — deep copy is independent
 
 ---
 
-# ⚖️ JavaScript Comparisons — Side-by-Side Differences
+# Extended JavaScript Comparisons — Side-by-Side Differences
 
 ---
 
-## JS-C1 — `var` vs `let` vs `const`
+## JS-X1 — `var` vs `let` vs `const` (Extended)
 
 | | `var` | `let` | `const` |
 |-|-------|-------|---------|
@@ -7324,4 +7324,3 @@ function App() {
 | State colocation | State not needed at parent level | Refactoring |
 | Context splitting | Context updates too broadly | Refactoring |
 | `React.lazy` | Large route/component bundles | Medium |
-

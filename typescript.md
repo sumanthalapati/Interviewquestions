@@ -12,10 +12,9 @@
 4. [Utility Types](#4-utility-types)
 5. [Classes & OOP](#5-classes--oop)
 6. [Type Guards & Narrowing](#6-type-guards--narrowing)
-7. [Enums & Const Assertions](#7-enums--const-assertions)
-8. [Modules & Declaration Files](#8-modules--declaration-files)
-9. [Advanced Types](#9-advanced-types)
-10. [tsconfig & Compiler Options](#10-tsconfig--compiler-options)
+7. [TypeScript Comparisons](#typescript-comparisons)
+8. [FAANG Type-System Questions](#typescript-faang)
+9. [Applied TypeScript Mastery](#typescript-mastery)
 
 ---
 
@@ -2575,7 +2574,8 @@ if (result.ok) {
 
 ---
 
-# ⚖️ TypeScript Comparisons — Side-by-Side Differences
+<a id="typescript-comparisons"></a>
+# Core TypeScript Comparisons — Side-by-Side Differences
 
 ---
 
@@ -2771,11 +2771,11 @@ type UserGetters = Getters<{ name: string; age: number }>;
 
 ---
 
-# ⚖️ TypeScript Comparisons — Side-by-Side Differences
+# Extended TypeScript Comparisons — Side-by-Side Differences
 
 ---
 
-## TS-C1 — `interface` vs `type`
+## TS-X1 — `interface` vs `type` (Extended)
 
 | | `interface` | `type` |
 |-|------------|--------|
@@ -3003,6 +3003,7 @@ type Result = UnpackPromise<Promise<string>>; // string
 
 ---
 
+<a id="typescript-faang"></a>
 # 🏢 FAANG TypeScript & Type System Questions
 
 > These questions test deep knowledge of TypeScript's type system, compiler internals, and how to leverage types for correctness at scale — commonly asked at Microsoft, Google, and Meta.
@@ -3381,3 +3382,275 @@ graph TD
     style API fill:#e65100,color:#fff
 ```
 
+---
+
+<a id="typescript-mastery"></a>
+# Applied TypeScript Mastery
+
+These walkthroughs cover the boundary where many TypeScript applications fail: the compiler can prove facts about TypeScript code, but network, storage, environment, and third-party data still arrive at runtime.
+
+References: [TypeScript modules](https://www.typescriptlang.org/docs/handbook/2/modules.html), [module theory](https://www.typescriptlang.org/docs/handbook/modules/theory.html), [declaration output](https://www.typescriptlang.org/tsconfig/declaration.html), and [`strict`](https://www.typescriptlang.org/tsconfig/strict.html).
+
+## TS-M1 — Validate Runtime Data Instead of Asserting It
+
+**Question:** Why does `response.json() as User` not make an API response a `User`?
+
+**Answer:** TypeScript types are erased when JavaScript runs. A type assertion tells the compiler to trust the programmer; it performs no validation. External data should enter as `unknown`, be checked, and only then become a domain type.
+
+**What problem does it solve?** It prevents malformed, outdated, or malicious data from flowing through the application under a false compile-time guarantee.
+
+**Before this concept:** The client casts an untrusted payload and crashes later, far from the boundary where the bad value arrived.
+
+❌ **Wrong/before example:**
+
+```typescript
+interface UserDto {
+  id: string;
+  email: string;
+  createdAt: string;
+}
+
+const response = await fetch('/api/users/u-1');
+const user = await response.json() as UserDto;
+console.log(user.email.toLowerCase()); // crashes if email is absent or null
+```
+
+✅ **After/correct example:**
+
+```typescript
+interface UserDto {
+  id: string;
+  email: string;
+  createdAt: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function parseUserDto(value: unknown): UserDto {
+  if (!isRecord(value) ||
+      typeof value['id'] !== 'string' ||
+      typeof value['email'] !== 'string' ||
+      typeof value['createdAt'] !== 'string' ||
+      Number.isNaN(Date.parse(value['createdAt']))) {
+    throw new Error('Invalid UserDto payload');
+  }
+
+  return {
+    id: value['id'],
+    email: value['email'],
+    createdAt: value['createdAt']
+  };
+}
+
+const response = await fetch('/api/users/u-1');
+if (!response.ok) throw new Error(`User request failed: ${response.status}`);
+
+const payload: unknown = await response.json();
+const user = parseUserDto(payload);
+```
+
+**How it works now:** The payload is untrusted until every required field and invariant is checked. After `parseUserDto` returns, the compiler and runtime agree about the value’s shape.
+
+**Trade-offs and when not to use it:** Handwritten parsers become verbose for large schemas. A schema library can generate validation and inferred types, but it adds bundle/dependency cost. Validate at system boundaries rather than repeatedly inside trusted code.
+
+**Production checks:** Bound payload size, avoid logging sensitive invalid payloads, distinguish transport from validation errors, test old/new API versions, and convert date strings into domain values deliberately.
+
+**Try it:** Feed the parser `null`, a missing email, a numeric ID, and an invalid date. Confirm each fails at the boundary rather than in a component.
+
+---
+
+## TS-M2 — Match Module Settings to the Runtime
+
+**Question:** Why can imports type-check but fail when Node.js or a bundler executes them?
+
+**Answer:** TypeScript resolves types and emits JavaScript, but the runtime decides how module specifiers and files are loaded. `module`, `moduleResolution`, file extensions, package `type`, and package exports must model the actual runtime or bundler.
+
+**What problem does it solve?** It prevents “works in the editor, module not found in production” failures and packages whose declaration files describe a JavaScript layout that was never emitted.
+
+**Before this concept:** A project chooses unrelated compiler flags until imports stop showing red lines.
+
+❌ **Wrong/before example:**
+
+```json
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "bundler"
+  }
+}
+```
+
+This combines a CommonJS emit assumption with bundler resolution semantics even when the code will run directly in Node.js.
+
+✅ **After/correct examples:**
+
+For a modern application compiled by a bundler:
+
+```json
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  }
+}
+```
+
+For TypeScript emitted and executed directly according to Node’s module rules:
+
+```json
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "outDir": "dist",
+    "declaration": true,
+    "verbatimModuleSyntax": true
+  }
+}
+```
+
+```json
+{
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}
+```
+
+**How it works now:** The compiler follows the same broad resolution model as the host. Library consumers receive declarations that correspond to the published JavaScript entry point.
+
+**Trade-offs and when not to use it:** There is no universal best module configuration. Browser bundlers, Node, test runners, and libraries have different hosts. Copying a `tsconfig` without understanding who executes the emitted code is the root mistake.
+
+**Production checks:** Test the built artifact, not only source files; inspect the published package; run a consumer smoke test; and keep type-only imports explicit where the build tool requires isolated transformation.
+
+**Try it:** Build a two-file package, install the packed artifact into a temporary consumer, and verify both runtime import and editor types.
+
+---
+
+## TS-M3 — Adopt Strictness as a Defect-Finding System
+
+**Question:** What does `strict` solve, and how can a large codebase enable it safely?
+
+**Answer:** `strict` enables a family of checks that make nullability, function variance, initialization, and implicit types more explicit. Migrate by measuring errors, enabling high-value flags in stages, and fixing boundaries instead of hiding errors with assertions.
+
+**What problem does it solve?** It catches states the original types pretended could not happen, especially nullable data, unchecked indexes, implicit `any`, and incompletely initialized objects.
+
+**Before this concept:** The project compiles while values silently widen to `any` and array/dictionary access is treated as always present.
+
+❌ **Wrong/before example:**
+
+```typescript
+const prices: Record<string, number> = {};
+const total = prices[productId] * quantity; // can become NaN at runtime
+
+function normalize(value) {                // implicit any crosses the system
+  return value.trim().toLowerCase();
+}
+```
+
+✅ **After/correct example — configuration and code:**
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "useUnknownInCatchVariables": true,
+    "noFallthroughCasesInSwitch": true
+  }
+}
+```
+
+```typescript
+const price = prices[productId];
+if (price === undefined) {
+  return { ok: false, error: 'Unknown product' } as const;
+}
+
+const total = price * quantity;
+
+function normalize(value: unknown): string {
+  if (typeof value !== 'string') throw new TypeError('Expected text');
+  return value.trim().toLowerCase();
+}
+```
+
+**How it works now:** Index access forces the missing-key case into the design. Unknown inputs must be narrowed before use. The types describe the runtime possibilities instead of suppressing them.
+
+**Trade-offs and when not to use it:** Enabling every flag in one change can overwhelm a large team and create assertion-heavy fixes. Establish a strict base config, migrate package by package, prevent new violations, and track temporary exceptions with owners.
+
+**Production checks:** Keep the compiler version pinned, review stricter-check changes during upgrades, avoid broad `skipLibCheck` as a permanent solution, and fail CI when generated or package declaration files drift.
+
+**Try it:** Enable `noUncheckedIndexedAccess` in one package, categorize the errors, and identify which ones reveal actual missing-data behavior.
+
+---
+
+## TS-M4 — Model Workflow States with Discriminated Unions
+
+**Question:** Why is a discriminated union safer than several independent booleans?
+
+**Answer:** A discriminated union lists the valid states and attaches only the data available in each state. Impossible combinations cannot be constructed, and exhaustive switches reveal missing behavior when a new state is added.
+
+**What problem does it solve?** It prevents contradictory UI state such as `loading=true`, `loaded=true`, and `error` being populated simultaneously.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```typescript
+interface ViewState {
+  loading: boolean;
+  loaded: boolean;
+  data?: Order[];
+  error?: string;
+}
+
+const impossible: ViewState = {
+  loading: true,
+  loaded: true,
+  error: 'Failed'
+};
+```
+
+✅ **After/correct example:**
+
+```typescript
+type ViewState =
+  | { kind: 'idle' }
+  | { kind: 'loading'; startedAt: number }
+  | { kind: 'loaded'; data: readonly Order[] }
+  | { kind: 'failed'; message: string; retryable: boolean };
+
+function render(state: ViewState): string {
+  switch (state.kind) {
+    case 'idle': return 'Open the page to load orders';
+    case 'loading': return `Loading since ${state.startedAt}`;
+    case 'loaded': return `${state.data.length} orders`;
+    case 'failed': return state.retryable ? `Retry: ${state.message}` : state.message;
+    default: return assertNever(state);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled state: ${JSON.stringify(value)}`);
+}
+```
+
+**How it works now:** Narrowing on `kind` reveals the exact fields available in that branch. Adding a `refreshing` state produces a compile error at the exhaustive switch until its behavior is defined.
+
+**Trade-offs and when not to use it:** Do not create a union for unrelated independent facts. If “offline” can coexist with every loading state, model it separately or compose state machines deliberately.
+
+**Production checks:** Keep serialized discriminants stable, version persisted state, avoid throwing sensitive state into logs, and test every transition—not merely every final variant.
+
+**Try it:** Add a `refreshing` state that retains old data and update the renderer without weakening the exhaustive check.

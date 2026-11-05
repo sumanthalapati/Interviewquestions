@@ -33,11 +33,11 @@
 
 **Answer:** A service layer exposes application use cases such as `PlaceOrder` or `RedeemGiftCard`. Controllers translate HTTP into a command, call the use case, and translate the result back into HTTP.
 
-**What problem does this concept solve?** It keeps transport concerns separate from business coordination and makes the same use case callable from HTTP, a queue, or a scheduled job.
+**What problem does it solve?** It keeps transport concerns separate from business coordination and makes the same use case callable from HTTP, a queue, or a scheduled job.
 
 **Before this concept:** Controllers validated business rules, queried EF Core, called payment APIs, sent email, and chose HTTP responses in one method.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 [HttpPost]
@@ -54,7 +54,7 @@ public async Task<IActionResult> Create(OrderRequest request)
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 [HttpPost]
@@ -78,9 +78,11 @@ public sealed class OrderService
 }
 ```
 
-**How it works after this pattern:** The controller owns HTTP; the service owns the use case. Tests exercise ordering behavior without constructing MVC infrastructure.
+**How it works now:** The controller owns HTTP; the service owns the use case. Tests exercise ordering behavior without constructing MVC infrastructure.
 
-**When to use it:** Use it when an endpoint coordinates meaningful business behavior. Do not create a pass-through service that merely renames every repository method.
+**Trade-offs and when not to use it:** Use it when an endpoint coordinates meaningful business behavior. Do not create a pass-through service that merely renames every repository method.
+
+**Production checks:** Keep transaction ownership inside the use case, propagate cancellation, authorize the loaded resource, map expected failures consistently, and emit one trace around the complete workflow.
 
 ### Deep walkthrough — Service Layer: place an order
 
@@ -148,11 +150,11 @@ The controller now maps HTTP input/output only. A queue handler can call the sam
 
 **Answer:** A repository exposes domain-focused persistence operations while hiding data-access details. EF Core's `DbSet` already behaves like a repository, so add a custom repository only when it creates a useful domain boundary.
 
-**What problem does this concept solve?** It prevents application logic from depending on query technology and centralizes important aggregate-loading rules.
+**What problem does it solve?** It prevents application logic from depending on query technology and centralizes important aggregate-loading rules.
 
 **Before this concept:** Business code repeated includes, tenant filters, and active-record conditions throughout the application.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public interface IRepository<T>
@@ -165,7 +167,7 @@ public interface IRepository<T>
 // IQueryable leaks EF details and the interface adds no domain meaning.
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public interface IOrderRepository
@@ -187,9 +189,11 @@ public sealed class EfOrderRepository(AppDbContext db) : IOrderRepository
 }
 ```
 
-**How it works after this pattern:** Use cases ask domain questions such as “find unpaid orders,” while the repository consistently applies tenant and aggregate rules.
+**How it works now:** Use cases ask domain questions such as “find unpaid orders,” while the repository consistently applies tenant and aggregate rules.
 
-**When to use it:** Use it for aggregates or when persistence may vary. Query-only screens can often use optimized projections directly from `DbContext`.
+**Trade-offs and when not to use it:** Use it for aggregates or when persistence may vary. Query-only screens can often use optimized projections directly from `DbContext`.
+
+**Production checks:** Enforce tenant filters and aggregate boundaries, avoid returning unbounded `IQueryable` objects, pass cancellation tokens, and integration-test the repository against the real database provider.
 
 ### Deep walkthrough — Repository: load an order aggregate
 
@@ -229,11 +233,11 @@ Callers request an aggregate through a domain-oriented operation. The repository
 
 **Answer:** Unit of Work tracks several changes and commits them as one transaction. An EF Core `DbContext` already provides change tracking and `SaveChanges` as a unit of work.
 
-**What problem does this concept solve?** It prevents a use case from partially committing related database changes.
+**What problem does it solve?** It prevents a use case from partially committing related database changes.
 
 **Before this concept:** Each repository saved immediately. Creating an order could commit even if inventory or the outbox write later failed.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 await _orders.AddAndSaveAsync(order);       // committed
@@ -241,7 +245,7 @@ await _inventory.ReserveAndSaveAsync(...); // failure: order remains
 await _events.AddAndSaveAsync(...);
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 await using var transaction = await db.Database.BeginTransactionAsync(ct);
@@ -260,9 +264,11 @@ catch
 }
 ```
 
-**How it works after this pattern:** Order, local inventory, and outbox state commit together or all roll back. External services process the outbox after commit.
+**How it works now:** Order, local inventory, and outbox state commit together or all roll back. External services process the outbox after commit.
 
-**When to use it:** Use one unit of work for one local consistency boundary. Do not hold database transactions open while calling remote APIs.
+**Trade-offs and when not to use it:** Use one unit of work for one local consistency boundary. Do not hold database transactions open while calling remote APIs.
+
+**Production checks:** Define the transaction boundary explicitly, use an outbox for external side effects, handle optimistic-concurrency conflicts, keep transactions short, and test rollback after every possible failure point.
 
 ### Deep walkthrough — Unit of Work: commit order and outbox together
 
@@ -299,11 +305,11 @@ await unitOfWork.CommitAsync(ct); // one local transaction
 
 **Answer:** A specification represents selection criteria, includes, ordering, and sometimes business predicates as a named object.
 
-**What problem does this concept solve?** It stops query rules from being copied across controllers, jobs, and services.
+**What problem does it solve?** It stops query rules from being copied across controllers, jobs, and services.
 
 **Before this concept:** “Active premium customer” had different filters in billing, reporting, and notification code.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var customers = await db.Customers
@@ -311,7 +317,7 @@ var customers = await db.Customers
     .ToListAsync(); // magic values copied elsewhere
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public sealed class ActivePremiumCustomers : Specification<Customer>
@@ -329,9 +335,11 @@ var customers = await repository.ListAsync(
     new ActivePremiumCustomers(tenantId), cancellationToken);
 ```
 
-**How it works after this pattern:** The rule has one name, one implementation, and focused tests. Callers reuse it without copying query syntax.
+**How it works now:** The rule has one name, one implementation, and focused tests. Callers reuse it without copying query syntax.
 
-**When to use it:** Use it for repeated or composable query rules. A unique two-clause query usually does not need a specification class.
+**Trade-offs and when not to use it:** Use it for repeated or composable query rules. A unique two-clause query usually does not need a specification class.
+
+**Production checks:** Verify specifications translate to server-side queries, include tenant and authorization predicates, inspect generated SQL, and test boundary dates, nulls, and large result sets.
 
 ### Deep walkthrough — Specification: define “customers needing renewal” once
 
@@ -368,11 +376,11 @@ The rule has a name and focused boundary tests. Repositories can translate the e
 
 **Answer:** Command Query Responsibility Segregation separates state-changing operations from read models. It can begin with separate classes over one database; separate stores are optional.
 
-**What problem does this concept solve?** Writes need invariant protection, while reads often need denormalized, fast, screen-specific projections.
+**What problem does it solve?** Writes need invariant protection, while reads often need denormalized, fast, screen-specific projections.
 
 **Before this concept:** One large service returned entities for every screen and also accepted updates, accumulating conditional logic and over-fetching.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public class BookingService
@@ -382,7 +390,7 @@ public class BookingService
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public sealed record ConfirmBooking(Guid BookingId) : ICommand<Result>;
@@ -398,9 +406,11 @@ public sealed class ConfirmBookingHandler(AppDbContext db)
 }
 ```
 
-**How it works after this pattern:** Command handlers protect behavior; query handlers return optimized DTOs. They may share one database until scale or ownership justifies separate projections.
+**How it works now:** Command handlers protect behavior; query handlers return optimized DTOs. They may share one database until scale or ownership justifies separate projections.
 
-**When to use it:** Use it when read and write concerns differ meaningfully. Avoid doubling types for simple CRUD with no distinct behavior.
+**Trade-offs and when not to use it:** Use it when read and write concerns differ meaningfully. Avoid doubling types for simple CRUD with no distinct behavior.
+
+**Production checks:** Document read-model staleness, make projections replayable and idempotent, version events compatibly, monitor projection lag, and provide read-your-writes behavior where the product requires it.
 
 ### Deep walkthrough — CQRS: update an order and display a dashboard
 
@@ -431,11 +441,11 @@ Query   -> direct projection       -> screen-specific DTO
 
 **Answer:** A mediator dispatches a request to its handler and allows shared pipeline behaviors such as validation, logging, authorization, and transactions.
 
-**What problem does this concept solve?** It prevents controllers and use cases from directly depending on many handlers or cross-cutting services.
+**What problem does it solve?** It prevents controllers and use cases from directly depending on many handlers or cross-cutting services.
 
 **Before this concept:** Every controller repeated validation, authorization, logging, and transaction boilerplate.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public OrdersController(
@@ -446,7 +456,7 @@ public OrdersController(
     AppDbContext db) { /* dependency growth */ }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 [HttpPost]
@@ -467,9 +477,11 @@ public sealed class ValidationBehavior<TRequest, TResponse>(
 }
 ```
 
-**How it works after this pattern:** Controllers send requests; one handler owns each use case; ordered pipeline behaviors apply shared policies consistently.
+**How it works now:** Controllers send requests; one handler owns each use case; ordered pipeline behaviors apply shared policies consistently.
 
-**When to use it:** Use it when request handlers and pipelines simplify a growing application. Do not hide ordinary method calls behind a mediator without a real decoupling benefit.
+**Trade-offs and when not to use it:** Use it when request handlers and pipelines simplify a growing application. Do not hide ordinary method calls behind a mediator without a real decoupling benefit.
+
+**Production checks:** Make pipeline order explicit, ensure validation runs before transactions, propagate cancellation, avoid duplicate retries across behaviors, and test that rejected requests never invoke the handler.
 
 ### Deep walkthrough — Mediator: apply a validation and transaction pipeline
 
@@ -501,11 +513,11 @@ The handler contains only use-case logic. Read-only requests can skip the transa
 
 **Answer:** Strategy defines interchangeable implementations behind one interface and selects one based on runtime context.
 
-**What problem does this concept solve?** It lets algorithms change independently and makes new variants additive.
+**What problem does it solve?** It lets algorithms change independently and makes new variants additive.
 
 **Before this concept:** Payment, pricing, or notification code grew a switch statement for every provider or customer type.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 if (provider == "Stripe") { /* Stripe logic */ }
@@ -513,7 +525,7 @@ else if (provider == "PayPal") { /* PayPal logic */ }
 else if (provider == "Razorpay") { /* Razorpay logic */ }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public interface IPaymentStrategy
@@ -530,9 +542,11 @@ public sealed class PaymentRouter(IEnumerable<IPaymentStrategy> strategies)
 }
 ```
 
-**How it works after this pattern:** The router selects a provider through a stable contract. Each provider handles its own mapping, retries, and tests.
+**How it works now:** The router selects a provider through a stable contract. Each provider handles its own mapping, retries, and tests.
 
-**When to use it:** Use it for independently changing algorithms. Keep a simple conditional when variants are few, stable, and trivial.
+**Trade-offs and when not to use it:** Use it for independently changing algorithms. Keep a simple conditional when variants are few, stable, and trivial.
+
+**Production checks:** Validate strategy selection at the boundary, define unsupported capabilities, isolate provider-specific failures, instrument strategy outcomes, and contract-test every implementation against the shared behavior.
 
 ### Deep walkthrough — Strategy: support multiple payment providers
 
@@ -564,11 +578,11 @@ Checkout -> PaymentStrategySelector -> StripeStrategy
 
 **Answer:** A factory centralizes object creation when constructing the object requires validation, provider selection, dependencies, or business rules.
 
-**What problem does this concept solve?** It stops creation rules from being duplicated and prevents callers from depending on concrete types.
+**What problem does it solve?** It stops creation rules from being duplicated and prevents callers from depending on concrete types.
 
 **Before this concept:** Controllers constructed provider clients and domain objects with slightly different defaults.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var card = new GiftCard {
@@ -576,7 +590,7 @@ var card = new GiftCard {
 }; // invariants can be skipped anywhere
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public static class GiftCardFactory
@@ -591,9 +605,11 @@ public static class GiftCardFactory
 }
 ```
 
-**How it works after this pattern:** Every gift card begins in a valid state through one named creation path.
+**How it works now:** Every gift card begins in a valid state through one named creation path.
 
-**When to use it:** Use it when creation has policy. Direct constructors remain clearer for simple data objects.
+**Trade-offs and when not to use it:** Use it when creation has policy. Direct constructors remain clearer for simple data objects.
+
+**Production checks:** Reject unknown discriminators, keep created objects valid by construction, avoid hidden I/O in factories, test every creation branch, and make registration failures visible during startup.
 
 ### Deep walkthrough — Factory: create valid gift cards
 
@@ -624,11 +640,11 @@ var card = giftCardFactory.IssuePromotionalCard(
 
 **Answer:** An adapter translates an external contract into an internal interface and model. An anti-corruption layer may combine several adapters and rules to prevent external terminology from entering the domain.
 
-**What problem does this concept solve?** It contains provider-specific fields, errors, versions, and semantics.
+**What problem does it solve?** It contains provider-specific fields, errors, versions, and semantics.
 
 **Before this concept:** Shopify, Calendar, or payment DTOs flowed directly into domain services, so provider changes affected the entire application.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public async Task BookAsync(GoogleCalendarEvent googleEvent)
@@ -637,7 +653,7 @@ public async Task BookAsync(GoogleCalendarEvent googleEvent)
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public interface ICalendarGateway
@@ -659,9 +675,11 @@ public sealed class GoogleCalendarAdapter(GoogleCalendarClient client)
 }
 ```
 
-**How it works after this pattern:** The domain speaks in appointments. Only the adapter knows Google fields, tokens, and error codes.
+**How it works now:** The domain speaks in appointments. Only the adapter knows Google fields, tokens, and error codes.
 
-**When to use it:** Use it at external or legacy boundaries. Do not add mapping layers between identical internal models without purpose.
+**Trade-offs and when not to use it:** Use it at external or legacy boundaries. Do not add mapping layers between identical internal models without purpose.
+
+**Production checks:** Validate and sanitize provider data, map time zones and money explicitly, preserve provider error details only in protected telemetry, and run contract tests against captured or sandbox responses.
 
 ### Deep walkthrough — Adapter/ACL: integrate an external calendar
 
@@ -692,11 +710,11 @@ Domain Appointment -> ICalendarGateway -> GoogleCalendarAdapter -> Google DTO
 
 **Answer:** A decorator implements the same interface, wraps another implementation, and adds behavior before or after delegation.
 
-**What problem does this concept solve?** It composes logging, caching, metrics, validation, or authorization without mixing those concerns into core logic.
+**What problem does it solve?** It composes logging, caching, metrics, validation, or authorization without mixing those concerns into core logic.
 
 **Before this concept:** Every query service manually copied cache and metrics code.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public async Task<Product> Get(Guid id)
@@ -706,7 +724,7 @@ public async Task<Product> Get(Guid id)
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public sealed class CachedProductReader(
@@ -725,9 +743,11 @@ public sealed class CachedProductReader(
 }
 ```
 
-**How it works after this pattern:** The core reader reads products; decorators independently add cache, metrics, or resilience in an explicit order.
+**How it works now:** The core reader reads products; decorators independently add cache, metrics, or resilience in an explicit order.
 
-**When to use it:** Use it for orthogonal behavior around a stable interface. Middleware or mediator behaviors may be simpler for request-wide concerns.
+**Trade-offs and when not to use it:** Use it for orthogonal behavior around a stable interface. Middleware or mediator behaviors may be simpler for request-wide concerns.
+
+**Production checks:** Document decorator order, prevent caching authorization-sensitive results under shared keys, avoid retrying non-idempotent operations, and trace each layer without duplicating success metrics.
 
 ### Deep walkthrough — Decorator: cache and measure product reads
 
@@ -757,18 +777,18 @@ Each decorator implements the same interface and delegates. Ordering is meaningf
 
 **Answer:** Each middleware handles a request, short-circuits it, or passes it to the next handler in an ordered chain.
 
-**What problem does this concept solve?** It applies request-wide concerns once instead of repeating them in every endpoint.
+**What problem does it solve?** It applies request-wide concerns once instead of repeating them in every endpoint.
 
 **Before this concept:** Controllers manually performed correlation, exception mapping, authentication checks, and response logging.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 try { /* endpoint */ }
 catch (Exception ex) { return StatusCode(500, ex.ToString()); } // leaks details
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 app.UseExceptionHandler();
@@ -785,9 +805,11 @@ public async Task InvokeAsync(HttpContext context, RequestDelegate next)
 }
 ```
 
-**How it works after this pattern:** Requests pass through one predictable pipeline. Ordering is visible and each middleware has one responsibility.
+**How it works now:** Requests pass through one predictable pipeline. Ordering is visible and each middleware has one responsibility.
 
-**When to use it:** Use it for transport-wide concerns. Domain rules and entity authorization belong closer to the use case.
+**Trade-offs and when not to use it:** Use it for transport-wide concerns. Domain rules and entity authorization belong closer to the use case.
+
+**Production checks:** Lock down pipeline order with integration tests, place exception handling early, authenticate before authorization, avoid reading request bodies repeatedly, and measure middleware latency.
 
 ### Deep walkthrough — Middleware/Chain of Responsibility: handle every HTTP request
 
@@ -818,11 +840,11 @@ Each middleware can act before and after `next()`, short-circuit, or translate f
 
 **Answer:** A domain event records that something meaningful happened inside a domain boundary. An integration event is the stable external message published for other boundaries.
 
-**What problem does this concept solve?** It separates the aggregate's primary operation from secondary reactions while preserving domain language.
+**What problem does it solve?** It separates the aggregate's primary operation from secondary reactions while preserving domain language.
 
 **Before this concept:** The aggregate or application service directly called email, analytics, loyalty, and audit services.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 public void Confirm()
@@ -833,7 +855,7 @@ public void Confirm()
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public Result Confirm()
@@ -853,9 +875,11 @@ public sealed class BookingConfirmedHandler
 }
 ```
 
-**How it works after this pattern:** Confirmation changes aggregate state and records a fact. Handlers perform local reactions or translate it into a durable integration event.
+**How it works now:** Confirmation changes aggregate state and records a fact. Handlers perform local reactions or translate it into a durable integration event.
 
-**When to use it:** Use events for meaningful secondary reactions. Direct method calls are clearer when behavior must be immediate and part of one invariant.
+**Trade-offs and when not to use it:** Use events for meaningful secondary reactions. Direct method calls are clearer when behavior must be immediate and part of one invariant.
+
+**Production checks:** Publish through an outbox, make handlers idempotent, version event schemas, define ordering requirements, monitor failed consumers, and never assume an in-memory event survives a process crash.
 
 ### Deep walkthrough — Domain Event: react to an order confirmation
 
@@ -887,18 +911,18 @@ Handlers -> loyalty/audit locally; relay -> notification externally
 
 **Answer:** A Result represents success or a known failure explicitly. Exceptions remain for unexpected failures.
 
-**What problem does this concept solve?** It makes validation, conflict, and not-found outcomes visible in method contracts and avoids expensive exception-driven control flow.
+**What problem does it solve?** It makes validation, conflict, and not-found outcomes visible in method contracts and avoids expensive exception-driven control flow.
 
 **Before this concept:** Services returned `null`, booleans, or threw generic exceptions, leaving callers unable to distinguish failures safely.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 if (giftCard.Balance < amount)
     throw new Exception("Bad");
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public Result Redeem(Money amount)
@@ -912,9 +936,11 @@ public Result Redeem(Money amount)
 }
 ```
 
-**How it works after this pattern:** The application maps known error codes to consistent HTTP responses. Unexpected database or network failures still use exception handling and observability.
+**How it works now:** The application maps known error codes to consistent HTTP responses. Unexpected database or network failures still use exception handling and observability.
 
-**When to use it:** Use it for expected outcomes callers can handle. Do not wrap every programming bug in a success/failure object.
+**Trade-offs and when not to use it:** Use it for expected outcomes callers can handle. Do not wrap every programming bug in a success/failure object.
+
+**Production checks:** Keep error codes stable, map them centrally to protocol responses, avoid leaking exception text, include correlation identifiers, and test exhaustive handling when new result variants are introduced.
 
 ### Deep walkthrough — Result: represent an expected rejection
 
@@ -949,18 +975,18 @@ The controller maps known codes to a stable error contract. Unexpected bugs, bro
 
 **Answer:** The application checks cache, loads from the source on a miss, and populates cache for later requests. The database remains authoritative.
 
-**What problem does this concept solve?** It reduces latency and database load for frequently read, slowly changing data.
+**What problem does it solve?** It reduces latency and database load for frequently read, slowly changing data.
 
 **Before this concept:** Every request repeated the same expensive query.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 await cache.SetStringAsync($"product:{id}", json); // no TTL
 // UpdateProduct never invalidates or versions this key.
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 public async Task<ProductDto?> GetAsync(Guid id, CancellationToken ct)
@@ -980,9 +1006,11 @@ public async Task<ProductDto?> GetAsync(Guid id, CancellationToken ct)
 }
 ```
 
-**How it works after this pattern:** Hot reads avoid the database, keys are versioned or invalidated after writes, and TTL bounds staleness.
+**How it works now:** Hot reads avoid the database, keys are versioned or invalidated after writes, and TTL bounds staleness.
 
-**When to use it:** Use it when repeated reads justify complexity. Do not cache highly volatile data without a clear correctness model.
+**Trade-offs and when not to use it:** Use it when repeated reads justify complexity. Do not cache highly volatile data without a clear correctness model.
+
+**Production checks:** Define key ownership, tenant scope, expiry, invalidation, stampede protection, serialization compatibility, and the behavior when either the cache or source of truth is unavailable.
 
 ### Deep walkthrough — Cache-Aside: read a product catalogue
 
@@ -1013,18 +1041,18 @@ Use single-flight protection so one expired hot key does not trigger hundreds of
 
 **Answer:** Persist the user's intent, enqueue durable work, return an operation identifier, and let a worker perform slow or retryable processing.
 
-**What problem does this concept solve?** It prevents slow email, export, media, or provider work from occupying request resources or failing when a client disconnects.
+**What problem does it solve?** It prevents slow email, export, media, or provider work from occupying request resources or failing when a client disconnects.
 
 **Before this concept:** The HTTP request stayed open for minutes and lost all progress if the process restarted.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 _ = Task.Run(() => GenerateReport(request)); // not durable; lost on restart
 return Accepted();
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 [HttpPost("reports")]
@@ -1038,9 +1066,11 @@ public async Task<IActionResult> CreateReport(CreateReport request, Cancellation
 }
 ```
 
-**How it works after this pattern:** The request returns quickly with durable status. An idempotent worker processes the job, checkpoints progress, and exposes success or failure for polling or notification.
+**How it works now:** The request returns quickly with durable status. An idempotent worker processes the job, checkpoints progress, and exposes success or failure for polling or notification.
 
-**When to use it:** Use it for durable asynchronous work. Keep fast validation and operations needed for the immediate response synchronous.
+**Trade-offs and when not to use it:** Use it for durable asynchronous work. Keep fast validation and operations needed for the immediate response synchronous.
+
+**Production checks:** Use durable storage for accepted work, make processing idempotent, bound concurrency, retry transient failures with a dead-letter path, expose job status, and stop safely during deployment.
 
 ### Deep walkthrough — Background Worker: generate a large report
 
@@ -1072,11 +1102,11 @@ GET /reports/{operationId} -> progress and download link
 
 **Answer:** A BFF is a client-specific backend that aggregates and shapes downstream capabilities for one user experience.
 
-**What problem does this concept solve?** It avoids forcing every client to orchestrate many services or accept a one-size-fits-none API.
+**What problem does it solve?** It avoids forcing every client to orchestrate many services or accept a one-size-fits-none API.
 
 **Before this concept:** The Angular app made ten calls, joined data in the browser, duplicated authorization assumptions, and exposed internal service topology.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```text
 Browser -> Customer Service
@@ -1086,7 +1116,7 @@ Browser -> Customer Service
         -> Permissions Service
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Angular -> Web BFF -> Customer, Booking, Payment, Offers services
@@ -1104,9 +1134,11 @@ public async Task<DashboardDto> GetDashboard(CancellationToken ct)
 }
 ```
 
-**How it works after this pattern:** The client makes one experience-focused call, internal services remain hidden, and web/mobile payloads evolve independently.
+**How it works now:** The client makes one experience-focused call, internal services remain hidden, and web/mobile payloads evolve independently.
 
-**When to use it:** Use it when clients have meaningfully different orchestration needs. Do not duplicate domain logic or turn the BFF into a new monolith.
+**Trade-offs and when not to use it:** Use it when clients have meaningfully different orchestration needs. Do not duplicate domain logic or turn the BFF into a new monolith.
+
+**Production checks:** Authenticate at a trusted boundary, enforce downstream authorization, set per-call deadlines, bound fan-out, define partial-response behavior, cache only client-safe data, and trace the complete aggregation.
 
 ### Deep walkthrough — BFF: build a web dashboard
 

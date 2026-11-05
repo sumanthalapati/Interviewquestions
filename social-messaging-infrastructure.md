@@ -15,7 +15,8 @@ Complete guide to designing large-scale social and messaging platforms, plus cri
 
 ---
 
-## WhatsApp Architecture {#whatsapp}
+<a id="whatsapp"></a>
+## WhatsApp Architecture
 
 ### Problem Statement
 
@@ -168,7 +169,8 @@ Workers:
 
 ---
 
-## Slack Architecture {#slack}
+<a id="slack"></a>
+## Slack Architecture
 
 ### Problem Statement
 
@@ -307,7 +309,8 @@ Challenges:
 
 ---
 
-## Reddit Architecture {#reddit}
+<a id="reddit"></a>
+## Reddit Architecture
 
 ### Problem Statement
 
@@ -417,7 +420,8 @@ Rendering:
 
 ---
 
-## Tinder Architecture {#tinder}
+<a id="tinder"></a>
+## Tinder Architecture
 
 ### Problem Statement
 
@@ -525,7 +529,8 @@ Process:
 
 ---
 
-## Bluesky (Decentralized Social) {#bluesky}
+<a id="bluesky"></a>
+## Bluesky (Decentralized Social)
 
 ### Problem Statement
 
@@ -631,7 +636,8 @@ Solutions:
 
 ---
 
-## Nginx & Load Balancing {#nginx}
+<a id="nginx"></a>
+## Nginx & Load Balancing
 
 ### What is Nginx?
 
@@ -806,7 +812,8 @@ Use: Prevent abuse, DDoS mitigation
 
 ---
 
-## Comparison & Trade-offs {#comparison}
+<a id="comparison"></a>
+## Comparison & Trade-offs
 
 | Platform | Scale | Real-time | Consistency | Key Tech |
 |----------|-------|-----------|-------------|----------|

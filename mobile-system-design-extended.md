@@ -16,7 +16,8 @@ Comprehensive guide for designing systems with mobile-specific constraints (offl
 
 ---
 
-## Mobile Design Fundamentals {#fundamentals}
+<a id="fundamentals"></a>
+## Mobile Design Fundamentals
 
 ### Mobile Constraints vs Desktop
 
@@ -82,7 +83,8 @@ Design:
 
 ---
 
-## Offline-First Architecture {#offline}
+<a id="offline"></a>
+## Offline-First Architecture
 
 ### Definition
 
@@ -272,7 +274,8 @@ When breaks: Editing existing item (who's version correct?)
 
 ---
 
-## Network Optimization {#network}
+<a id="network"></a>
+## Network Optimization
 
 ### Request Batching
 
@@ -387,7 +390,8 @@ Implementation:
 
 ---
 
-## Battery & Performance {#battery}
+<a id="battery"></a>
+## Battery & Performance
 
 ### Battery Drain Analysis
 
@@ -511,7 +515,8 @@ Measurement:
 
 ---
 
-## Data Synchronization {#sync}
+<a id="sync"></a>
+## Data Synchronization
 
 ### Sync Algorithm
 
@@ -591,7 +596,8 @@ Next sync:
 
 ---
 
-## Real-World Examples {#examples}
+<a id="examples"></a>
+## Real-World Examples
 
 ### Example 1: Gmail (Email Offline)
 
@@ -686,7 +692,8 @@ Challenge:
 
 ---
 
-## Mobile vs Web Trade-offs {#tradeoffs}
+<a id="tradeoffs"></a>
+## Mobile vs Web Trade-offs
 
 ### Design Decisions
 
@@ -743,7 +750,8 @@ Challenge:
 
 ---
 
-## Interview Framework {#interview}
+<a id="interview"></a>
+## Interview Framework
 
 ### Example Question: Design Offline-First Chat
 

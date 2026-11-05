@@ -2354,7 +2354,7 @@ Error occurs in stream
 
 ---
 
-# ⚖️ RxJS Comparisons — Side-by-Side Differences
+# Core RxJS Comparisons — Side-by-Side Differences
 
 ---
 
@@ -2544,7 +2544,7 @@ this.http.get('/api/data').pipe(
 
 ---
 
-# ⚖️ RxJS Comparisons — Side-by-Side Differences
+# Extended RxJS Comparisons — Side-by-Side Differences
 
 ---
 
@@ -2721,4 +2721,3 @@ const shared$ = this.http.get('/api/data').pipe(share());
 shared$.subscribe(d => console.log('A', d)); // triggers ONE HTTP request
 shared$.subscribe(d => console.log('B', d)); // reuses same request
 ```
-

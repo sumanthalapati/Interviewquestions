@@ -18,7 +18,8 @@ Quick reference guide for how major tech companies scaled their systems. Each se
 
 ---
 
-## Amazon {#amazon}
+<a id="amazon"></a>
+## Amazon
 
 ### Definition
 Amazon Web Services (AWS) pioneer distributed systems at scale. Key services: S3 (object storage), Lambda (serverless), DynamoDB (NoSQL), EC2 (compute).
@@ -60,7 +61,8 @@ Amazon Web Services (AWS) pioneer distributed systems at scale. Key services: S3
 
 ---
 
-## Apple {#apple}
+<a id="apple"></a>
+## Apple
 
 ### Definition
 Apple's ecosystem balances privacy, security, and real-time coordination across billions of devices. Key: AirTags (tracking), Apple Pay (payments).
@@ -95,7 +97,8 @@ Apple's ecosystem balances privacy, security, and real-time coordination across 
 
 ---
 
-## Meta/Facebook {#meta}
+<a id="meta"></a>
+## Meta/Facebook
 
 ### Definition
 Meta scales live features to billions. Key: Live Video (1B+ users), Cache Consistency (99.99999999%), CDN delivery.
@@ -134,7 +137,8 @@ Meta scales live features to billions. Key: Live Video (1B+ users), Cache Consis
 
 ---
 
-## Netflix {#netflix}
+<a id="netflix"></a>
+## Netflix
 
 ### Definition
 Netflix scaled to 200M+ users via microservices, chaos engineering, and resilience patterns. Broke monolith into service-oriented architecture.
@@ -172,7 +176,8 @@ Netflix scaled to 200M+ users via microservices, chaos engineering, and resilien
 
 ---
 
-## Google {#google}
+<a id="google"></a>
+## Google
 
 ### Definition
 Google scales search, cloud, and databases to trillions of queries. Key: Spanner (ACID + distributed), Search (crawl + index + rank), Colossus (FS).
@@ -211,7 +216,8 @@ Google scales search, cloud, and databases to trillions of queries. Key: Spanner
 
 ---
 
-## LinkedIn {#linkedin}
+<a id="linkedin"></a>
+## LinkedIn
 
 ### Definition
 LinkedIn scales to 930M users through MySQL sharding, protocol buffers, and cache architecture. Optimized for social network queries.
@@ -253,7 +259,8 @@ LinkedIn scales to 930M users through MySQL sharding, protocol buffers, and cach
 
 ---
 
-## Uber {#uber}
+<a id="uber"></a>
+## Uber
 
 ### Definition
 Uber coordinates 100M+ rides via ETA calculation, driver matching, and payment processing at massive scale. Optimized for real-time geo operations.
@@ -295,7 +302,8 @@ Uber coordinates 100M+ rides via ETA calculation, driver matching, and payment p
 
 ---
 
-## Twitter/X {#twitter}
+<a id="twitter"></a>
+## Twitter/X
 
 ### Definition
 Twitter scales to 500M+ users tweeting, retweeting, liking in real-time. Key: Timeline generation, distributed systems reliability.
@@ -334,7 +342,8 @@ Twitter scales to 500M+ users tweeting, retweeting, liking in real-time. Key: Ti
 
 ---
 
-## YouTube {#youtube}
+<a id="youtube"></a>
+## YouTube
 
 ### Definition
 YouTube supports 2.49B users watching 1B+ hours/day. Key: MySQL scale (Vitess), distributed encoding, CDN delivery.
@@ -376,7 +385,8 @@ YouTube supports 2.49B users watching 1B+ hours/day. Key: MySQL scale (Vitess), 
 
 ---
 
-## Disney+ Hotstar {#disney}
+<a id="disney"></a>
+## Disney+ Hotstar
 
 ### Definition
 Disney+ Hotstar handled 25M concurrent users during cricket matches. Key: Real-time events, massive scale, emoji streaming.

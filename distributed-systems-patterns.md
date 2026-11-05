@@ -37,17 +37,17 @@
 
 **Answer:** A timeout limits one operation's wait. A deadline is the remaining time budget for the entire request and should propagate through downstream calls.
 
-**What problem does this concept solve?** It prevents slow dependencies from holding threads, connections, and memory forever.
+**What problem does it solve?** It prevents slow dependencies from holding threads, connections, and memory forever.
 
 **Before this concept:** Requests waited until operating-system defaults expired. A few slow calls consumed the entire connection pool.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var response = await httpClient.GetAsync(url); // no caller deadline or cancellation
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
@@ -55,9 +55,9 @@ deadline.CancelAfter(TimeSpan.FromMilliseconds(800));
 using var response = await httpClient.GetAsync(url, deadline.Token);
 ```
 
-**How it works after this pattern:** Work stops when its useful time budget ends, cancellation propagates, and capacity becomes available for other requests.
+**How it works now:** Work stops when its useful time budget ends, cancellation propagates, and capacity becomes available for other requests.
 
-**Trade-off:** A timeout that is too short creates false failures; one that is too long fails to protect capacity. Set it from measured latency and the caller's SLO.
+**Trade-offs and when not to use it:** A timeout that is too short creates false failures; one that is too long fails to protect capacity. Set it from measured latency and the caller's SLO.
 
 ### Failure walkthrough — Timeout and deadline: checkout calls pricing
 
@@ -92,11 +92,11 @@ The edge gives the request a two-second deadline. Checkout reserves time for its
 
 **Answer:** Retry only transient failures and safe operations. Exponential backoff increases delay after each failure; jitter randomizes it so clients do not retry together.
 
-**What problem does this concept solve?** It recovers from brief faults without turning one outage into a synchronized retry storm.
+**What problem does it solve?** It recovers from brief faults without turning one outage into a synchronized retry storm.
 
 **Before this concept:** Calls either failed immediately on a brief network issue or retried in tight loops that increased provider load.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 while (true)
@@ -106,7 +106,7 @@ while (true)
 }
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 var delays = new[] { 100, 250, 600 };
@@ -121,9 +121,9 @@ for (var attempt = 0; ; attempt++)
 }
 ```
 
-**How it works after this pattern:** Brief failures recover, repeated failures spread over time, and retry count remains bounded.
+**How it works now:** Brief failures recover, repeated failures spread over time, and retry count remains bounded.
 
-**Trade-off:** Retries increase latency and load. Do not automatically retry non-idempotent writes or permanent `4xx` failures.
+**Trade-offs and when not to use it:** Retries increase latency and load. Do not automatically retry non-idempotent writes or permanent `4xx` failures.
 
 ### Failure walkthrough — Retry with backoff and jitter: recover from a brief provider error
 
@@ -154,13 +154,13 @@ After:  0ms [1000] -> retries distributed across 100-300ms, then 300-900ms
 
 **Answer:** It stops calls to a dependency when recent failure or latency exceeds a threshold, then allows limited probes after a cooling period.
 
-**What problem does this concept solve?** It prevents every caller from waiting on a dependency already known to be unhealthy.
+**What problem does it solve?** It prevents every caller from waiting on a dependency already known to be unhealthy.
 
 **Before this concept:** Every request called the failing provider, exhausted resources, retried, and spread failure to otherwise healthy services.
 
-❌ **Wrong example:** Keep calling a provider during an outage and increase retries because the success rate is falling.
+❌ **Wrong/before example:** Keep calling a provider during an outage and increase retries because the success rate is falling.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Closed --failure threshold--> Open --cooldown--> Half-Open
@@ -179,9 +179,9 @@ var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
     }).Build();
 ```
 
-**How it works after this pattern:** Calls fail fast or use a safe fallback while the dependency recovers; half-open probes decide when to resume.
+**How it works now:** Calls fail fast or use a safe fallback while the dependency recovers; half-open probes decide when to resume.
 
-**Trade-off:** Poor thresholds can open during harmless spikes or keep traffic away too long. Monitor state changes and rejected calls.
+**Trade-offs and when not to use it:** Poor thresholds can open during harmless spikes or keep traffic away too long. Monitor state changes and rejected calls.
 
 ### Failure walkthrough — Circuit breaker: stop calling a failed tax provider
 
@@ -213,13 +213,13 @@ Closed --failure threshold--> Open --cool-down--> Half-open
 
 **Answer:** A bulkhead gives workloads separate, bounded resource pools such as concurrency limits, queues, threads, or connections.
 
-**What problem does this concept solve?** One slow tenant or dependency cannot consume every resource and take down unrelated work.
+**What problem does it solve?** One slow tenant or dependency cannot consume every resource and take down unrelated work.
 
 **Before this concept:** All outbound calls shared one unbounded pool. A slow reporting provider starved payment traffic.
 
-❌ **Wrong example:** Allow unlimited concurrent report exports and payment calls through the same worker and connection pool.
+❌ **Wrong/before example:** Allow unlimited concurrent report exports and payment calls through the same worker and connection pool.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 var paymentGate = new SemaphoreSlim(50);
@@ -228,9 +228,9 @@ try { return await paymentClient.ChargeAsync(command, ct); }
 finally { paymentGate.Release(); }
 ```
 
-**How it works after this pattern:** Payment, reporting, and tenant workloads have independent limits, so saturation remains contained.
+**How it works now:** Payment, reporting, and tenant workloads have independent limits, so saturation remains contained.
 
-**Trade-off:** Reserved capacity may sit idle, and limits require tuning. Prefer explicit rejection over unbounded queues.
+**Trade-offs and when not to use it:** Reserved capacity may sit idle, and limits require tuning. Prefer explicit rejection over unbounded queues.
 
 ### Failure walkthrough — Bulkhead: isolate reporting from payments
 
@@ -261,13 +261,13 @@ Report traffic  -> pool 10, queue 20 -> report provider
 
 **Answer:** Rate limiting enforces planned usage policy per caller or key. Load shedding rejects lower-priority work when the system is currently overloaded.
 
-**What problem does this concept solve?** It protects capacity before queues, latency, and failure rates become uncontrollable.
+**What problem does it solve?** It protects capacity before queues, latency, and failure rates become uncontrollable.
 
 **Before this concept:** The system accepted every request and slowed all users until instances and databases collapsed.
 
-❌ **Wrong example:** Return `500` only after all worker threads and database connections are exhausted.
+❌ **Wrong/before example:** Return `500` only after all worker threads and database connections are exhausted.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Gateway: per-tenant token bucket -> 429 + Retry-After
@@ -275,9 +275,9 @@ Service: concurrency limit -> reject low-priority work
 Queue: maximum depth -> pause producers or shed optional jobs
 ```
 
-**How it works after this pattern:** Excess work fails early and predictably while reserved capacity serves critical operations.
+**How it works now:** Excess work fails early and predictably while reserved capacity serves critical operations.
 
-**Trade-off:** Rejection is visible to users, so prioritize fairly, communicate retry behavior, and measure shed work.
+**Trade-offs and when not to use it:** Rejection is visible to users, so prioritize fairly, communicate retry behavior, and measure shed work.
 
 ### Failure walkthrough — Rate limiting and load shedding: protect login capacity
 
@@ -303,13 +303,13 @@ An edge limiter applies per-IP and per-account token buckets; a global concurren
 
 **Answer:** Store a unique message ID in an inbox table in the same transaction as the business update. A repeated ID is acknowledged without repeating the side effect.
 
-**What problem does this concept solve?** Brokers may redeliver after timeout, crash, or lost acknowledgement.
+**What problem does it solve?** Brokers may redeliver after timeout, crash, or lost acknowledgement.
 
 **Before this concept:** Every delivery sent another email, deducted stock again, or created a second payment.
 
-❌ **Wrong example:** Check an in-memory `HashSet` of processed IDs; restart loses it, and several instances do not share it.
+❌ **Wrong/before example:** Check an in-memory `HashSet` of processed IDs; restart loses it, and several instances do not share it.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```sql
 BEGIN TRANSACTION;
@@ -320,9 +320,9 @@ UPDATE Inventory SET Reserved = Reserved + @quantity WHERE Sku = @sku;
 COMMIT;
 ```
 
-**How it works after this pattern:** The first delivery commits inbox and business state atomically. Duplicate insert failure identifies redelivery and prevents a second update.
+**How it works now:** The first delivery commits inbox and business state atomically. Duplicate insert failure identifies redelivery and prevents a second update.
 
-**Trade-off:** The inbox grows and needs retention. Scope IDs correctly and keep processing deterministic.
+**Trade-offs and when not to use it:** The inbox grows and needs retention. Scope IDs correctly and keep processing deterministic.
 
 ### Failure walkthrough — Idempotent consumer and inbox: process a payment event twice
 
@@ -353,18 +353,18 @@ The event has a stable message ID. In one local transaction, the consumer insert
 
 **Answer:** Write the business change and an outgoing message record in one local transaction. A relay publishes committed outbox records later.
 
-**What problem does this concept solve?** A process can crash between updating its database and publishing an event.
+**What problem does it solve?** A process can crash between updating its database and publishing an event.
 
 **Before this concept:** Either the database changed without an event or an event published for a transaction that later rolled back.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 await db.SaveChangesAsync(ct);
 await broker.PublishAsync(new OrderPlaced(order.Id), ct); // crash gap
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 db.Orders.Add(order);
@@ -373,9 +373,9 @@ await db.SaveChangesAsync(ct); // one local transaction
 // Relay publishes unpublished rows and marks them published.
 ```
 
-**How it works after this pattern:** Every committed business change has a durable event to publish. Relay retries may duplicate delivery, so consumers remain idempotent.
+**How it works now:** Every committed business change has a durable event to publish. Relay retries may duplicate delivery, so consumers remain idempotent.
 
-**Trade-off:** Publication is eventually consistent and requires relay monitoring, cleanup, ordering rules, and lag metrics.
+**Trade-offs and when not to use it:** Publication is eventually consistent and requires relay monitoring, cleanup, ordering rules, and lag metrics.
 
 ### Failure walkthrough — Transactional outbox: save an order and publish its event
 
@@ -408,13 +408,13 @@ The order and an outbox row are saved in one database transaction. A relay later
 
 **Answer:** A saga breaks the workflow into local transactions and defines compensating actions for completed steps when a later step fails.
 
-**What problem does this concept solve?** Independent service databases cannot share one simple ACID transaction.
+**What problem does it solve?** Independent service databases cannot share one simple ACID transaction.
 
 **Before this concept:** A long distributed transaction held locks across order, payment, and inventory systems, or failures left partial state with no recovery process.
 
-❌ **Wrong example:** Begin a database transaction, call three remote services while holding locks, and assume rollback can undo their external effects.
+❌ **Wrong/before example:** Begin a database transaction, call three remote services while holding locks, and assume rollback can undo their external effects.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Create Order -> Reserve Inventory -> Authorize Payment -> Confirm Order
@@ -423,9 +423,9 @@ Create Order -> Reserve Inventory -> Authorize Payment -> Confirm Order
                 Cancel Order       Release Inventory + Cancel Order
 ```
 
-**How it works after this pattern:** Each step commits locally and records saga state. Retries resume safely; compensation moves the business to an accepted alternative state.
+**How it works now:** Each step commits locally and records saga state. Retries resume safely; compensation moves the business to an accepted alternative state.
 
-**Trade-off:** Compensation is not time travel and may fail. Define business-visible intermediate states and manual recovery.
+**Trade-offs and when not to use it:** Compensation is not time travel and may fail. Define business-visible intermediate states and manual recovery.
 
 ### Failure walkthrough — Saga: place an order across inventory and payment
 
@@ -462,13 +462,13 @@ Every step and compensation is idempotent. Compensation is a business action, no
 
 **Answer:** Events or CDC update a query-specific projection so reads avoid synchronous joins across service-owned databases.
 
-**What problem does this concept solve?** Cross-service reads are slow, fragile, and violate data ownership when they query databases directly.
+**What problem does it solve?** Cross-service reads are slow, fragile, and violate data ownership when they query databases directly.
 
 **Before this concept:** A dashboard called five services on every request and failed if any one service was unavailable.
 
-❌ **Wrong example:** Join Order, Payment, Customer, and Shipping databases directly from one reporting service.
+❌ **Wrong/before example:** Join Order, Payment, Customer, and Shipping databases directly from one reporting service.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Order events ----+
@@ -477,9 +477,9 @@ Shipping events -+                              |
                                                 +--> fast GET /dashboard
 ```
 
-**How it works after this pattern:** Writes remain owned by source services; the dashboard reads one denormalized projection and exposes its freshness timestamp.
+**How it works now:** Writes remain owned by source services; the dashboard reads one denormalized projection and exposes its freshness timestamp.
 
-**Trade-off:** The view is eventually consistent and needs replay, schema evolution, deduplication, and reconciliation.
+**Trade-offs and when not to use it:** The view is eventually consistent and needs replay, schema evolution, deduplication, and reconciliation.
 
 ### Failure walkthrough — CQRS materialized view: serve an order dashboard
 
@@ -505,13 +505,13 @@ Each source publishes changes. A projector maintains a denormalized `OrderDashbo
 
 **Answer:** Event sourcing stores an aggregate's ordered domain events as its authoritative state. Current state is reconstructed by replay, often accelerated with snapshots.
 
-**What problem does this concept solve?** It preserves complete history and supports temporal queries, audit, and rebuilding projections.
+**What problem does it solve?** It preserves complete history and supports temporal queries, audit, and rebuilding projections.
 
 **Before this concept:** Updates overwrote rows, so the system knew current balance but not exactly how it got there.
 
-❌ **Wrong example:** Save arbitrary integration events as JSON and assume that alone makes the system event sourced.
+❌ **Wrong/before example:** Save arbitrary integration events as JSON and assume that alone makes the system event sourced.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 GiftCardIssued(+1000)
@@ -527,9 +527,11 @@ var newEvents = card.Redeem(new Money(300));
 await eventStore.AppendAsync(giftCardId, stream.Version, newEvents, ct);
 ```
 
-**How it works after this pattern:** Optimistic stream versioning protects concurrency, events explain every transition, and projections can be rebuilt.
+**How it works now:** Optimistic stream versioning protects concurrency, events explain every transition, and projections can be rebuilt.
 
-**Trade-off:** Event schemas are permanent history. Debugging, privacy deletion, migrations, and eventual projections are substantially more complex.
+**Trade-offs and when not to use it:** Event schemas are permanent history. Debugging, privacy deletion, migrations, and eventual projections are substantially more complex.
+
+**Production checks:** Version events compatibly, preserve optimistic concurrency on stream append, encrypt or tokenize sensitive fields, make projections replayable, snapshot only as an optimization, and test restoration from the original log.
 
 ### Failure walkthrough — Event sourcing: preserve an account’s history
 
@@ -559,13 +561,13 @@ version 3 Withdrawn(30) -> state balance 70
 
 **Answer:** Instances compete for a time-limited lease in a consensus-backed store. The leader renews it; another instance takes over after expiry.
 
-**What problem does this concept solve?** It avoids duplicate coordination while still recovering when the current leader dies.
+**What problem does it solve?** It avoids duplicate coordination while still recovering when the current leader dies.
 
 **Before this concept:** Every replica ran the same scheduler, sending duplicate invoices or compaction jobs.
 
-❌ **Wrong example:** Set `IsLeader=true` in local memory on the first instance that starts.
+❌ **Wrong/before example:** Set `IsLeader=true` in local memory on the first instance that starts.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Acquire lease(key, owner, expiresAt) with compare-and-set
@@ -573,9 +575,9 @@ Renew before expiry only if owner/version still matches
 Stop work immediately when renewal fails
 ```
 
-**How it works after this pattern:** One live lease holder coordinates work; expiry enables failover without manual intervention.
+**How it works now:** One live lease holder coordinates work; expiry enables failover without manual intervention.
 
-**Trade-off:** Clock assumptions and pauses matter. Use a proven coordination system and pair the lease with fencing for protected resources.
+**Trade-offs and when not to use it:** Clock assumptions and pauses matter. Use a proven coordination system and pair the lease with fencing for protected resources.
 
 ### Failure walkthrough — Leader election and lease: run one scheduler
 
@@ -601,13 +603,13 @@ Replicas compete for a time-bounded lease in a consensus-capable store. The owne
 
 **Answer:** A paused lock holder may resume after its lease expired and write stale data. A monotonically increasing fencing token lets the protected resource reject older holders.
 
-**What problem does this concept solve?** It prevents split-brain writes caused by delays, pauses, or uncertain lock ownership.
+**What problem does it solve?** It prevents split-brain writes caused by delays, pauses, or uncertain lock ownership.
 
 **Before this concept:** A worker assumed it still owned a lock after a long pause and overwrote work from the new owner.
 
-❌ **Wrong example:** Acquire Redis lock for 30 seconds, perform a 60-second job, and write without checking ownership or version.
+❌ **Wrong/before example:** Acquire Redis lock for 30 seconds, perform a 60-second job, and write without checking ownership or version.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Worker A acquires token 41 -> pauses
@@ -616,9 +618,11 @@ Worker B acquires token 42 -> storage accepts write(42)
 Worker A resumes -> storage rejects write(41)
 ```
 
-**How it works after this pattern:** The lock limits concurrent intent, while the resource's token check provides correctness even when an old holder resumes.
+**How it works now:** The lock limits concurrent intent, while the resource's token check provides correctness even when an old holder resumes.
 
-**Trade-off:** The destination must enforce token ordering. Prefer database constraints or partition ownership when they solve the problem more simply.
+**Trade-offs and when not to use it:** The destination must enforce token ordering. Prefer database constraints or partition ownership when they solve the problem more simply.
+
+**Production checks:** Generate fencing tokens from an authoritative monotonic source, persist the last accepted token with the protected resource, reject stale writers atomically, bound lease duration, and test a paused owner resuming after lease loss.
 
 ### Failure walkthrough — Distributed lock plus fencing token: protect a file writer
 
@@ -648,26 +652,26 @@ A resumes with 41 -> write rejected as stale
 
 **Answer:** Place keys and virtual nodes in a hash space so adding or removing a node affects mainly neighboring ranges.
 
-**What problem does this concept solve?** Modulo hashing remaps most keys whenever cluster size changes.
+**What problem does it solve?** Modulo hashing remaps most keys whenever cluster size changes.
 
 **Before this concept:** Adding one cache server caused a near-total cache miss storm.
 
-❌ **Wrong example:**
+❌ **Wrong/before example:**
 
 ```csharp
 var server = servers[Hash(key) % servers.Count];
 ```
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Ring: N1 -- vN2 -- N3 -- vN1 -- N2 -- vN3
 Key walks clockwise to the next virtual node.
 ```
 
-**How it works after this pattern:** Membership changes move a bounded share of keys; virtual nodes improve balance and support weighted capacity.
+**How it works now:** Membership changes move a bounded share of keys; virtual nodes improve balance and support weighted capacity.
 
-**Trade-off:** It does not solve hot keys, replication, or membership consensus. Rendezvous hashing may be simpler.
+**Trade-offs and when not to use it:** It does not solve hot keys, replication, or membership consensus. Rendezvous hashing may be simpler.
 
 ### Failure walkthrough — Consistent hashing: add a cache node
 
@@ -693,13 +697,13 @@ Nodes and keys are placed on a logical hash ring. A key belongs to the next node
 
 **Answer:** A shard key should distribute load, support dominant queries, preserve useful locality, and remain stable as the system grows.
 
-**What problem does this concept solve?** It spreads data and traffic beyond one database's capacity.
+**What problem does it solve?** It spreads data and traffic beyond one database's capacity.
 
 **Before this concept:** One database handled every tenant and eventually hit storage, write, or maintenance limits.
 
-❌ **Wrong example:** Shard sequential orders by current month when nearly all writes target the newest month, creating one hot shard.
+❌ **Wrong/before example:** Shard sequential orders by current month when nearly all writes target the newest month, creating one hot shard.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Tenant SaaS: shard = hash(TenantId)
@@ -707,9 +711,9 @@ Queries include TenantId and route directly.
 Large tenants can move to dedicated shards through a shard map.
 ```
 
-**How it works after this pattern:** A router resolves the shard, most operations remain single-shard, and capacity grows by adding partitions.
+**How it works now:** A router resolves the shard, most operations remain single-shard, and capacity grows by adding partitions.
 
-**Trade-off:** Cross-shard transactions, joins, rebalancing, and globally unique constraints become harder.
+**Trade-offs and when not to use it:** Cross-shard transactions, joins, rebalancing, and globally unique constraints become harder.
 
 ### Failure walkthrough — Sharding: scale tenant data
 
@@ -735,13 +739,13 @@ A shard map routes `tenantId` to a database. Rows retain the tenant key, unique 
 
 **Answer:** With `N` replicas, a write quorum `W` and read quorum `R` overlap when `W + R > N`, increasing the chance a read observes the latest accepted write.
 
-**What problem does this concept solve?** Replication improves durability and availability while quorum rules manage conflicting copies.
+**What problem does it solve?** Replication improves durability and availability while quorum rules manage conflicting copies.
 
 **Before this concept:** One copy was a failure risk, or asynchronous replicas returned stale values without a stated consistency model.
 
-❌ **Wrong example:** Write to any one of three replicas and read from any one, then promise strong consistency.
+❌ **Wrong/before example:** Write to any one of three replicas and read from any one, then promise strong consistency.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 N = 3, W = 2, R = 2
@@ -749,9 +753,9 @@ Write succeeds after two acknowledgements.
 Read compares two versions and repairs stale replicas.
 ```
 
-**How it works after this pattern:** The system tolerates some replica failures and has an explicit consistency/latency trade-off.
+**How it works now:** The system tolerates some replica failures and has an explicit consistency/latency trade-off.
 
-**Trade-off:** Quorums do not automatically provide linearizability; conflict resolution, clocks, partitions, and leader rules still matter.
+**Trade-offs and when not to use it:** Quorums do not automatically provide linearizability; conflict resolution, clocks, partitions, and leader rules still matter.
 
 ### Failure walkthrough — Replication and quorum: keep a profile store available
 
@@ -777,13 +781,13 @@ With `N` replicas, a write waits for `W` acknowledgements and a read consults `R
 
 **Answer:** Several consumers share one subscription; each message is leased or delivered to one consumer, allowing parallel work.
 
-**What problem does this concept solve?** It increases throughput and balances variable-duration jobs without assigning work manually.
+**What problem does it solve?** It increases throughput and balances variable-duration jobs without assigning work manually.
 
 **Before this concept:** One worker processed everything serially and became a backlog bottleneck.
 
-❌ **Wrong example:** Start 100 consumers for a database that supports only 20 concurrent writes, creating more contention than throughput.
+❌ **Wrong/before example:** Start 100 consumers for a database that supports only 20 concurrent writes, creating more contention than throughput.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Queue depth -> autoscaling policy -> bounded worker count
@@ -791,9 +795,9 @@ Worker: receive -> process idempotently -> commit -> acknowledge
 Failure: visibility timeout expires -> another worker retries
 ```
 
-**How it works after this pattern:** Work distributes across healthy consumers and scales with backlog within downstream capacity.
+**How it works now:** Work distributes across healthy consumers and scales with backlog within downstream capacity.
 
-**Trade-off:** Ordering is limited and duplicates are possible. Partition messages when related work requires ordering.
+**Trade-offs and when not to use it:** Ordering is limited and duplicates are possible. Partition messages when related work requires ordering.
 
 ### Failure walkthrough — Competing consumers: scale image processing
 
@@ -819,13 +823,13 @@ Many consumers join one consumer group. The broker gives each message to one act
 
 **Answer:** Publish when several independent consumers need the same fact. Each subscription receives its own copy and can scale with competing consumers.
 
-**What problem does this concept solve?** It decouples producers from a growing set of reactions.
+**What problem does it solve?** It decouples producers from a growing set of reactions.
 
 **Before this concept:** Order service called inventory, analytics, email, and loyalty APIs directly.
 
-❌ **Wrong example:** Put `OrderPlaced` on one queue and expect four different systems all to receive it; competing consumers divide rather than broadcast messages.
+❌ **Wrong/before example:** Put `OrderPlaced` on one queue and expect four different systems all to receive it; competing consumers divide rather than broadcast messages.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 OrderPlaced topic
@@ -835,9 +839,9 @@ OrderPlaced topic
   +-- Loyalty subscription   -> loyalty workers
 ```
 
-**How it works after this pattern:** New subscribers can react without changing the producer, and each consumer controls its own retries and lag.
+**How it works now:** New subscribers can react without changing the producer, and each consumer controls its own retries and lag.
 
-**Trade-off:** Schema governance, duplicate handling, ordering, retention, and replay become platform responsibilities.
+**Trade-offs and when not to use it:** Schema governance, duplicate handling, ordering, retention, and replay become platform responsibilities.
 
 ### Failure walkthrough — Publish/subscribe: distribute `OrderPlaced`
 
@@ -863,13 +867,13 @@ The service publishes one versioned business event. Independent subscriptions re
 
 **Answer:** Retry transient failures with delayed queues; move exhausted or invalid messages to a dead-letter queue; use a parking lot for investigated messages awaiting controlled replay.
 
-**What problem does this concept solve?** One poison message should not block a partition or retry forever.
+**What problem does it solve?** One poison message should not block a partition or retry forever.
 
 **Before this concept:** Consumers immediately retried the same bad message, consuming CPU and preventing later messages from progressing.
 
-❌ **Wrong example:** Catch every exception, place the message back on the same queue immediately, and record no attempt count or error context.
+❌ **Wrong/before example:** Catch every exception, place the message back on the same queue immediately, and record no attempt count or error context.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Main queue -> transient error -> Retry-1m -> Retry-10m -> Retry-1h
@@ -877,9 +881,11 @@ Main queue -> transient error -> Retry-1m -> Retry-10m -> Retry-1h
 DLQ triage -> fixed/repaired -> Parking Lot -> controlled replay
 ```
 
-**How it works after this pattern:** Transient faults get time to recover, poison messages are isolated with diagnostic metadata, and replay is deliberate and auditable.
+**How it works now:** Transient faults get time to recover, poison messages are isolated with diagnostic metadata, and replay is deliberate and auditable.
 
-**Trade-off:** Operations must own DLQ alerts, retention, repair tooling, and replay safety. A DLQ without a process is just hidden data loss.
+**Trade-offs and when not to use it:** Operations must own DLQ alerts, retention, repair tooling, and replay safety. A DLQ without a process is just hidden data loss.
+
+**Production checks:** Preserve the original payload and failure metadata, redact sensitive data, alert on queue age and growth, require idempotent replay, separate permanent validation failures from transient failures, and audit manual repair actions.
 
 ### Failure walkthrough — Retry queue, DLQ, and parking lot: handle poison messages
 
@@ -907,13 +913,13 @@ Main -> retry-1m -> retry-10m -> retry-1h -> DLQ -> inspect/fix -> replay
 
 **Answer:** Send requests in parallel, gather responses until a deadline or completion rule, then combine partial or complete results.
 
-**What problem does this concept solve?** It reduces sequential latency for federated search, pricing, or availability.
+**What problem does it solve?** It reduces sequential latency for federated search, pricing, or availability.
 
 **Before this concept:** The coordinator called providers one after another, so latencies added together.
 
-❌ **Wrong example:** Wait forever for every provider, even when one is down and three good results are sufficient.
+❌ **Wrong/before example:** Wait forever for every provider, even when one is down and three good results are sufficient.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```csharp
 using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
@@ -922,9 +928,11 @@ var responses = await Task.WhenAll(tasks.Select(t => t.CatchAsResult()));
 return MergeAndRank(responses.Where(x => x.IsSuccess).SelectMany(x => x.Value));
 ```
 
-**How it works after this pattern:** Providers run concurrently, the coordinator enforces one deadline, and policy decides whether partial results are acceptable.
+**How it works now:** Providers run concurrently, the coordinator enforces one deadline, and policy decides whether partial results are acceptable.
 
-**Trade-off:** Fan-out multiplies downstream load. Bound concurrency, cancel slow work, and expose partial-result status when relevant.
+**Trade-offs and when not to use it:** Fan-out multiplies downstream load. Bound concurrency, cancel slow work, and expose partial-result status when relevant.
+
+**Production checks:** Apply one end-to-end deadline, cap parallel calls, bulkhead each dependency, cancel work after quorum or timeout, identify partial results explicitly, and measure fan-out amplification plus tail latency.
 
 ### Failure walkthrough — Scatter-gather: search several suppliers
 
@@ -954,13 +962,13 @@ t=260ms: D returns -> minimum 3 reached -> cancel B,E -> rank
 
 **Answer:** Divide the system into mostly independent cells, each serving a subset of tenants or users with its own compute and data dependencies.
 
-**What problem does this concept solve?** A regional shared dependency failure should not affect the entire customer base.
+**What problem does it solve?** A regional shared dependency failure should not affect the entire customer base.
 
 **Before this concept:** All tenants used one large service and database cluster; overload or a bad deployment became global.
 
-❌ **Wrong example:** Call a design “cell-based” while every cell still depends synchronously on one global database and cache.
+❌ **Wrong/before example:** Call a design “cell-based” while every cell still depends synchronously on one global database and cache.
 
-✅ **Correct example:**
+✅ **After/correct example:**
 
 ```text
 Global routing/control plane
@@ -969,9 +977,9 @@ Global routing/control plane
   +-- Cell C: API + workers + cache + tenant shards C
 ```
 
-**How it works after this pattern:** A tenant maps to one cell, scaling happens by adding cells, and most failures remain inside one bounded group.
+**How it works now:** A tenant maps to one cell, scaling happens by adding cells, and most failures remain inside one bounded group.
 
-**Trade-off:** Cells duplicate infrastructure and complicate placement, migration, capacity planning, and carefully minimized global services.
+**Trade-offs and when not to use it:** Cells duplicate infrastructure and complicate placement, migration, capacity planning, and carefully minimized global services.
 
 ### Failure walkthrough — Cell-based architecture: contain a tenant outage
 

@@ -16,7 +16,8 @@ Complete guide to acing behavioral interviews. Includes 30+ questions, detailed 
 
 ---
 
-## Interview Framework & Strategy {#framework}
+<a id="framework"></a>
+## Interview Framework & Strategy
 
 ### Interview Phases
 
@@ -99,7 +100,8 @@ Tip: Ask questions showing you researched, you care about growth
 
 ---
 
-## STAR Method Mastery {#star}
+<a id="star"></a>
+## STAR Method Mastery
 
 ### The STAR Framework
 
@@ -202,7 +204,8 @@ Result:
 
 ---
 
-## 30 Common Questions with Examples {#questions}
+<a id="questions"></a>
+## 30 Common Questions with Examples
 
 ### Category 1: Leadership & Ownership
 
@@ -503,7 +506,8 @@ Key insight: Stayed calm, prioritized outcomes, communicated clearly.
 
 ---
 
-## Red Flags & Green Flags {#flags}
+<a id="flags"></a>
+## Red Flags & Green Flags
 
 ### Red Flags (Interviewer Thinking "No")
 
@@ -620,7 +624,8 @@ Interviewer thinking: "This person is genuinely interested.
 
 ---
 
-## Company-Specific Prep {#company-prep}
+<a id="company-prep"></a>
+## Company-Specific Prep
 
 ### Research Template
 
@@ -708,7 +713,8 @@ Prep: Stories showing technical depth, advocacy, improvement.
 
 ---
 
-## Communication Skills {#communication}
+<a id="communication"></a>
+## Communication Skills
 
 ### Speaking Tips
 
@@ -779,7 +785,8 @@ Good: "When we disagreed on architecture, I interviewed 3 other teams,
 
 ---
 
-## Handling Difficult Questions {#difficult}
+<a id="difficult"></a>
+## Handling Difficult Questions
 
 ### Question: "Why did you leave your last job?"
 
@@ -866,7 +873,8 @@ Key: Specific to their company, specific skills match, authentic excitement
 
 ---
 
-## Post-Interview Strategy {#post-interview}
+<a id="post-interview"></a>
+## Post-Interview Strategy
 
 ### Immediately After
 
@@ -968,7 +976,8 @@ Lower salary, great team = maybe good choice.
 
 ---
 
-## Preparation Checklist {#checklist}
+<a id="checklist"></a>
+## Preparation Checklist
 
 ### Before Interview
 

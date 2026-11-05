@@ -18,7 +18,8 @@ Complete guide on security design, production incident response, deployment stra
 
 ---
 
-## Security Design Patterns {#security-patterns}
+<a id="security-patterns"></a>
+## Security Design Patterns
 
 ### Defense in Depth (Layered Security)
 
@@ -83,7 +84,8 @@ Example:
 
 ---
 
-## Authentication & Authorization {#auth}
+<a id="auth"></a>
+## Authentication & Authorization
 
 ### Authentication Methods
 
@@ -207,7 +209,8 @@ Cons: Logout revocation delayed (token valid until expiry)
 
 ---
 
-## Data Security {#data-security}
+<a id="data-security"></a>
+## Data Security
 
 ### Encryption in Transit
 
@@ -306,7 +309,8 @@ Cost: Significant (backups can't be deleted on whim)
 
 ---
 
-## API Security {#api-security}
+<a id="api-security"></a>
+## API Security
 
 ### Input Validation & Sanitization
 
@@ -399,7 +403,8 @@ Solution: Both (per-IP for unauthenticated, per-user for authenticated)
 
 ---
 
-## Production Incident Response {#incidents}
+<a id="incidents"></a>
+## Production Incident Response
 
 ### Incident Severity Levels
 
@@ -544,7 +549,8 @@ Example follow-ups:
 
 ---
 
-## Deployment Strategies {#deployment}
+<a id="deployment"></a>
+## Deployment Strategies
 
 ### Deployment Types
 
@@ -639,7 +645,8 @@ if (featureFlags.newCheckout) {
 
 ---
 
-## Monitoring & Alerting {#monitoring}
+<a id="monitoring"></a>
+## Monitoring & Alerting
 
 ### What to Monitor
 
@@ -708,7 +715,8 @@ Goal: Find sweet spot (catches real issues, few false alarms)
 
 ---
 
-## Disaster Recovery {#recovery}
+<a id="recovery"></a>
+## Disaster Recovery
 
 ### RTO & RPO
 
@@ -808,7 +816,8 @@ Use: Only if RPO critical (financial)
 
 ---
 
-## Common Failure Scenarios {#failures}
+<a id="failures"></a>
+## Common Failure Scenarios
 
 ### Scenario 1: Database Goes Down
 
@@ -905,7 +914,8 @@ Prevention:
 
 ---
 
-## Security Checklist {#security-checklist}
+<a id="security-checklist"></a>
+## Security Checklist
 
 ### Before Launch
 

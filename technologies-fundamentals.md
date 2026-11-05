@@ -15,10 +15,12 @@ Quick reference for core technologies and patterns. Each includes definition, Q&
 8. [Distributed Systems Concepts](#distributed)
 9. [Network & Protocol Concepts](#network)
 10. [Resilience Patterns](#resilience)
+11. [Applied System Design Deep Dives](#tech-mastery)
 
 ---
 
-## API Design & Patterns {#api-design}
+<a id="api-design"></a>
+## API Design & Patterns
 
 ### Definition
 API (Application Programming Interface) is contract between client and server. Design determines usability, versioning, security, rate-limiting.
@@ -73,7 +75,8 @@ API (Application Programming Interface) is contract between client and server. D
 
 ---
 
-## Caching Strategies {#caching}
+<a id="caching"></a>
+## Caching Strategies
 
 ### Definition
 Caching stores frequently accessed data in fast storage (memory) to reduce latency and load on slower storage (DB).
@@ -153,7 +156,8 @@ Best for: High throughput, acceptable eventual consistency.
 
 ---
 
-## Load Balancing {#load-balancing}
+<a id="load-balancing"></a>
+## Load Balancing
 
 ### Definition
 Load balancer distributes traffic across multiple servers to improve throughput, reduce latency, enable scaling.
@@ -215,7 +219,8 @@ Load balancer distributes traffic across multiple servers to improve throughput,
 
 ---
 
-## Database Patterns {#databases}
+<a id="databases"></a>
+## Database Patterns
 
 ### Definition
 Database (SQL or NoSQL) is persistent storage. SQL for relational, ACID. NoSQL for horizontal scale, eventual consistency.
@@ -275,7 +280,8 @@ Database (SQL or NoSQL) is persistent storage. SQL for relational, ACID. NoSQL f
 
 ---
 
-## Message Queues & Event Systems {#messaging}
+<a id="messaging"></a>
+## Message Queues & Event Systems
 
 ### Definition
 Message queue (RabbitMQ, Kafka, SQS) decouples producer and consumer. Producer sends message, consumer processes asynchronously.
@@ -330,7 +336,8 @@ Message queue (RabbitMQ, Kafka, SQS) decouples producer and consumer. Producer s
 
 ---
 
-## Search & Indexing {#search}
+<a id="search"></a>
+## Search & Indexing
 
 ### Definition
 Inverted index (Elasticsearch, Solr) maps words to documents. Fast full-text search, filtering, aggregations.
@@ -385,7 +392,8 @@ Inverted index (Elasticsearch, Solr) maps words to documents. Fast full-text sea
 
 ---
 
-## Consistency Patterns {#consistency}
+<a id="consistency"></a>
+## Consistency Patterns
 
 ### Definition
 Consistency = different copies of data agree. Spectrum: Strong (immediate) to Eventual (eventually agree).
@@ -440,7 +448,8 @@ Consistency = different copies of data agree. Spectrum: Strong (immediate) to Ev
 
 ---
 
-## Distributed Systems Concepts {#distributed}
+<a id="distributed"></a>
+## Distributed Systems Concepts
 
 ### Definition
 Distributed system = multiple independent computers (nodes) that appear as single system to user.
@@ -499,7 +508,8 @@ Distributed system = multiple independent computers (nodes) that appear as singl
 
 ---
 
-## Network & Protocol Concepts {#network}
+<a id="network"></a>
+## Network & Protocol Concepts
 
 ### Definition
 Network = communication layer. Protocols = rules (TCP, HTTP, DNS, gRPC).
@@ -562,7 +572,8 @@ Network = communication layer. Protocols = rules (TCP, HTTP, DNS, gRPC).
 
 ---
 
-## Resilience Patterns {#resilience}
+<a id="resilience"></a>
+## Resilience Patterns
 
 ### Definition
 Resilience = ability to recover from failures gracefully. Patterns prevent cascading failures.
@@ -641,3 +652,493 @@ Resilience = ability to recover from failures gracefully. Patterns prevent casca
 ---
 
 **Key Takeaway**: Every technology trades something. No silver bullet. Choose based on constraints (latency, consistency, availability, cost).
+
+---
+
+<a id="tech-mastery"></a>
+# Applied System Design Deep Dives
+
+These additions close practical gaps identified while comparing this repository with the [Fanout System Design roadmap](https://fanout.sh/roadmaps/system-design). They complement the broader roadmap rather than reproduce it. Each topic connects a design decision to a failure you can observe and test.
+
+## TECH-M1 — Cost-Aware Architecture and Knowing When Not to Add Infrastructure
+
+**Question:** How do you decide whether a cache, message broker, search cluster, or new microservice is justified?
+
+**Answer:** Start with a measured constraint and choose the simplest design that satisfies it with reasonable headroom. New infrastructure is justified only when it removes a named bottleneck or reliability risk whose cost is greater than the new operational burden.
+
+**What problem does it solve?** It prevents teams from paying permanent complexity—deployments, monitoring, security, failure modes, migrations, and specialist knowledge—for hypothetical scale that may never arrive.
+
+**Before this concept:** Architecture decisions were based on recognizable technology names instead of workload evidence.
+
+❌ **Wrong/before example:**
+
+```text
+Requirement: create and list 20,000 internal tickets per month.
+
+Proposed design:
+API gateway -> six microservices -> Kafka -> Redis -> search cluster
+                    |                         |
+                    +------ three databases -+
+
+No latency target, traffic estimate, failure model, or measured bottleneck exists.
+```
+
+✅ **After/correct example:**
+
+```yaml
+decision: Start with one modular service and PostgreSQL
+assumptions:
+  average_writes_per_second: 0.01
+  peak_factor: 100
+  searchable_rows_after_three_years: 720000
+requirements:
+  availability_slo: 99.9%
+  p95_read_latency_ms: 300
+  recovery_point_objective_minutes: 15
+add_cache_when:
+  - measured database read saturation exceeds 65% during representative peaks
+  - a repeated read has a defined staleness budget
+add_broker_when:
+  - accepted work must survive request/process failure
+  - producers and consumers need independent scaling or retry ownership
+add_search_engine_when:
+  - database text search misses a measured relevance, latency, or language requirement
+```
+
+**How it works now:** Requirements create decision thresholds. The initial design remains observable and modular, so a new component can be introduced when evidence crosses a threshold. The team records what would trigger the change instead of pretending the first design must last forever.
+
+**Trade-offs and when not to use it:** Simplicity is not an excuse to ignore known scale or regulatory requirements. Introduce necessary infrastructure early when migration lead time is long, but state the evidence and cost explicitly.
+
+**Production checks:** Track utilization, latency percentiles, error rate, growth, cloud spend, operational ownership, recovery objectives, and the migration plan for each declared threshold.
+
+**Try it:** Remove one component from an existing design. Write the exact requirement that breaks, the metric that proves it, and the smallest component that restores the requirement.
+
+---
+
+## TECH-M2 — Fan-Out, Fan-In, and Tail Latency
+
+**Question:** Why can a request become slow even when every downstream service has a good average latency?
+
+**Answer:** A fan-out request completes when enough downstream branches complete. If it waits for every branch, the slowest branch controls response time, so rare slow calls become common at the aggregate level as fan-out width grows.
+
+**What problem does it solve?** It explains why averages hide user-visible latency and why blindly querying more shards or services can make p99 latency and dependency load explode.
+
+**Before this concept:** The aggregator launched every call and waited indefinitely for all results because parallel work appeared automatically fast.
+
+❌ **Wrong/before example:**
+
+```csharp
+var tasks = allShards.Select(shard => shard.Search(query, CancellationToken.None));
+var results = await Task.WhenAll(tasks); // one stalled shard stalls the response
+return MergeAndRank(results);
+```
+
+✅ **After/correct example:**
+
+```csharp
+using var deadline = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+deadline.CancelAfter(TimeSpan.FromMilliseconds(450));
+
+var pending = selectedShards
+    .Select(shard => shard.Search(query, deadline.Token))
+    .ToList();
+var selectedCount = pending.Count;
+var completed = new List<SearchResult>();
+
+try
+{
+    while (pending.Count > 0 && completed.Count < requiredSuccessfulShards)
+    {
+        var next = await Task.WhenAny(pending).WaitAsync(deadline.Token);
+        pending.Remove(next);
+
+        try { completed.Add(await next); }
+        catch (Exception exception) when (IsRecoverableShardFailure(exception))
+        {
+            // Record the failed shard; continue only if the response contract allows partial data.
+        }
+    }
+}
+catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+{
+    // The response decision below applies the product's completeness rule.
+}
+finally
+{
+    await deadline.CancelAsync(); // stop branches whose results are no longer useful
+}
+
+return completed.Count >= requiredSuccessfulShards
+    ? Results.Ok(new
+      {
+          items = MergeAndRank(completed),
+          completeness = completed.Count == selectedCount ? "full" : "partial"
+      })
+    : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+```
+
+**How it works now:** One end-to-end deadline bounds resource use. The response contract states whether partial results are allowed, fan-out width is limited to useful shards, and abandoned work is cancelled. Metrics distinguish complete, partial, timed-out, and failed requests.
+
+**Trade-offs and when not to use it:** Partial results are invalid for operations such as authorization or balance calculation. Hedged duplicate reads can reduce tails but increase load; use them only for safe, idempotent reads and delay the hedge until a measured percentile is exceeded.
+
+**Production checks:** Monitor p50/p95/p99, per-branch latency, fan-out width, cancelled work, partial-result rate, dependency amplification, and deadline exhaustion. Load-test slow and failed branches, not only the happy path.
+
+**Try it:** Simulate 50 shards where one percent of calls take two seconds. Compare average branch latency with aggregate p99 and test a 450 ms deadline.
+
+Reference: [Fan-out, fan-in, feeds and tail latency](https://fanout.sh/blog/fan-out) and Google Research’s [The Tail at Scale](https://research.google/pubs/the-tail-at-scale/).
+
+---
+
+## TECH-M3 — Queue Lag, Backpressure, and Useful Autoscaling
+
+**Question:** Why is worker CPU alone a poor signal for the health of an asynchronous queue?
+
+**Answer:** CPU describes current resource use, but queue lag describes whether the system is keeping its promise to finish accepted work on time. Measure both backlog depth and age of the oldest ready item; then bound admission and scale from processing demand, not merely host utilization.
+
+**What problem does it solve?** It detects a silently growing backlog before users discover hours-old emails, reports, payments, or index updates.
+
+**Before this concept:** Producers accepted unlimited work and operators watched only worker CPU.
+
+❌ **Wrong/before example:**
+
+```csharp
+app.MapPost("/exports", (ExportRequest request) =>
+{
+    unboundedQueue.Enqueue(request);
+    return Results.Accepted(); // accepted even when completion will take days
+});
+```
+
+✅ **After/correct example:**
+
+```csharp
+public sealed record QueueHealth(
+    long ReadyCount,
+    TimeSpan OldestReadyAge,
+    double ArrivalRatePerSecond,
+    double CompletionRatePerSecond);
+
+app.MapPost("/exports", async (ExportRequest request, IExportQueue queue, CancellationToken ct) =>
+{
+    QueueHealth health = await queue.Measure(ct);
+    bool cannotMeetPromise =
+        health.OldestReadyAge > TimeSpan.FromMinutes(10) ||
+        (health.ReadyCount > 5_000 && health.ArrivalRatePerSecond >= health.CompletionRatePerSecond);
+
+    if (cannotMeetPromise)
+        return Results.Problem(statusCode: 503, title: "Export capacity is temporarily full");
+
+    var job = await queue.EnqueueDurably(request, ct);
+    return Results.Accepted($"/exports/{job.Id}", new { job.Id });
+});
+```
+
+**How it works now:** Admission stops promising work the system cannot finish. Autoscaling uses arrival rate, service time, backlog age, and maximum concurrency. A durable job record lets the client observe pending, running, succeeded, or failed state.
+
+**Trade-offs and when not to use it:** More workers do not help when the database, provider quota, or partition count is the bottleneck. Excessive scale-out can make the dependency fail faster. Some workloads need priority queues rather than one global lag target.
+
+**Production checks:** Alert on oldest-item age and time-to-drain, cap attempts and concurrency, separate ready/retry/dead-letter counts, make handlers idempotent, and test overload plus dependency slowdown.
+
+**Try it:** Given 100 jobs/second arriving and each worker completing 8 jobs/second, calculate the minimum workers and the extra headroom required after one worker fails.
+
+---
+
+## TECH-M4 — A PostgreSQL Work Queue with `SKIP LOCKED`
+
+**Question:** How can several workers claim database-backed jobs without processing the same row concurrently?
+
+**Answer:** Claim a small ordered batch inside a transaction using `FOR UPDATE SKIP LOCKED`, record a lease owner and expiry, then commit before doing long work. Completion updates must verify the owner or lease token.
+
+**What problem does it solve?** It provides a durable queue for modest workloads without a separate broker while allowing multiple consumers to avoid waiting on rows another consumer already claimed.
+
+**Before this concept:** Workers selected pending rows first and updated them later, so two workers saw the same work.
+
+❌ **Wrong/before example:**
+
+```sql
+SELECT id, payload FROM jobs
+WHERE status = 'pending'
+ORDER BY created_at
+LIMIT 20;
+
+-- Another worker can select the same rows before this update runs.
+UPDATE jobs SET status = 'processing' WHERE id = ANY(@ids);
+```
+
+✅ **After/correct example:**
+
+```sql
+BEGIN;
+
+WITH claimable AS (
+    SELECT id
+    FROM jobs
+    WHERE (status = 'pending' AND available_at <= now())
+       OR (status = 'processing' AND lease_until < now())
+    ORDER BY COALESCE(lease_until, available_at), id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 20
+)
+UPDATE jobs AS job
+SET status = 'processing',
+    lease_owner = @worker_id,
+    lease_until = now() + interval '30 seconds',
+    attempts = attempts + 1
+FROM claimable
+WHERE job.id = claimable.id
+RETURNING job.id, job.payload, job.lease_owner, job.lease_until;
+
+COMMIT;
+```
+
+After processing, acknowledge conditionally:
+
+```sql
+UPDATE jobs
+SET status = 'completed', completed_at = now()
+WHERE id = @id
+  AND status = 'processing'
+  AND lease_owner = @worker_id;
+```
+
+**How it works now:** Row locks make claiming atomic, `SKIP LOCKED` lets other workers claim different rows, and the short transaction ends before expensive processing. An expired lease makes abandoned work recoverable. Idempotency still protects against a worker completing an effect and crashing before acknowledgement.
+
+**Trade-offs and when not to use it:** `SKIP LOCKED` deliberately gives an inconsistent view and is suitable for queue-like access, not ordinary business queries. A dedicated broker is usually better for very high throughput, long retention, cross-region delivery, or many independent consumer groups.
+
+**Production checks:** Add partial indexes for pending availability and expired processing leases, keep claim batches small, use database time for leases, cap attempts, move poison jobs aside, renew long leases safely, monitor oldest age, and vacuum/archive completed rows.
+
+**Try it:** Run two transactions simultaneously and prove they receive disjoint job IDs. Kill one worker after claiming and verify its jobs become claimable after lease expiry.
+
+Reference: PostgreSQL documents that [`SKIP LOCKED` can avoid contention for multiple consumers of a queue-like table](https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE).
+
+---
+
+## TECH-M5 — LSM Storage Engines: WAL, Memtable, SSTables, and Compaction
+
+**Question:** How does a log-structured merge-tree (LSM-tree) turn many random writes into efficient sequential storage work?
+
+**Answer:** It records the write in a write-ahead log (WAL), updates a sorted in-memory memtable, flushes full immutable memtables into sorted-string table (SSTable) files, and later compacts files to remove overwritten or deleted versions.
+
+**What problem does it solve?** It makes write-heavy key-value workloads efficient on storage where sequential appends and batch rewrites are cheaper than frequent in-place random updates.
+
+**Before this concept:** Every update searched for an on-disk record and rewrote it in place.
+
+❌ **Wrong/before example:**
+
+```text
+for each write:
+    seek to the old key on disk
+    overwrite a variable-sized record
+    acknowledge before durable metadata is safe
+
+Crash result: torn records and ambiguous recovery.
+Workload result: many small random writes.
+```
+
+✅ **After/correct example:**
+
+```text
+write(key, value):
+    append (sequence, key, value, checksum) to WAL
+    fsync according to the promised durability level
+    insert the newest version into the sorted memtable
+    acknowledge
+
+when memtable is full:
+    freeze it as immutable
+    flush its sorted entries to a new SSTable
+    publish the SSTable atomically in the manifest
+    retire the covered WAL only after the SSTable is durable
+
+read(key):
+    check mutable and immutable memtables
+    use Bloom filters and indexes to skip impossible SSTables
+    return the newest visible sequence
+
+background compaction:
+    merge overlapping SSTables
+    discard shadowed versions and eligible tombstones
+```
+
+**How it works now:** The WAL enables crash recovery, the memtable makes recent writes searchable, immutable SSTables simplify concurrent reads, and compaction restores read/space efficiency. Sequence numbers decide which version is newest.
+
+**Trade-offs and when not to use it:** LSM engines trade write efficiency for compaction work, read amplification, write amplification, temporary disk usage, and delayed space reclamation. A B-tree may be better for read-heavy workloads requiring predictable point/range reads and frequent in-place updates.
+
+**Production checks:** Monitor WAL sync latency, immutable-memtable backlog, flush rate, compaction debt, read/write/space amplification, Bloom-filter usefulness, disk headroom, checksum failures, and recovery time after an unclean stop.
+
+**Try it:** Trace one key through three updates, one flush, and one compaction. Mark every copy of the key and the moment each old version becomes safe to discard.
+
+Reference: the RocksDB project describes its [memtable, WAL, SSTable, checksum, and compaction architecture](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview).
+
+---
+
+## TECH-M6 — End-to-End Checksums for Object and File Integrity
+
+**Question:** Why is an HTTP success response or object-store ETag not enough proof that a large file is correct end to end?
+
+**Answer:** A success response confirms the request completed according to one boundary. End-to-end integrity requires a checksum computed over the intended bytes, validated during upload, stored with the object, and checked again when the object is read or copied.
+
+**What problem does it solve?** It detects corruption or truncation introduced by clients, proxies, multipart assembly, storage, replication, downloads, or application bugs.
+
+**Before this concept:** The application trusted status codes and file size.
+
+❌ **Wrong/before example:**
+
+```csharp
+await objectStore.Upload("video/42", stream, ct);
+db.Files.Add(new FileRecord("video/42", stream.Length));
+// A matching length does not prove the bytes are identical.
+```
+
+✅ **After/correct example:**
+
+```csharp
+await using var source = File.OpenRead(path);
+byte[] expected = await SHA256.HashDataAsync(source, ct);
+source.Position = 0;
+
+await objectStore.Upload(
+    key: "video/42",
+    content: source,
+    checksumAlgorithm: "SHA256",
+    checksum: Convert.ToBase64String(expected),
+    cancellationToken: ct);
+
+FileMetadata stored = await objectStore.Head("video/42", ct);
+if (!CryptographicOperations.FixedTimeEquals(
+        expected,
+        Convert.FromBase64String(stored.Checksum)))
+{
+    throw new InvalidDataException("Stored object checksum does not match the source.");
+}
+```
+
+**How it works now:** The producer defines the expected digest, the storage boundary validates received bytes, metadata keeps the digest with the object, and later readers can verify the content they actually received. Multipart uploads validate parts and, where supported, the complete object.
+
+**Trade-offs and when not to use it:** Hashing consumes CPU and requires streaming the bytes, but integrity-sensitive files justify it. A plain checksum detects accidental corruption; it does not prove who produced the data. Use an authenticated signature or message authentication code when attackers may alter both content and checksum.
+
+**Production checks:** Choose and version the algorithm, validate multipart semantics, store checksum metadata durably, verify restores and cross-region copies, quarantine mismatches, alert on integrity failures, and never log sensitive file contents.
+
+**Try it:** Flip one byte after upload in a test double and prove that download verification rejects the object even though its length is unchanged.
+
+Reference: Amazon S3’s official guide explains [upload, download, multipart, and stored-object checksum validation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html).
+
+---
+
+## TECH-M7 — Search Index Synchronization, Ranking, and Evaluation
+
+**Question:** What turns a text index into a reliable search product rather than a faster `LIKE '%term%'` query?
+
+**Answer:** A reliable search system has a durable change pipeline, idempotent versioned indexing, query understanding, candidate retrieval, ranking, measurable relevance, and a rebuild strategy that does not interrupt serving.
+
+**What problem does it solve?** It keeps search results fresh and explainable while letting ranking improve without corrupting the source-of-truth database.
+
+**Before this concept:** The request wrote the database and search engine independently, then ranked only by exact text occurrence.
+
+❌ **Wrong/before example:**
+
+```csharp
+await db.Products.AddAsync(product, ct);
+await db.SaveChangesAsync(ct);
+await search.Index(product, ct); // failure leaves the product permanently missing
+```
+
+✅ **After/correct example:**
+
+```text
+database transaction:
+    save Product(version=41)
+    save ProductChanged(productId, version=41) to outbox
+
+indexer:
+    read outbox/change stream
+    transform source fields into index document
+    upsert only when incoming version >= indexed version
+    checkpoint after the index acknowledges the update
+
+query path:
+    normalize/tokenize query
+    retrieve candidates from posting lists
+    rank with BM25 plus bounded product signals
+    apply authorization/availability filters
+    return result and record anonymous evaluation signals
+
+rebuild:
+    write a new versioned index
+    replay changes after the snapshot
+    compare document counts and sampled results
+    atomically switch the read alias
+```
+
+**How it works now:** The database remains authoritative, the outbox or change stream prevents lost updates, document versions make retries and reordering safe, and an alias swap makes rebuilds reversible. Offline judgments measure precision, recall, mean reciprocal rank, or normalized discounted cumulative gain; online tests measure user outcomes and guardrails.
+
+**Trade-offs and when not to use it:** Search introduces eventual consistency, another data model, relevance tuning, storage, and operational work. Database full-text search may be enough for small datasets and simple requirements. Business signals can improve ranking but may create feedback loops or unfair exposure.
+
+**Production checks:** Monitor indexing lag, rejected documents, version conflicts, zero-result rate, p95/p99 query latency, relevance metrics by query class, authorization filtering, schema compatibility, rebuild duration, and rollback readiness.
+
+**Try it:** Delete the search index and rebuild it while writes continue. Prove no committed product is missing after the alias switch and compare ten judged queries before and after.
+
+Reference: Apache Lucene documents [BM25 scoring](https://lucene.apache.org/core/7_3_0/core/org/apache/lucene/search/similarities/BM25Similarity.html) and [near-real-time index visibility](https://cwiki.apache.org/confluence/spaces/LUCENEJAVA/pages/120735094/NearRealtimeSearch).
+
+---
+
+## TECH-M8 — Geospatial Candidate Indexing and Exact Containment
+
+**Question:** Why should nearby search or geofencing usually use both a spatial index and an exact geometry check?
+
+**Answer:** A grid or tree index quickly returns a small candidate set, while an exact distance or point-in-polygon operation removes false positives and handles the real product boundary.
+
+**What problem does it solve?** It avoids scanning every location while preventing coarse cells or latitude/longitude boxes from becoming the final correctness rule.
+
+**Before this concept:** The application compared latitude and longitude degrees as if they represented a fixed distance everywhere.
+
+❌ **Wrong/before example:**
+
+```sql
+SELECT * FROM drivers
+WHERE latitude  BETWEEN @lat - 0.1 AND @lat + 0.1
+  AND longitude BETWEEN @lng - 0.1 AND @lng + 0.1;
+-- Returns a rectangle, changes physical width by latitude, and has no exact radius check.
+```
+
+✅ **After/correct example:**
+
+```text
+write path:
+    validate coordinate order and coordinate reference system
+    compute an H3/S2/geohash cell at the chosen resolution
+    store the original point plus the cell identifier
+
+nearby query:
+    compute cells covering the search radius
+    fetch candidates whose cell is in that small set
+    calculate exact spherical distance
+    keep distance <= requested radius
+    sort by exact distance
+
+geofence query:
+    use cells covering the polygon to find candidates
+    apply exact ST_Covers/ST_Contains using the original geometry
+```
+
+```sql
+SELECT driver_id,
+       ST_Distance(location, @origin) AS distance_meters
+FROM drivers
+WHERE h3_cell = ANY(@candidate_cells)
+  AND ST_DWithin(location, @origin, @radius_meters)
+ORDER BY distance_meters
+LIMIT 50;
+```
+
+In this example, `location` and `@origin` use the PostGIS `geography` type with SRID 4326, so the distance argument and result are in meters.
+
+**How it works now:** The coarse index reduces I/O, and the exact predicate owns correctness. Resolution is a tunable candidate-size trade-off rather than a hidden product rule. Original coordinates remain available for exact calculations and future reindexing.
+
+**Trade-offs and when not to use it:** Very fine cells enlarge index and covering sets; coarse cells return more false positives. Cell membership based on a centroid can miss or include border cases depending on the covering algorithm, so safety-critical geofences require exact geometry and explicit boundary semantics.
+
+**Production checks:** Standardize longitude/latitude order and coordinate reference system, handle the antimeridian and poles, define `contains` versus `covers` at boundaries, validate polygons, protect location privacy, and test points just inside/outside edges and holes.
+
+**Try it:** Test a point on a polygon edge, one inside a hole, and two locations across the antimeridian. State the expected result before running the query.
+
+Reference: H3’s official documentation covers [point-to-cell indexing](https://h3geo.org/docs/quickstart/) and [polygon-to-cell region functions](https://h3geo.org/docs/api/regions/).

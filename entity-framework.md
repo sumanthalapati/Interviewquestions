@@ -1,21 +1,14 @@
 # 🗃️ Entity Framework Core Interview Questions — Complete Guide
 
-> **100+ questions** grouped by concept · With definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
+> Focused questions and comparisons with definitions, ✅ good examples, ❌ bad examples & 📚 reference links.
 > Use `Ctrl+F` / `Cmd+F` to jump to any topic.
 
 ---
 
 ## 📋 Table of Contents
 1. [DbContext & Configuration](#1-dbcontext--configuration)
-2. [Code First & Migrations](#2-code-first--migrations)
-3. [Querying with LINQ](#3-querying-with-linq)
-4. [Relationships](#4-relationships)
-5. [Change Tracking & SaveChanges](#5-change-tracking--savechanges)
-6. [Performance Optimization](#6-performance-optimization)
-7. [Raw SQL & Stored Procedures](#7-raw-sql--stored-procedures)
-8. [Transactions & Concurrency](#8-transactions--concurrency)
-9. [Testing with EF Core](#9-testing-with-ef-core)
-10. [Advanced EF Core Patterns](#10-advanced-ef-core-patterns)
+2. [Entity Framework Comparisons](#ef-comparisons)
+3. [Applied EF Core Mastery](#ef-mastery)
 
 ---
 
@@ -647,6 +640,7 @@ var recentOrders = await _context.Orders
 
 ---
 
+<a id="ef-comparisons"></a>
 # ⚖️ Entity Framework Comparisons
 
 ```mermaid
@@ -1057,3 +1051,332 @@ Console.WriteLine(query.ToQueryString()); // prints the SQL
 **💡 Production Example:**
 A LINQ query used `.Where()` after `.ToList()`, which pulled the entire table into memory before filtering. The staging dataset had 200 rows so all tests passed with sub-millisecond response. Production had 8 million rows — the endpoint pulled the entire Orders table into application memory, exhausted the container's heap, and caused an OOM crash. The fix was a one-line reorder: move `.Where()` before `.ToListAsync()`.
 
+---
+
+<a id="ef-mastery"></a>
+# Applied EF Core Mastery
+
+These walkthroughs extend the existing questions into the areas most likely to fail under production data, concurrent requests, rolling deployments, and relational testing.
+
+References: [Efficient querying](https://learn.microsoft.com/en-us/ef/core/performance/efficient-querying), [Concurrency conflicts](https://learn.microsoft.com/en-us/ef/core/saving/concurrency), [Transactions](https://learn.microsoft.com/en-us/ef/core/saving/transactions), and [Testing EF Core applications](https://learn.microsoft.com/en-us/ef/core/testing/).
+
+## EF-M1 — Shape Queries for the Use Case
+
+**Question:** Why should a read endpoint project its response instead of loading a large tracked entity graph?
+
+**Answer:** A query should retrieve only the columns and rows required by the use case. Projection lets the database perform filtering and aggregation, avoids unnecessary tracking, and makes the API’s data contract explicit.
+
+**What problem does it solve?** It prevents N+1 queries, cartesian explosion, excessive memory, and accidental updates caused by loading more entities than the request needs.
+
+**Before this concept:** The endpoint loads an order, every line, each product, and payments, then maps the graph in memory.
+
+❌ **Wrong/before example:**
+
+```csharp
+public async Task<OrderDetailsDto?> GetOrder(Guid id, CancellationToken ct)
+{
+    var order = await db.Orders
+        .Include(x => x.Lines).ThenInclude(x => x.Product)
+        .Include(x => x.Payments)
+        .SingleOrDefaultAsync(x => x.Id == id, ct);
+
+    return order is null ? null : mapper.Map<OrderDetailsDto>(order);
+}
+```
+
+For a list endpoint, this shape duplicates order columns for every joined line/payment combination and tracks objects that will never be changed.
+
+✅ **After/correct example:**
+
+```csharp
+public Task<OrderDetailsDto?> GetOrder(
+    Guid tenantId, Guid id, CancellationToken ct) =>
+    db.Orders
+      .AsNoTracking()
+      .Where(x => x.TenantId == tenantId && x.Id == id)
+      .Select(x => new OrderDetailsDto(
+          x.Id,
+          x.Number,
+          x.Status,
+          x.Lines.Select(line => new OrderLineDto(
+              line.ProductId,
+              line.Product.Name,
+              line.Quantity,
+              line.UnitPrice)).ToList(),
+          x.Payments.Sum(payment => payment.Amount)))
+      .SingleOrDefaultAsync(ct);
+```
+
+**How it works now:** EF translates the expression tree into SQL, applies tenant and identity filters in the database, and materializes an untracked DTO. The endpoint does not expose persistence entities or load unrelated columns.
+
+**Trade-offs and when not to use it:** For a domain command that must enforce invariants across an aggregate, load the aggregate intentionally. If several sibling collections must be included, evaluate `AsSplitQuery()` and inspect the generated SQL; split queries reduce join multiplication but add round trips and consistency considerations.
+
+**Production checks:** Require bounded list queries, inspect `ToQueryString()`, test with production-like row counts, monitor query duration and rows returned, and confirm every tenant-owned query applies tenant isolation.
+
+**Try it:** Capture the generated SQL and allocation count for an `Include`-heavy list and a projected list containing the same response fields.
+
+---
+
+## EF-M2 — Expand-and-Contract Database Migrations
+
+**Question:** Why can a correct migration still break a rolling deployment, and how does expand-and-contract avoid it?
+
+**Answer:** During a rolling deployment, old and new application versions run simultaneously. A destructive rename or constraint change can be valid for the new version while breaking the old version. Expand-and-contract introduces compatible schema first, migrates data and code, then removes the old shape in a later release.
+
+**What problem does it solve?** It prevents startup races, table-lock surprises, and old application instances failing against a schema changed for the new version.
+
+**Before this concept:** Every instance calls `Database.Migrate()` at startup and one release renames a required column immediately.
+
+❌ **Wrong/before example:**
+
+```csharp
+// Program.cs on every replica
+await app.Services.CreateScope()
+    .ServiceProvider.GetRequiredService<AppDbContext>()
+    .Database.MigrateAsync();
+
+// One-step migration: old binaries still query CustomerName.
+migrationBuilder.RenameColumn(
+    name: "CustomerName",
+    table: "Orders",
+    newName: "BuyerName");
+```
+
+✅ **After/correct example — release 1 expands:**
+
+```csharp
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.AddColumn<string>(
+        name: "BuyerName",
+        table: "Orders",
+        type: "nvarchar(200)",
+        nullable: true);
+
+    migrationBuilder.Sql("""
+        UPDATE Orders
+        SET BuyerName = CustomerName
+        WHERE BuyerName IS NULL;
+        """);
+}
+```
+
+```csharp
+// Compatible application release: write both while old instances may run.
+order.CustomerName = command.BuyerName;
+order.BuyerName = command.BuyerName;
+```
+
+✅ **Release 2 contracts after verification:**
+
+```csharp
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.AlterColumn<string>(
+        name: "BuyerName",
+        table: "Orders",
+        type: "nvarchar(200)",
+        nullable: false,
+        oldClrType: typeof(string),
+        oldType: "nvarchar(200)",
+        oldNullable: true);
+
+    migrationBuilder.DropColumn(name: "CustomerName", table: "Orders");
+}
+```
+
+**How it works now:** A deployment job applies the additive migration once. Compatible code deploys, backfill completeness is measured, old replicas drain, and only a later release removes the legacy column.
+
+**Trade-offs and when not to use it:** The method takes multiple releases and temporarily duplicates state. For small offline systems, a maintenance window may be simpler. Large backfills should run in bounded batches rather than one transaction that holds locks for hours.
+
+**Production checks:** Generate and review SQL, test against a restored production-sized database, define rollback compatibility, monitor lock duration and backfill progress, and never assume an automatically generated migration is operationally safe.
+
+**Try it:** Design a two-release migration for splitting `FullName` into `GivenName` and `FamilyName` while both application versions remain available.
+
+---
+
+## EF-M3 — Optimistic Concurrency with a Version Token
+
+**Question:** How does EF Core prevent one user from silently overwriting another user’s update?
+
+**Answer:** Mark a property as a concurrency token. EF includes its original value in the `UPDATE` or `DELETE` predicate. If another transaction has changed the row, zero rows match and `SaveChanges` throws `DbUpdateConcurrencyException`.
+
+**What problem does it solve?** It prevents lost updates without holding a database lock throughout a user’s editing session.
+
+**Before this concept:** Two users read version A. User 1 saves B, then User 2 unknowingly saves C over B.
+
+❌ **Wrong/before example:**
+
+```csharp
+var product = await db.Products.SingleAsync(x => x.Id == request.Id, ct);
+product.Price = request.Price;
+await db.SaveChangesAsync(ct); // last writer wins silently
+```
+
+✅ **After/correct example:**
+
+```csharp
+public sealed class Product
+{
+    public Guid Id { get; init; }
+    public decimal Price { get; set; }
+    public byte[] Version { get; private set; } = [];
+}
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Product>()
+        .Property(x => x.Version)
+        .IsRowVersion();
+}
+
+public sealed record UpdatePrice(decimal Price, string Version);
+
+public async Task<IResult> UpdatePrice(
+    Guid id, UpdatePrice request, AppDbContext db, CancellationToken ct)
+{
+    var product = await db.Products.SingleOrDefaultAsync(x => x.Id == id, ct);
+    if (product is null) return Results.NotFound();
+
+    db.Entry(product).Property(x => x.Version).OriginalValue =
+        Convert.FromBase64String(request.Version);
+    product.Price = request.Price;
+
+    try
+    {
+        await db.SaveChangesAsync(ct);
+        return Results.Ok(new { product.Price, Version = Convert.ToBase64String(product.Version) });
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new {
+            code = "product_changed",
+            message = "The product changed after you loaded it. Refresh and review the new value."
+        });
+    }
+}
+```
+
+**How it works now:** The generated update includes both `Id` and the original `Version`. A competing update changes the database version, so the stale request affects zero rows and becomes an explicit conflict instead of silent data loss.
+
+**Trade-offs and when not to use it:** Automatic retry is safe only when the operation can be recomputed without discarding human intent. For user-edited data, return current values or a conflict response and let the user review. A SQL Server `rowversion` is provider-specific; other databases may use application-managed tokens.
+
+**Production checks:** Treat the token as opaque, include it in API contracts/ETags, test two-context conflicts, and record conflict rates without logging sensitive payloads.
+
+**Try it:** Open two contexts, load the same product, save different prices, and assert that the second save returns a conflict.
+
+---
+
+## EF-M4 — Save State and an Outbox Message Atomically
+
+**Question:** Why is `SaveChangesAsync()` followed by message publication unreliable?
+
+**Answer:** A database commit and a broker publish are two separate failure boundaries. Store the intended message in an outbox row in the same database transaction as the business change, then publish it asynchronously with idempotent handling.
+
+**What problem does it solve?** It closes the crash window where an order is committed but its event is never published, or an event is published before a rolled-back order exists.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```csharp
+db.Orders.Add(order);
+await db.SaveChangesAsync(ct);              // succeeds
+await bus.Publish(new OrderPlaced(order.Id), ct); // process can crash here
+```
+
+✅ **After/correct example:**
+
+```csharp
+var order = Order.Place(command.CustomerId, command.Lines);
+var message = new OutboxMessage(
+    Guid.NewGuid(),
+    "orders.order-placed.v1",
+    JsonSerializer.Serialize(new { order.Id, order.CustomerId }),
+    DateTimeOffset.UtcNow);
+
+db.Orders.Add(order);
+db.OutboxMessages.Add(message);
+await db.SaveChangesAsync(ct); // one relational transaction
+```
+
+```csharp
+public async Task PublishPending(CancellationToken ct)
+{
+    var messages = await db.OutboxMessages
+        .Where(x => x.PublishedAt == null)
+        .OrderBy(x => x.OccurredAt)
+        .Take(100)
+        .ToListAsync(ct);
+
+    foreach (var message in messages)
+    {
+        await bus.Publish(message.Id, message.Type, message.Payload, ct);
+        message.MarkPublished(DateTimeOffset.UtcNow);
+        await db.SaveChangesAsync(ct);
+    }
+}
+```
+
+**How it works now:** Business state and publication intent commit together. A worker can retry unpublished rows after a crash. Because a broker acknowledgement and the “published” update are still separate, consumers deduplicate by message ID.
+
+**Trade-offs and when not to use it:** Delivery is asynchronous and normally at least once. A single-process application without external side effects may not need an outbox. At scale, claim rows safely, partition work, archive old messages, and prevent two workers from publishing the same batch uncontrollably.
+
+**Production checks:** Monitor oldest unpublished age, retry count, poison records, and table growth. Define message schema compatibility and test worker restart after publish but before marking the row complete.
+
+**Try it:** Terminate the worker immediately after `Publish`, restart it, and prove the consumer applies the event only once.
+
+---
+
+## EF-M5 — Test Relational Behavior with a Relational Provider
+
+**Question:** Why can EF Core’s in-memory provider give false confidence for relational code?
+
+**Answer:** It is not a relational database and does not reproduce relational SQL translation, constraints, transactions, provider-specific types, or concurrency behavior. Use pure unit tests for domain logic and a relational provider—or the production provider—for persistence integration tests.
+
+**What problem does it solve?** It catches queries and mappings that work in an in-memory collection but fail against the actual database engine.
+
+**Before this concept:**
+
+❌ **Wrong/before example:**
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseInMemoryDatabase(Guid.NewGuid().ToString())
+    .Options;
+
+// This cannot prove SQL translation, foreign keys, rowversion, or transactions.
+```
+
+✅ **After/correct example — SQLite relational test:**
+
+```csharp
+await using var connection = new SqliteConnection("Data Source=:memory:");
+await connection.OpenAsync();
+
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseSqlite(connection)
+    .EnableSensitiveDataLogging(false)
+    .Options;
+
+await using var db = new AppDbContext(options);
+await db.Database.EnsureCreatedAsync();
+
+db.Orders.Add(OrderTestData.Pending());
+await db.SaveChangesAsync();
+
+var result = await db.Orders
+    .Where(x => x.Status == OrderStatus.Pending)
+    .Select(x => x.Id)
+    .SingleAsync();
+
+Assert.NotEqual(Guid.Empty, result);
+```
+
+**How it works now:** The test uses a relational query pipeline and enforces more database behavior. Provider-specific features still require tests against the production engine, commonly in an isolated container or disposable database.
+
+**Trade-offs and when not to use it:** SQLite is fast but differs from SQL Server/PostgreSQL in types and SQL features. Keep a small fast relational suite and a focused production-provider suite for migrations, concurrency, raw SQL, indexes, and provider-specific behavior.
+
+**Production checks:** Apply real migrations in tests, isolate test data, avoid shared mutable databases across parallel tests, and capture generated SQL for performance-sensitive paths.
+
+**Try it:** Write a test that passes with the in-memory provider but fails when a required foreign key is enforced, then replace the test provider.

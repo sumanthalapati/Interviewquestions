@@ -2828,7 +2828,7 @@ export const FEATURE_FLAGS = new InjectionToken<FeatureFlags>('FeatureFlags', {
 
 ---
 
-# ⚖️ Angular Comparisons — Side-by-Side Differences
+# Core Angular Comparisons — Side-by-Side Differences
 
 ---
 
@@ -3029,11 +3029,11 @@ export class CheckoutComponent { }
 
 ---
 
-# ⚖️ Angular Comparisons — Side-by-Side Differences
+# Extended Angular Comparisons — Side-by-Side Differences
 
 ---
 
-## ANG-C1 — Component vs Directive vs Pipe
+## ANG-X1 — Component vs Directive vs Pipe (Extended)
 
 | | Component | Attribute Directive | Structural Directive | Pipe |
 |-|-----------|---------------------|---------------------|------|
@@ -3077,7 +3077,7 @@ export class TruncatePipe implements PipeTransform {
 
 ---
 
-## ANG-C2 — `ChangeDetectionStrategy.Default` vs `OnPush`
+## ANG-X2 — `ChangeDetectionStrategy.Default` vs `OnPush` (Extended)
 
 | | Default | OnPush |
 |-|---------|--------|
