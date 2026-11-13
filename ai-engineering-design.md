@@ -15,6 +15,27 @@ Quick reference for designing AI/ML systems at scale. Covers LLMs, agents, RAG, 
 8. [Context Engineering](#context-engineering)
 9. [Multi-Agent Systems](#multi-agent)
 10. [Deployment & Monitoring](#deployment)
+11. [One Model Call End to End](#aie-m1-one-model-call-end-to-end)
+12. [Embedding and Retrieval Internals](#aie-m2-embedding-and-retrieval-internals)
+13. [Transformer Shapes, Attention, and KV State](#aie-m3-transformer-shapes-attention-and-kv-state)
+14. [Match Optimizations to the Bottleneck](#aie-m4-match-optimizations-to-the-bottleneck)
+15. [Reasoning, Verification, Tools, and MCP](#aie-m5-reasoning-verification-tools-and-mcp)
+16. [Evaluation-Driven Production AI](#aie-m6-evaluation-driven-production-ai)
+
+### Fanout public AI Engineering curriculum coverage
+
+| Public module | Repository coverage |
+|---|---|
+| AI engineering map and one model call | AIE-M1 plus the existing LLM Concepts section |
+| Embeddings, compression, vector search, indexing, and vector-database internals | Vector Databases plus AIE-M2 |
+| LLM foundations and RAG | LLM Concepts and RAG sections |
+| Positional embeddings, attention, transformer architecture, KV cache | AIE-M3 and [Inference Engineering](inference-engineering.md) |
+| Masked/multi-head attention and transformer shape tracing | AIE-M3 and the linked math/research workbook |
+| PagedAttention, MoE, FlashAttention, and KV allocation | AIE-M4 and [Inference Engineering](inference-engineering.md) |
+| Quantization, sparse attention, distillation, speculative decoding, and bottleneck matching | AIE-M4 |
+| Reasoning, chain/tree search, tool usage, and failure diagnosis | AIE-M5 |
+| Context engineering, agent loops, MCP, and checkable plans | Existing Context/Agent sections plus AIE-M5 |
+| Evaluation, monitoring, and production feedback | Existing Evaluation/Deployment sections plus AIE-M6 |
 
 ---
 
@@ -634,6 +655,478 @@ Deploy LLM app to production. Monitor quality, cost, latency.
 
 ---
 
+## AIE-M1. One Model Call End to End
+
+**Question:** What does an AI engineer own around one model call, beyond sending a prompt to an SDK?
+
+**Answer:** An AI engineer turns a probabilistic model into a bounded product capability. The complete path includes request/authentication, product intent, input validation, policy and data classification, context/retrieval, prompt/template and schema versions, model routing, token/cost budgets, inference, structured parsing, grounding/verification, safety, tool authorization, retries/fallback, response streaming, telemetry, evaluation, feedback, and rollback. The model call is one dependency inside that system.
+
+**What problem does it solve?** It makes quality, safety, latency, cost, privacy, and failure behavior explicit and testable instead of scattering them across controllers and prompt strings.
+
+**Before this concept:** A feature called a provider directly from a controller, concatenated user text into a prompt, parsed free-form output, and logged the entire exchange. Model changes silently changed behavior and cost.
+
+❌ **Wrong/before example — an unbounded call with an implicit contract:**
+
+```csharp
+[HttpPost("approve-refund")]
+public async Task<string> ApproveRefund(string complaint)
+{
+    var response = await _llm.CompleteAsync(
+        $"Decide whether to approve this refund: {complaint}");
+
+    if (response.Contains("approve", StringComparison.OrdinalIgnoreCase))
+        await _payments.RefundAsync();
+
+    return response;
+}
+```
+
+The model receives unclassified data, output parsing is ambiguous, the model can trigger a side effect, no policy facts are supplied, and there is no versioned evaluation contract.
+
+✅ **After/correct example — model proposes; deterministic code validates and acts:**
+
+```csharp
+public sealed record RefundAssessment(
+    bool RecommendApproval,
+    string PolicyClause,
+    decimal MaximumAmount,
+    string[] MissingEvidence);
+
+public async Task<RefundDecision> AssessAsync(
+    RefundRequest request,
+    CancellationToken cancellationToken)
+{
+    var policy = await _policyRepository.GetVersionAsync(
+        request.PolicyVersion, cancellationToken);
+
+    var assessment = await _ai.GenerateStructuredAsync<RefundAssessment>(new()
+    {
+        Capability = "refund-assessment-v3",
+        ModelRoute = "reasoning-medium",
+        Inputs = Redact(request, policy),
+        MaximumInputTokens = 8_000,
+        MaximumOutputTokens = 600,
+        Deadline = TimeSpan.FromSeconds(8)
+    }, cancellationToken);
+
+    return _refundRules.ValidateAndDecide(request, policy, assessment);
+}
+```
+
+**How it works now:** A capability contract owns the prompt/context/schema/model policy and evaluation version. The gateway enforces budgets and records safe telemetry. The model produces a typed recommendation with evidence. Deterministic business rules validate policy, money, authorization, and side effects. A rollout compares candidate versus baseline and can revert the entire capability version.
+
+### End-to-end request map
+
+```text
+product request
+ -> authenticate + authorize
+ -> classify/redact data
+ -> validate intent and budgets
+ -> retrieve/assemble context
+ -> render versioned instructions + schema
+ -> route model and invoke
+ -> parse/validate output
+ -> ground/verify/policy-check
+ -> request approval or execute bounded tool
+ -> stream/respond
+ -> trace + eval + feedback
+```
+
+**Trade-offs and when not to use it:** A wrapper/gateway adds latency and platform work. A small internal prototype may begin with a direct call, but money, access, external communication, personal data, or production traffic justify explicit contracts early. Do not create a generic abstraction that hides provider features or makes every capability share one prompt and fallback policy.
+
+**Production checks:**
+
+- Version prompt/template, retrieval policy, schema, model route, safety policy, and evaluator together.
+- Enforce input/output/tool/cost/wall-time budgets and propagate cancellation.
+- Separate user text, retrieved evidence, system policy, and tool output as untrusted/privileged channels.
+- Test malformed output, provider timeout, throttling, partial stream, fallback, and policy dependency failure.
+- Log identifiers, versions, timing, token/cost, and evaluation result without sensitive prompt/output content by default.
+- Require deterministic authorization and human approval for high-impact or irreversible actions.
+
+**Try it:** Trace one repository AI feature from HTTP request to final response. Name every version, trust boundary, token/cost budget, fallback, side effect, metric, and test. If any decision is implicit in a prompt string, move it into a reviewable capability contract.
+
+---
+
+## AIE-M2. Embedding and Retrieval Internals
+
+**Question:** How do embeddings become search results, and how do storage, compression, indexing, filtering, hybrid retrieval, and reranking change quality and cost?
+
+**Answer:** An embedding model maps inputs into vectors whose similarity should correlate with task relevance. The system stores vectors plus stable IDs, source versions, metadata, access controls, and text/chunk references. Exact search compares every vector; approximate indexes such as graph- or partition-based structures trade recall for latency/memory/build cost. Compression or lower precision reduces memory/bandwidth with possible recall loss. A production pipeline often combines lexical and vector candidates, applies authorization and structured filters, fuses scores, reranks a small set, and evaluates final evidence relevance.
+
+**What problem does it solve?** It makes retrieval an engineered information-retrieval pipeline rather than “put embeddings in a vector database and choose top five.”
+
+**Before this concept:** Documents were split every 500 characters, embedded once, and retrieved only by cosine similarity. Product codes, exact names, dates, tenant filters, updated documents, and deletion were unreliable.
+
+❌ **Wrong/before example — similarity alone is treated as truth:**
+
+```python
+query_vector = embed(user_question)
+chunks = vector_db.search(query_vector, top_k=5)
+answer = llm.generate(user_question, chunks)
+```
+
+There is no tenant/ACL filter, embedding version, lexical path, threshold, deduplication, reranking, source freshness, or evidence-quality evaluation.
+
+✅ **After/correct example — retrieval stages expose their contract:**
+
+```python
+query = understand(user_question)
+
+lexical = bm25.search(
+    query.text,
+    filters={"tenant": tenant_id, "acl": principal_groups},
+    limit=100,
+)
+semantic = ann.search(
+    embedding_model.embed(query.semantic_text),
+    filters={"tenant": tenant_id, "acl": principal_groups},
+    limit=100,
+    index_version="products-emb-v7",
+)
+
+candidates = reciprocal_rank_fusion(lexical, semantic)
+candidates = deduplicate_by_source_and_span(candidates)
+ranked = reranker.score(query.text, candidates[:50])
+evidence = select_with_budget(ranked, max_tokens=6_000, minimum_score=0.62)
+```
+
+**How it works now:** Ingestion parses and chunks by document structure, assigns stable source/span IDs, embeds with a versioned model, and atomically publishes an index version. Query understanding selects exact/lexical/semantic paths. Metadata filtering occurs before or during candidate search where possible. Reranking improves precision over a bounded set. The answer cites selected sources, and evaluations separate retrieval failure from generation failure.
+
+### Retrieval design dimensions
+
+| Dimension | Question to answer |
+|---|---|
+| Embedding | Does the model represent this language/domain/query-document relationship? |
+| Chunking | Does a chunk contain one useful answer unit with enough surrounding meaning? |
+| Index | What recall/latency/memory/build/update trade-off fits the corpus and traffic? |
+| Compression | How much recall/score stability is lost for memory and bandwidth saved? |
+| Filters | Can tenant, ACL, date, product, and availability constraints be applied safely and efficiently? |
+| Hybrid | Which exact terms, identifiers, and semantic concepts need lexical/vector candidates? |
+| Reranking | Is added quality worth model latency/cost, and how many candidates should reach it? |
+| Freshness | How are upsert, delete, re-embed, rebuild, alias swap, and rollback handled? |
+
+**Trade-offs and when not to use it:** Vector search adds embeddings, duplicated data, eventual consistency, index tuning, and evaluation. Exact database or full-text search can be better for small corpora, structured filters, identifiers, and strict freshness. Reranking adds latency and cost. Compression saves resources but must be measured on the target retrieval set.
+
+**Production checks:**
+
+- Maintain query/relevance judgments and measure recall@k, precision@k, MRR/NDCG where appropriate, and answer evidence sufficiency.
+- Enforce ACL/tenant filters in the retrieval service and test adversarial cross-tenant queries.
+- Version embedding model, preprocessing, chunker, vector dimension, index parameters, and source document.
+- Track indexing lag, missing/deleted/stale documents, duplicate chunks, filter selectivity, zero-result rate, and reranker latency.
+- Rebuild into a new index/version, validate, switch an alias, and retain rollback.
+- Evaluate compression/index parameter changes against exact-search or a trusted baseline on representative queries.
+
+**Try it:** Build a 50-query judged set containing exact IDs, paraphrases, rare terms, dates, typos, negative filters, and access-control cases. Compare lexical, vector, hybrid fusion, and reranked retrieval. Explain every query where the “more advanced” pipeline loses.
+
+---
+
+## AIE-M3. Transformer Shapes, Attention, and KV State
+
+**Question:** How do tokens and tensor shapes move through a decoder transformer, and where do attention cost and the KV cache come from?
+
+**Answer:** Token IDs map to embeddings with shape `[batch, sequence, hidden]`. Each layer normalizes and projects hidden states into query, key, and value tensors, commonly reshaped by attention heads. Causal masked attention computes scores between each query position and allowed key positions, applies scaled softmax, combines values, merges heads, and continues through output projection and an MLP/residual path. During autoregressive inference, prior keys and values are cached per layer; each decode step computes new state and attends to cached history instead of recomputing every earlier token.
+
+**What problem does it solve?** Shape fluency lets engineers debug memory, invalid dimensions, attention complexity, KV capacity, model parallelism, and why prefill/decode behave differently.
+
+**Before this concept:** The model was treated as a black-box HTTP endpoint. Context increases caused OOM, but the team could not distinguish weight, activation, or KV growth or explain why grouped-query attention changed memory.
+
+❌ **Wrong/before example — multiply tensors without naming axes:**
+
+```python
+scores = q @ k.T
+# For batched multi-head tensors, .T reverses every dimension and is wrong.
+```
+
+✅ **After/correct example — state every axis and verify it:**
+
+```python
+# x: [batch, sequence, hidden]
+b, s, h = x.shape
+
+q = q_proj(x).view(b, s, q_heads, head_dim).transpose(1, 2)
+k = k_proj(x).view(b, s, kv_heads, head_dim).transpose(1, 2)
+v = v_proj(x).view(b, s, kv_heads, head_dim).transpose(1, 2)
+
+assert q.shape == (b, q_heads, s, head_dim)
+assert k.shape == (b, kv_heads, s, head_dim)
+
+# An implementation expands/maps KV heads when q_heads != kv_heads.
+scores = (q @ k_for_q_heads.transpose(-2, -1)) / math.sqrt(head_dim)
+scores = scores.masked_fill(causal_mask, float("-inf"))
+weights = torch.softmax(scores, dim=-1)
+context = weights @ v_for_q_heads
+```
+
+**How it works now:** Every calculation names batch, sequence, head, and feature axes. Prefill handles many prompt queries/keys/values and creates cache state. Decode adds one or a few new token positions, reads the growing cache, and appends new K/V. Capacity math uses layer count, KV head count, head dimension, element bytes, and live cached tokens.
+
+### Shape walkthrough example
+
+For `batch=2`, `sequence=1024`, `hidden=4096`, `query_heads=32`, and `head_dim=128`:
+
+```text
+input hidden: [2, 1024, 4096]
+Q:            [2, 32, 1024, 128]
+attention:    conceptually [2, 32, 1024, 1024] during full prefill
+context:      [2, 32, 1024, 128]
+merged:       [2, 1024, 4096]
+```
+
+Multi-query/grouped-query attention uses fewer KV heads than query heads, reducing KV-cache memory and bandwidth. Positional schemes affect how token order enters attention and may constrain safe prefix reuse/context extension.
+
+**Trade-offs and when not to use it:** The conceptual attention matrix is useful for reasoning, but optimized kernels may never materialize it in HBM. Implementation layouts differ. Shape exercises do not replace profiling. KV caching accelerates autoregressive reuse but consumes memory proportional to live cached tokens and is unnecessary in the same form for every non-autoregressive workload.
+
+**Production checks:**
+
+- Record the exact model configuration: layers, hidden size, query/KV heads, head dimension, context, dtype, positional method.
+- Unit-test shapes, masks, padding, cache append, batch reorder, beam/candidate paths, and cancellation cleanup.
+- Calculate weight and KV memory before deployment and compare with runtime pools.
+- Validate long-context quality, not only that a larger position limit loads.
+- Use optimized framework attention primitives unless a measured need justifies custom kernels.
+- Keep tokenizer/model/positional/cache compatibility together during versioning and prefix reuse.
+
+**Try it:** Choose one open decoder model configuration. Write every tensor shape for one layer during prefill and one-token decode. Calculate KV bytes/token, then explain how GQA/MQA, quantized KV, and tensor parallelism alter the memory or placement.
+
+---
+
+## AIE-M4. Match Optimizations to the Bottleneck
+
+**Question:** How do you choose between PagedAttention, FlashAttention, MoE, quantization, sparse attention, distillation, and speculative decoding?
+
+**Answer:** These techniques solve different problems. First measure whether the constraint is model quality, weight/KV capacity, attention IO, decode serialization, compute, memory bandwidth, context length, or cost. PagedAttention manages serving-time KV blocks. FlashAttention reduces exact-attention memory traffic. MoE increases total parameter capacity while activating a subset of experts but adds routing/communication. Quantization reduces representation size with kernel/quality trade-offs. Sparse attention reduces attended positions under a defined pattern. Distillation trains a smaller model to imitate useful behavior. Speculative decoding drafts and verifies tokens to reduce serial target steps when acceptance is high.
+
+**What problem does it solve?** A bottleneck map prevents engineers from combining unrelated techniques, attributing gains incorrectly, or trading away quality and operability for a benchmark that does not match the product.
+
+**Before this concept:** The team enabled a quantized MoE model, a new serving engine, prefix caching, and speculative decoding simultaneously. Quality and latency changed, but no one could explain which change helped or how to roll back safely.
+
+❌ **Wrong/before example — optimization shopping list:**
+
+```text
+Goal: make AI cheaper
+Plan: INT4 + MoE + FlashAttention + sparse attention + speculative decoding
+Evidence: vendor benchmark screenshot
+```
+
+✅ **After/correct example — bottleneck decision record:**
+
+```yaml
+product_contract:
+  quality: eval-suite-v12 >= baseline
+  p99_ttft_ms: 1200
+  p99_itl_ms: 90
+  cost_per_resolved_task_usd: <= 0.04
+measured_bottleneck:
+  cohort: long-context-interactive
+  finding: kv-capacity-and-prefill-io
+candidate_sequence:
+  - paged-kv-allocation
+  - flash-attention-supported-kernel
+  - measured-kv-quantization
+hold_constant:
+  - model-and-tokenizer-revision
+  - workload-and-quality-suite
+  - hardware-and-engine-version
+rollback: previous-immutable-serving-profile
+```
+
+**How it works now:** A baseline is profiled by workload cohort. One hypothesis changes at a time. The experiment checks task quality, latency distribution, goodput, memory, power, cost, and failures. Techniques graduate only if their benefit survives production-shaped load and their operational complexity is acceptable.
+
+### Technique selection map
+
+| Technique | Strong signal to evaluate it | Important counter-check |
+|---|---|---|
+| PagedAttention | KV fragmentation/reservation limits concurrency | Scheduler/block overhead and actual fragmentation |
+| FlashAttention | Attention IO/intermediates dominate supported shapes | Kernel support and whether attention is really dominant |
+| MoE | Need higher model capacity without dense activation cost | Expert placement, imbalance, all-to-all, total weight memory |
+| Weight quantization | Weight memory/bandwidth blocks fit or decode | Kernel maturity, calibration, quality, metadata/dequantization |
+| KV quantization | Long-context/concurrency KV dominates | Attention quality, scale granularity, conversion/kernel overhead |
+| Sparse attention | Full attention cost at long context is unacceptable | Task loses information outside the sparse pattern |
+| Distillation | Smaller deployable model can learn the target task | Teacher bias, data rights, generalization, retraining lifecycle |
+| Speculative decoding | Low-batch serial decode with high proposal acceptance | Draft cost/memory, verification, saturated-throughput regression |
+
+**Trade-offs and when not to use it:** Optimization creates variant/artifact explosion and hardware/runtime coupling. A simple smaller model or shorter context can outperform a complex optimization stack. Model-architecture techniques such as MoE or sparse attention may require training choices, not a serving flag. Do not optimize before product quality and workload are measured.
+
+**Production checks:**
+
+- Keep one immutable baseline and change one major variable per experiment.
+- Use representative cohorts, including long/short inputs, tools, structured outputs, and cancellations.
+- Re-run the full quality/safety suite; perplexity or one benchmark is not the product contract.
+- Track configuration/artifact/kernel versions and hardware compatibility.
+- Compare cost per correct/SLO-compliant task, not raw tokens per second alone.
+- Canary and retain a tested rollback that does not depend on an evicted artifact.
+
+**Try it:** Take one slow AI workflow and write a bottleneck decision tree. For every candidate optimization, state the resource it targets, required measurement, expected gain, quality risk, operational cost, and condition that would make you reject it.
+
+---
+
+## AIE-M5. Reasoning, Verification, Tools, and MCP
+
+**Question:** How should an AI system use reasoning, verification, tools, agent loops, and MCP without trusting plausible text or granting uncontrolled side effects?
+
+**Answer:** Ask the model for the minimum structured artifact the application needs—answer, plan, arguments, evidence, or candidate solution—then verify it using deterministic constraints, tools, retrieval, tests, or a separately designed evaluator. An agent loop alternates model decisions with bounded tool observations under step, token, time, and permission budgets. MCP standardizes how clients discover and call tools/resources/prompts, but it does not make a server, description, data, or tool result trustworthy. Authorization belongs at execution time with least-privilege credentials and human approval for high-impact actions.
+
+**What problem does it solve?** It converts open-ended model output into checkable progress while containing prompt injection, hallucinated tool arguments, loops, unauthorized access, and irreversible actions.
+
+**Before this concept:** A prompt asked the model to “think step by step, use any available tool, and finish the task.” The same broad service credential was exposed to every request, and success meant the final text sounded confident.
+
+❌ **Wrong/before example — free-form reasoning directly triggers a tool:**
+
+```python
+response = model.generate("Investigate and fix the customer's billing problem")
+if "refund" in response.lower():
+    payments.refund(customer_id, amount="all")
+```
+
+✅ **After/correct example — typed proposal, policy validation, scoped execution:**
+
+```python
+proposal = model.generate_schema(
+    schema=RefundProposal,
+    context=trusted_policy_plus_untrusted_customer_evidence,
+    allowed_tools=["lookup_invoice", "lookup_refund_policy"],
+)
+
+verified = refund_policy.verify(
+    principal=current_operator,
+    invoice_id=proposal.invoice_id,
+    amount=proposal.amount,
+    evidence_ids=proposal.evidence_ids,
+)
+
+if verified.requires_human_approval:
+    return approval_queue.create(verified)
+
+return payments.refund(
+    credential=short_lived_credential(scope="refund", invoice=verified.invoice_id),
+    idempotency_key=verified.operation_id,
+    amount=verified.amount,
+)
+```
+
+**How it works now:** Instructions and policy are separated from untrusted content. The model selects only allow-listed tools and produces schema-valid arguments. The application authenticates the principal, reauthorizes each call, validates business rules, supplies task-scoped credentials, deduplicates effects, and records evidence. The loop stops on success, explicit failure, budget, or approval boundary.
+
+### Verification choices
+
+- **Deterministic checks:** schema, types, ranges, permissions, invariants, compilers, tests, calculators, database constraints.
+- **Evidence checks:** citations exist, support the claim, match the source version, and are authorized for the user.
+- **Independent candidate checks:** execute code in a sandbox, solve equations, simulate a plan, or compare against a known oracle.
+- **Model graders/verifiers:** useful when human judgment is costly, but must be calibrated against humans and protected from shared bias/prompt leakage.
+- **Search/tree reasoning:** generate and score multiple candidates only when improved success justifies extra latency/cost; bound branching/depth.
+
+Do not require or store private hidden chain-of-thought. Ask for concise rationale, evidence, intermediate artifacts, or verifiable calculations appropriate to the product.
+
+**Trade-offs and when not to use it:** Agents add latency, token cost, nondeterminism, and side-effect risk. A deterministic workflow or ordinary API integration is better when steps are known. Multiple agents often multiply coordination without improving correctness. Verification can be expensive and verifiers can share model blind spots.
+
+**Production checks:**
+
+- Enforce tool allow-lists, argument schemas, per-call authorization, short-lived credentials, network boundaries, and idempotency.
+- Treat tool descriptions/results, retrieved text, web pages, and MCP server content as untrusted inputs.
+- Bound steps, parallel branches, tokens, wall time, spend, retries, and paused state.
+- Trace plan/tool/observation transitions without logging secrets or sensitive content.
+- Test indirect prompt injection, malicious tool output, schema edge cases, approval bypass, duplicate calls, and cancellation.
+- Evaluate task completion, evidence, unsafe actions avoided, human corrections, and cost—not eloquence.
+
+**Try it:** Redesign one “autonomous agent” as a state machine. List states, allowed tools, credentials, invariants, verification, budgets, approval boundaries, retry/idempotency policy, and recovery after a tool succeeds but the agent times out.
+
+---
+
+## AIE-M6. Evaluation-Driven Production AI
+
+**Question:** How do offline evaluation, online experiments, feedback, and observability become a development loop rather than a dashboard added after launch?
+
+**Answer:** Define the product task and unacceptable failures, build a versioned dataset with representative and adversarial cases, measure components and end-to-end outcomes, and run the suite on every prompt/model/retrieval/tool/policy change. Calibrate model graders against human judgments. Use shadow/canary/A-B experiments with guardrails for online impact. Capture privacy-safe failure evidence, classify root cause, add confirmed cases to regression sets, and version the complete capability so it can roll back.
+
+**What problem does it solve?** Evaluation-driven development prevents subjective prompt tweaking, detects regressions hidden by averages, and creates a data flywheel that improves the real failure distribution rather than a demo set.
+
+**Before this concept:** Engineers tried five prompts on friendly examples and shipped the one they liked. Production failures were stored as screenshots, model upgrades were assumed better, and no test reproduced the issue.
+
+❌ **Wrong/before example — one aggregate model score gates release:**
+
+```python
+if llm_judge(candidate_outputs).average_score > 0.8:
+    deploy(candidate)
+```
+
+This omits judge calibration, task slices, safety, retrieval/tool failures, cost/latency, significance, and worst-case regressions.
+
+✅ **After/correct example — multi-layer release gate:**
+
+```yaml
+capability_version: support-answer-v18
+offline_gates:
+  schema_validity: 1.0
+  citation_entailment: ">= 0.97"
+  task_success_overall: ">= baseline"
+  task_success_each_critical_slice: ">= baseline - 0.01"
+  forbidden_disclosure: 0
+  tool_side_effect_simulation_failures: 0
+  p95_cost_and_latency: "within approved budget"
+online_rollout:
+  shadow: true
+  canary_percent: [1, 5, 20, 50, 100]
+  guardrails: [escalation_rate, complaint_rate, safety, latency, cost]
+rollback_on: "guardrail breach or unexplained critical failure"
+```
+
+**How it works now:** Every run records dataset version, capability version, model/provider revision, outputs, component traces, scores, and reviewer labels. Failures are attributed to input policy, retrieval, context, model reasoning, structured parsing, tool selection/execution, safety filter, or UX. Confirmed production failures become minimized regression cases with privacy review.
+
+### Evaluation pyramid
+
+1. **Deterministic unit/contract tests:** schemas, prompt rendering, filters, permissions, budgets, tool mocks, parsers.
+2. **Component evals:** retrieval recall, reranker quality, classifier calibration, tool selection/arguments, citation support.
+3. **End-to-end offline evals:** task success, groundedness, safety, style, latency, cost by slice.
+4. **Adversarial/red-team evals:** prompt injection, data leakage, policy evasion, denial-of-wallet, unsafe tools.
+5. **Shadow/canary/online experiments:** real distribution with product metrics and guardrails.
+6. **Monitoring and feedback:** drift, failure taxonomy, human escalation, rollback, dataset growth.
+
+**Trade-offs and when not to use it:** Evaluation sets can overfit and stale; human labels cost time; model judges inherit bias; online experiments may be unethical for high-risk behavior. Use deterministic or expert review where required. Do not collect prompts/outputs without consent, minimization, retention, and access controls.
+
+**Production checks:**
+
+- Slice by task, language, tenant/product, input length, risk, model route, retrieval/tool path, and known edge cases.
+- Calibrate graders against blinded human labels and monitor disagreement/drift.
+- Keep a locked holdout and periodically refresh from real failures without leaking answers into prompts.
+- Gate quality, safety, schema, latency, cost, and reliability together.
+- Trace version lineage so every output can be reproduced or at least explained from preserved artifacts/configuration.
+- Make user feedback actionable: distinguish dislike, factual error, missing evidence, policy failure, latency, and UX.
+
+**Try it:** Create a 30-case evaluation plan for one AI feature. Include happy, boundary, adversarial, long-input, ambiguous, no-answer, tool-failure, and authorization cases. Define component metrics, end-to-end success, critical slices, human rubric, rollout gates, and how a production failure becomes a regression test.
+
+---
+
+## AI Engineering Practice Workbook
+
+Answer these without notes, then verify against the key. For each answer, add one production failure and one metric that would reveal it.
+
+### Questions
+
+1. Why is a model call a dependency rather than the product boundary?
+2. A vector search returns semantically similar but unauthorized documents. Which layer failed, and why is prompt instruction insufficient?
+3. When would hybrid lexical/vector retrieval outperform either alone?
+4. For a decoder with 24 layers, 4 KV heads, head dimension 128, and FP16 KV, calculate KV bytes/token.
+5. Explain why FlashAttention and PagedAttention are not competing names for the same optimization.
+6. A 4-bit model uses less GPU memory but has worse cost per resolved task. Give four explanations.
+7. Why should a model not directly authorize a refund even if its offline accuracy is 99%?
+8. When is tree/search reasoning justified, and what budgets must be explicit?
+9. What is wrong with using one LLM judge as the entire release gate?
+10. A candidate model improves average task success but regresses one rare safety-critical slice. What should the rollout do?
+11. How do you distinguish retrieval failure from generation failure?
+12. What must be versioned to reproduce an AI capability beyond the model name?
+
+### Answer key
+
+1. Product behavior also depends on data/policy, context, prompt/schema, routing, validation, tools, safety, budgets, telemetry, and rollback. Those belong to an owned capability contract around the model.
+2. Retrieval authorization failed. Untrusted documents must be filtered before they enter context; a prompt asking the model not to reveal them is not an access-control boundary.
+3. Exact identifiers, names, numbers, and rare terms favor lexical retrieval; paraphrases/concepts favor embeddings. Fusion plus reranking can recover both when evaluated on the target query set.
+4. `2 × 24 × 4 × 128 × 2 = 49,152 bytes/token`, or 48 KiB/token, before allocator/block overhead.
+5. FlashAttention is an IO-aware exact attention computation that reduces memory traffic/intermediates. PagedAttention manages serving KV memory in blocks/pages. A serving engine may use both.
+6. Poor kernels/dequantization, quality loss causing retries/escalation, lower batching/goodput, extra calibration/operations, unsupported shapes/fallback, or a smaller model missing tasks and invoking tools/humans more often.
+7. Accuracy is not authorization. Money movement needs deterministic identity, policy, amount/invariant checks, audit, idempotency, and often human approval; the model can propose evidence, not own permission.
+8. Use it when multiple candidates plus verification materially improve a high-value task. Bound branching, depth, tokens, wall time, spend, tools, side effects, and stopping/approval rules.
+9. The judge may share bias, be uncalibrated, miss critical slices, be prompt-sensitive, and ignore safety/latency/cost. Use deterministic checks, calibrated humans/judges, component metrics, slices, and online guardrails.
+10. Block or restrict the rollout until the critical regression is understood and mitigated. Averages cannot trade away a declared zero/near-zero critical-failure constraint.
+11. Inspect whether relevant authorized evidence appeared in candidate/context (retrieval) and whether the answer used it correctly (generation). Maintain separate judged retrieval and answer-evidence metrics.
+12. Data/source versions, preprocessing/chunking, embeddings/index, retrieval/reranking, prompt/template, schema, model/provider parameters, tools, policy/safety, evaluator, runtime, and rollout configuration.
+
 ## Summary Table
 
 | Concept | Use Case | Trade-off |
@@ -648,6 +1141,22 @@ Deploy LLM app to production. Monitor quality, cost, latency.
 | Multi-agent | Specialization, consensus | Complexity, sequential slowdown |
 | Caching | Repeated queries | Stale responses |
 | Monitoring | Production quality, cost | Overhead, alert fatigue |
+| Capability contract | Version the full product behavior around a model | Platform work and explicit governance |
+| Hybrid retrieval + reranking | Exact and semantic evidence with higher precision | Indexing, latency, evaluation, synchronization |
+| Transformer/KV shape analysis | Explain memory, attention, and inference phases | Model-specific detail and implementation variation |
+| Bottleneck-driven optimization | Improve measured quality/latency/memory/cost constraint | Artifact and runtime complexity |
+| Typed tools + verification | Make model proposals checkable and side effects safe | Extra latency, policies, approval paths |
+| Evaluation-driven development | Prevent regressions and learn from production failures | Dataset, labeling, privacy, and grader maintenance |
+
+## Primary References for the Mastery Extensions
+
+- [Fanout AI Engineering public curriculum](https://fanout.sh/ai-engineering/overview)
+- [Fanout course roadmaps](https://fanout.sh/roadmaps)
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+- [FlashAttention](https://proceedings.neurips.cc/paper_files/paper/2022/hash/67d57c32e20fd0a7a302cb81d36e40d5-Abstract.html)
+- [PagedAttention/vLLM](https://arxiv.org/abs/2309.06180)
+- [Speculative Decoding](https://proceedings.mlr.press/v202/leviathan23a.html)
+- [Inference Engineering workbook](inference-engineering.md)
 
 ---
 

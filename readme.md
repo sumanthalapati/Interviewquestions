@@ -7,7 +7,8 @@
 
 - **New to the repository?** Follow [Start Here](START-HERE.md) for role-based paths, a 12-week sequence, capstones, and a repeatable mastery loop.
 - **Looking for one subject?** Use the [Guide Index](GUIDE-INDEX.md) to find the smallest relevant guide.
-- **Ready to apply a specific concept?** Use [Topic-Wise Engineering Practice](TOPIC-WISE-PRACTICE.md) for topic-specific implementation, failure cases, acceptance criteria, and a mastery rubric.
+- **Ready for topic-wise practice?** Use the [Engineering Practice Workbook Index](WORKBOOK-INDEX.md) for .NET, SQL, frontend, systems, AI, inference, and research/math workbooks with answer keys.
+- **Ready to build?** Use [Hands-On Engineering Labs](HANDS-ON-LABS.md) for staged implementation, failure injection, acceptance criteria, and a mastery rubric.
 - **Adding or improving content?** Follow the [Contribution and Writing Standard](CONTRIBUTING.md), including the required before/failure/after format.
 
 Use search to navigate a long guide, but learn by rebuilding examples and testing failure cases—not by reading passively.

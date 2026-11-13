@@ -15,7 +15,7 @@ Comprehensive reference for fundamental concepts, calculations, and deep dives i
 8. [Common Estimation Problems](#estimation)
 9. [Capacity Planning](#capacity)
 10. [Performance Optimization Checklist](#performance)
-11. [25 Essential System Design Interview Questions](#essential-25)
+11. [28 Essential System Design Interview Questions](#essential-25)
 
 ---
 
@@ -890,9 +890,9 @@ Reality check: $1M/year for 1M QPS reasonable for enterprise
 ---
 
 <a id="essential-25"></a>
-## 25 Essential System Design Interview Questions
+## 28 Essential System Design Interview Questions
 
-> Based on the curriculum in [Nikki Siapno's 25 System Design Concepts post](https://www.linkedin.com/posts/nikkisiapno_i-wrote-25-articles-for-25-system-design-activity-7425807821218439169-fF7U). These are original interview questions, answers, and examples organized to match this guide. The source list repeats “database types”; question 18 turns that repetition into a hands-on selection exercise.
+> Questions 1-25 are based on the curriculum in [Nikki Siapno's 25 System Design Concepts post](https://www.linkedin.com/posts/nikkisiapno_i-wrote-25-articles-for-25-system-design-activity-7425807821218439169-fF7U). Questions 26-28 add the dedicated sharding, replication, and search decisions needed to cover the public [DevMaxx system-design topic surface](https://www.devmaxx.dev/). All questions, answers, examples, and walkthroughs here are original and organized to match this guide. The original source list repeats “database types”; question 18 turns that repetition into a hands-on selection exercise.
 
 ### How to Read This Section
 
@@ -905,6 +905,50 @@ Each question moves from simple to technical:
 5. **Watch for**, **trade-off**, or **follow-up** explains common mistakes.
 
 You do not need to memorize product names. Focus on the problem each concept solves and the reason you would choose it.
+
+### DevMaxx Core Topic Coverage
+
+DevMaxx publicly lists fourteen system-design categories. This table keeps them topic-wise and points to the questions that teach each decision; it is a coverage map, not copied app content.
+
+| Public topic | Questions in this guide | What you should be able to decide |
+|---|---|---|
+| Caching | Q15, Q16 | Cache pattern, invalidation ownership, TTL, and what must never be cached publicly |
+| Load balancing | Q12, Q14 | L4/L7 responsibility, routing algorithm, health, and overload behavior |
+| Databases | Q9, Q18, Q20 | Data model, access pattern, transaction need, and database family |
+| Sharding | Q26 | Shard key, routing, resharding, hot partitions, and cross-shard operations |
+| Replication | Q27 | Leader/follower or quorum model, read consistency, lag, failover, RPO, and RTO |
+| Message queues | Q21, Q23 | Async boundary, work queue versus pub/sub, retries, idempotency, and DLQ ownership |
+| Consistency | Q7, Q27 | Strong, eventual, session, and read-your-writes guarantees by workflow |
+| Rate limiting | Q3 | Algorithm, key, scope, fairness, burst policy, and distributed enforcement |
+| CDNs | Q16 | Cacheability, cache key, invalidation, personalization, and origin protection |
+| API design | Q2, Q17, Q19 | Protocol, retry safety, pagination, compatibility, and error contract |
+| Search | Q18, Q28 | Inverted index, analysis, ranking, synchronization, rebuild, and relevance evaluation |
+| Storage | Q18 | Relational, document, key-value, object, search, and analytics stores by access pattern |
+| Microservices | Q5, Q22, Q23 | Service boundary, discovery, sync/async communication, and ownership |
+| Observability | Q4 | Logs, metrics, traces, correlation, SLOs, and actionable alerts |
+
+### Depth Standard for Every Core Topic
+
+Knowing the definition is not enough. For each topic, you should be able to describe its main failure mode and name the evidence that would prove the design is healthy in production.
+
+| Topic | Failure you must be able to explain | Production evidence to inspect |
+|---|---|---|
+| Caching | Stale data, cache stampede, hot keys, eviction, and cache failure exposing an unprepared database | Hit ratio by route/key class, miss latency, item age, evictions, cache errors, and origin/database load |
+| Load balancing | Unhealthy or slow instances receiving traffic, uneven load, retry amplification, and zone imbalance | Per-backend request rate, active requests, p95/p99 latency, errors, ejections, retries, and zone distribution |
+| Databases | Slow queries, lock contention, connection exhaustion, storage saturation, and unsafe schema rollout | Query plans, logical reads, lock/wait time, pool wait, transaction duration, CPU/I/O, replication lag, and free space |
+| Sharding | Hot partitions, wrong routing, cross-shard fan-out, partial migration, and one oversized tenant | Per-shard QPS/bytes/latency, key-frequency skew, moved-bucket verification, routing-map version, and reconciliation results |
+| Replication | Stale reads, lag growth, acknowledged-write loss, split brain, and unsafe failback | Replay lag, commit/replay positions, promotion time, fenced-write rejection, achieved RPO/RTO, and restore-test results |
+| Message queues | Growing backlog, poison messages, duplicate effects, expired leases, and retry storms | Oldest-message age, queue depth, processing rate, retries, lease expirations, duplicate suppression, and DLQ age/owner |
+| Consistency | Read-your-writes failure, lost update, conflicting replicas, double effect, and non-converging state | Invariant-violation count, version conflicts, deduplication hits, reconciliation age, and convergence time |
+| Rate limiting | Unfair keys, hot counters, boundary bursts, unavailable limiter, and retries worsening overload | Allowed/rejected requests by key and reason, limiter latency/errors, backend saturation, retry rate, and quota utilization |
+| CDNs | Private-data leakage, stale content, bad cache keys, purge delay, and origin collapse after mass expiry | Edge hit ratio, object age, purge propagation, origin request/egress rate, edge/origin errors, and regional latency |
+| API design | Breaking changes, ambiguous retries, unstable pagination, oversized payloads, and inconsistent errors | Contract-test results, status/error-code distribution, latency/payload size, idempotency conflicts, and version adoption |
+| Search | Stale or missing documents, older events overwriting newer ones, poor relevance, expensive queries, and authorization leaks | Index freshness, rejected stale versions, zero-result rate, judged relevance, click/conversion rate, p99 latency, and denied-access tests |
+| Storage | Capacity exhaustion, durability gaps, compaction or garbage-collection stalls, corrupt objects, and failed restore | Read/write/error latency, used/free bytes, amplification, checksum failures, lifecycle actions, backup age, and restore verification |
+| Microservices | Cascading synchronous failure, chatty calls, ownership ambiguity, event-schema drift, and distributed transaction gaps | Dependency latency/errors, retry volume, circuit state, queue lag, contract compatibility, ownership/SLO dashboards, and saga reconciliation |
+| Observability | Missing correlation, unbounded label cardinality, noisy alerts, blind sampling, and logs without user-impact context | SLO/error-budget burn, trace completeness, sampling decisions, dropped telemetry, cardinality/cost, alert precision, and time to diagnose |
+
+If you cannot state both the failure and its observable proof, return to the linked question and work through its practical exercise. A design diagram without a failure model and measurable acceptance criteria is incomplete.
 
 ### Mini Glossary
 
@@ -1633,11 +1677,17 @@ Use REST for resource-oriented request/response, GraphQL for client-shaped graph
 
 **How it works now:** Each workload uses an appropriate store, while events, replay, and reconciliation maintain understandable data flow.
 
+**Answer:** Start from each workload's data model, read/write path, consistency requirement, retention, latency, query shape, and recovery need. Choose the smallest set of storage technologies that satisfies those requirements, declare one authoritative owner for every fact, and treat secondary stores as projections that can be rebuilt. Polyglot persistence is justified only when the operational and correctness benefits exceed the cost of running and synchronizing another datastore.
+
 **Example solution:** Keep authoritative products, prices, orders, and payments in a relational database. Store carts in a low-latency key-value store with expiry. Project catalog documents into a search engine. Send immutable business events to a warehouse or lakehouse for analytics. Store images in object storage behind a CDN.
 
 **Why:** Each choice follows access patterns, consistency, lifetime, and query shape—not trend or scale alone.
 
 **Follow-up:** Explain the source of truth, propagation path, expected lag, replay strategy, and behavior when a projection is unavailable.
+
+**Trade-offs and when not to use it:** Every additional datastore adds provisioning, security, schema evolution, drivers, backups, observability, expertise, cost, and a synchronization failure mode. A relational database with suitable indexes, JSON columns, full-text support, partitioning, and read replicas may be the better design until a measured workload proves otherwise. Avoid turning “use the best database for each query” into uncontrolled database sprawl.
+
+**Production checks:** Track source-to-projection freshness, failed/poison change events, version conflicts, reconciliation differences, storage growth, backup age, restore success, and latency/error SLOs per store. Test what the application displays when the cart cache, search index, analytics pipeline, or object store is unavailable; graceful degradation must not violate price, inventory, payment, tenant, or authorization correctness.
 
 #### Practical walkthrough — E-commerce storage: use a source and read model per need
 
@@ -1924,6 +1974,248 @@ Place nodes and keys on a ring (or use rendezvous hashing). Each key chooses a n
 **What changed:** membership changes preserve most assignments. Consistent hashing does not solve hot keys, membership truth, cache stampedes, or durability—pair it with replication, single-flight, and health-aware routing where needed.
 
 **Practice:** map ten keys to three nodes, add one node, and count moved keys; then compare with modulo hashing.
+
+---
+
+### Q26. How do you choose a shard key and reshard without creating hot partitions?
+
+**In simple words:** Sharding divides one large dataset across several database servers. The shard key decides which server owns a record, so a poor key can leave one server overloaded while the others remain almost idle.
+
+**Everyday analogy:** A delivery company divides a city into routes. If every business district delivery is assigned to one driver while other drivers receive quiet streets, adding more drivers does not fix the overloaded route. The assignment rule must distribute work and still make an address easy to find.
+
+**What problem does this concept solve?** Sharding lets storage capacity and write throughput grow beyond one database node while keeping request routing predictable.
+
+**Before this concept:** One primary database owned every customer and order. CPU, storage, I/O, connection count, or maintenance time eventually reached a limit that vertical scaling could not safely or economically solve.
+
+❌ **Wrong/before example — low-cardinality key creates a hot shard:**
+
+```csharp
+public string ChooseShard(Order order)
+{
+    // If 75% of orders come from one country, one shard receives 75% of traffic.
+    return $"orders-{order.CountryCode}";
+}
+```
+
+This design also couples physical shard names to business values. Splitting the hot country later requires application changes, data movement, and a period in which old and new locations may both contain records.
+
+✅ **After/correct example — stable logical buckets mapped to physical shards:**
+
+```csharp
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
+
+public sealed class ShardRouter
+{
+    private const int LogicalBucketCount = 1024;
+    private readonly IReadOnlyDictionary<int, string> _bucketToShard;
+
+    public ShardRouter(IReadOnlyDictionary<int, string> bucketToShard) =>
+        _bucketToShard = bucketToShard;
+
+    public string ChooseShard(Guid customerId)
+    {
+        var bucket = (int)(StableHash(customerId) % LogicalBucketCount);
+        return _bucketToShard[bucket];
+    }
+
+    private static ulong StableHash(Guid value)
+    {
+        // Hash the canonical text form so every language can reproduce it.
+        // Document this encoding/algorithm and publish shared test vectors.
+        var canonical = Encoding.ASCII.GetBytes(value.ToString("N"));
+        var digest = SHA256.HashData(canonical);
+        return BinaryPrimitives.ReadUInt64BigEndian(digest);
+    }
+}
+```
+
+Logical buckets separate data placement from physical servers. During resharding, the platform can move selected buckets and change the bucket map instead of changing the hash formula or remapping every customer.
+
+**How it works now:** A request derives a logical bucket from the shard key, reads a versioned bucket-to-shard map from local cache, and connects directly to the owning shard. The control plane changes placement; the data plane continues routing with a bounded-stale map and refreshes after a move or routing-version mismatch.
+
+**Answer:** Start with access patterns and ownership. A good shard key is stable, high-cardinality, evenly distributes bytes and request rate, and appears in most high-volume queries. Tenant or customer ID often preserves locality for customer workflows, but one very large tenant may still require a dedicated shard or sub-sharding. Random/hash sharding distributes load well but makes range scans and cross-customer analytics expensive. Range sharding supports ordered scans but risks a hot newest range. Directory-based sharding is flexible but introduces mapping metadata that must be highly available and cached.
+
+**Example:** An order platform shards operational orders by `CustomerId`. Each customer checkout, order history, and refund normally touches one shard. Global reporting does not scatter synchronous queries across every production shard; change events flow into an analytics store designed for cross-customer aggregation.
+
+**Trade-offs and when not to use it:** Sharding adds routing, schema rollout, backup, restore, uniqueness, transaction, rebalancing, and operational complexity. Do not shard merely because a table is large. First validate indexes, query shape, archival, read replicas, partitioning, caching, and whether a larger primary still meets the required headroom. Database partitioning divides data inside one database; application sharding divides ownership across independently operated databases.
+
+**Production checks:**
+
+- Measure per-shard QPS, bytes, CPU, I/O, connection use, lock waits, latency, and top keys—not only fleet averages.
+- Keep shard-key values immutable. Moving one entity after its key changes is a distributed migration.
+- Define global identifier generation without a single write bottleneck, for example UUIDs or carefully designed time-based IDs.
+- Version the shard map and make routing changes auditable. Never require a remote directory lookup on every data request.
+- Move data with copy, catch-up, verification, cutover, and rollback stages. Dual writes alone can diverge unless they have an explicit reconciliation protocol.
+- Plan schema migrations, backups, point-in-time recovery, and restore drills across all shards.
+- Decide what cross-shard transactions do: reject them, orchestrate a saga, or use a datastore with the required distributed transaction semantics.
+
+#### Practical walkthrough — Sharding: split a growing order database safely
+
+##### Before the pattern
+
+All orders live on one SQL primary. Index tuning bought time, but peak writes saturate the log device and maintenance no longer fits the window. The team proposes `CountryCode` as the shard key because it is easy to understand, but most traffic belongs to two countries and reporting frequently spans countries.
+
+##### After the pattern
+
+The team confirms that customer-scoped requests dominate, chooses `CustomerId`, hashes customers into 1,024 logical buckets, and initially maps those buckets across four physical shards. Change events populate a separate analytics store. A rebalancer copies selected buckets to a new shard, catches up changes, verifies counts/checksums, changes the versioned map, and retains rollback data until the cutover is proven.
+
+**What changed:** Storage and write capacity can scale horizontally without binding the routing formula to today's server count. Cross-customer analytics intentionally leaves the request path, and resharding becomes a controlled data-movement workflow rather than an emergency application rewrite.
+
+**Practice:** Given ten tenants with traffic shares `40%, 20%, 10%, 8%, 7%, 5%, 4%, 3%, 2%, 1%`, compare tenant-ID range sharding, direct hash-to-four-shards, and logical-bucket mapping. Explain how you would isolate the 40% tenant and how you would prove that no writes were lost during its move.
+
+---
+
+### Q27. How do replication, consistency, and failover choices affect user-visible behavior?
+
+**In simple words:** Replication keeps copies of data on other nodes. It can improve availability and read capacity, but a copy may be behind the latest write, and promoting the wrong copy during a failure can lose acknowledged data or create two writers.
+
+**Everyday analogy:** A head office records a contract and sends copies to regional offices. If a customer immediately visits a region whose copy has not arrived, the employee may say the contract does not exist. If two offices both believe they became head office during a network split, they may accept conflicting changes.
+
+**What problem does this concept solve?** Replication reduces dependence on one machine, supports failover, and may scale reads or place data closer to users while making durability and consistency choices explicit.
+
+**Before this concept:** One database node was the only current copy. A disk, host, zone, or maintenance failure made the service unavailable and could cause permanent loss if backups were stale.
+
+❌ **Wrong/before example — write to the leader, immediately read from any replica:**
+
+```csharp
+await leader.UpdateEmailAsync(userId, newEmail, cancellationToken);
+
+// The async replica may not have replayed the write yet.
+var profile = await randomReadReplica.GetProfileAsync(userId, cancellationToken);
+return profile; // may return the old email and confuse the user
+```
+
+✅ **After/correct example — enforce read-your-writes for the workflow:**
+
+```csharp
+var commitToken = await leader.UpdateEmailAsync(
+    userId, newEmail, cancellationToken);
+
+// Pseudocode: use a leader read, session stickiness, or wait for a replica
+// whose replay position has reached the write's commit token.
+var profile = await consistentReader.GetProfileAsync(
+    userId,
+    minimumCommitToken: commitToken,
+    fallback: ReadFallback.Leader,
+    cancellationToken: cancellationToken);
+
+return profile;
+```
+
+**How it works now:** Each workflow declares the weakest consistency guarantee it can safely use. Product browsing may tolerate a slightly stale replica. A password change, payment confirmation, or “show me what I just saved” path reads from the leader or from a replica known to have applied the relevant commit. Failover uses a fenced election so only one leader can accept writes for a term.
+
+**Answer:** In leader-follower replication, writes go to one leader and followers replay its log. Asynchronous replication gives lower write latency and better availability but may lose the newest acknowledged writes if the leader dies before followers receive them. Synchronous replication waits for one or more replicas, reducing potential data loss at the cost of latency and availability when replicas are unreachable. Leaderless/quorum systems write and read multiple replicas, but `W + R > N` is only part of correctness; versioning, conflict resolution, sloppy quorums, repair, and failure assumptions matter too.
+
+**Example:** A checkout service writes an order to a regional primary and synchronously commits to another availability zone before returning success. Remote-region replication remains asynchronous to avoid cross-continent latency. Local failover targets a near-zero RPO; a full regional disaster may have a small documented RPO. Order status immediately after creation reads from the primary or carries a commit token, while catalogue browsing can use a local follower.
+
+**Trade-offs and when not to use it:** More replicas consume storage, network, I/O, operational attention, and may amplify writes. Read replicas do not automatically make a write-heavy system faster. Synchronous cross-region replication may violate latency goals; asynchronous replication cannot promise zero data loss. Replication is not a backup: accidental deletion, corruption, or bad application writes can be copied to every replica.
+
+**Production checks:**
+
+- Define RPO (acceptable data loss) and RTO (acceptable recovery time) for each failure scope: process, node, zone, and region.
+- Monitor replay lag in both time and bytes/records. Alert on user impact and remaining log capacity, not one arbitrary lag number alone.
+- Fence old leaders with terms/epochs, leases, or storage-level tokens so a recovered node cannot continue writing as a stale primary.
+- Test read-your-writes, monotonic reads, and stale-read behavior explicitly; do not hide the consistency contract inside a generic repository.
+- Rehearse failover and failback under load, including connection draining, DNS/proxy convergence, and client retries.
+- Keep independent, versioned backups and restore them in drills. A replica proves redundancy, while a restore drill proves recoverability.
+- Make consumers and writes idempotent because timeouts during failover leave clients uncertain whether an operation committed.
+
+#### Practical walkthrough — Replication: survive a leader failure without lying to users
+
+##### Before the pattern
+
+The API writes a profile update to the primary, then load-balances the confirmation read across three asynchronous replicas. Users intermittently see the old value and retry. During a primary outage, two automation paths promote different replicas, and both accept writes until operators intervene.
+
+##### After the pattern
+
+The write returns a commit token. The confirmation path reads from a replica only after it reaches that token, otherwise it falls back to the current leader. One consensus-backed failover controller assigns a new leader term; storage and proxies reject writes from the old term. Dashboards show replication lag, promotion time, rejected stale-leader writes, and the achieved RPO/RTO.
+
+**What changed:** Replication is no longer treated as invisible infrastructure. The application states its consistency needs, and the platform proves single-writer failover, bounded loss, and recovery through observable tests.
+
+**Practice:** Design replication for (1) a product catalogue, (2) a bank transfer ledger, and (3) social-media like counts. For each, state write acknowledgement, allowed read source, user-visible stale behavior, zone/region RPO and RTO, and the failure test that proves the promise.
+
+---
+
+### Q28. When should an application use a search index instead of querying its primary database?
+
+**In simple words:** A database is optimized to store correct application records and answer structured queries. A search engine builds a separate representation that can find words, tolerate language variations, rank results, and combine text relevance with filters quickly.
+
+**Everyday analogy:** Looking for a subject by opening every book page is slow. A library catalogue and a book's index point to likely matches, but they are derived aids—the original book remains the source of truth.
+
+**What problem does this concept solve?** A search index supports low-latency full-text retrieval, analysis, relevance ranking, faceting, autocomplete, and typo-tolerant discovery without overloading the transactional database.
+
+**Before this concept:** Product search used leading-wildcard SQL over several text columns. As the catalogue grew, the query scanned large portions of the table, produced poor relevance, and competed with checkout traffic.
+
+❌ **Wrong/before example — scan the source-of-truth table for every search:**
+
+```sql
+SELECT TOP (20) ProductID, Name, Description, Price
+FROM Products
+WHERE Name        LIKE '%' + @Query + '%'
+   OR Description LIKE '%' + @Query + '%'
+ORDER BY UpdatedAt DESC;
+```
+
+This query does not define textual relevance, leading wildcards commonly prevent an efficient ordinary index seek, language rules are absent, and ranking by update time can place weak matches above exact product-name matches.
+
+✅ **After/correct example — query a derived, versioned search document:**
+
+```json
+{
+  "productId": "P-1042",
+  "name": "Trail Running Shoes",
+  "description": "Lightweight shoes for rocky trails",
+  "category": "footwear",
+  "brand": "Northstar",
+  "price": 129.99,
+  "inStock": true,
+  "sourceVersion": 418
+}
+```
+
+```text
+must:   analyzed text match for "trail shoes"
+filter: category = footwear, inStock = true, price <= 150
+boost:  exact/phrase match in name > brand > description
+sort:   relevance score DESC, productId ASC
+```
+
+The primary database transaction also records a versioned outbox/change event. An idempotent indexer upserts the document only when `sourceVersion` is newer, so retries and out-of-order delivery cannot overwrite fresh data with stale data.
+
+**How it works now:** The application writes authoritative product data once. CDC or an outbox feeds a search-indexing pipeline. The search service analyzes text into terms, retrieves candidates from an inverted index, applies structured filters, ranks candidates, and returns stable product IDs. The application may hydrate final details from a cache/database when stronger freshness is required.
+
+**Answer:** Use ordinary database queries for exact keys, small structured datasets, transactional constraints, and filters already served efficiently by indexes. Add a search engine when the workload requires linguistic analysis, relevance ranking, multi-field text queries, facets, autocomplete, fuzzy matching, or independent search scaling. Search is normally a projection, not the source of truth. Decide and document how stale it may be, how deletion propagates, and what the product does when the index or indexing pipeline is unavailable.
+
+**Example:** An e-commerce search analyzer lowercases terms, applies language-aware tokenization and synonyms, and indexes name, brand, category, and description with different boosts. Structured availability and price remain filters rather than scoring terms. Offline judged queries measure ranking quality, while online metrics track zero-result rate, click-through, conversion, abandonment, and latency.
+
+**Trade-offs and when not to use it:** A search cluster adds duplicated data, eventual consistency, schema/mapping management, relevance tuning, capacity cost, and another failure mode. Do not add it for a small admin page that filters by status and exact customer ID. Database-native full-text search can be a sensible intermediate step when scale and ranking needs are modest.
+
+**Production checks:**
+
+- Define a freshness SLO such as “99% of product changes searchable within 30 seconds” and measure end-to-end age, not only consumer queue lag.
+- Give every document a stable ID, source version, tenant boundary, and deletion/tombstone path.
+- Make indexing idempotent and reject older versions that arrive after newer ones.
+- Rebuild into a new versioned index, validate counts/sample queries/relevance, then atomically switch an alias. Do not destroy the working index before the replacement is proven.
+- Prevent authorization leaks: security filters must be enforced server-side and included in the search design, cache key, and tests.
+- Bound expensive queries, result windows, wildcard/fuzzy expansion, and aggregations; isolate bulk indexing from interactive query capacity.
+- Maintain a relevance evaluation set containing head, tail, typo, synonym, no-result, and adversarial queries. Latency alone does not prove that search is useful.
+- Define degraded behavior: cached popular results, exact database lookup, temporarily reduced features, or an explicit unavailable response—never silently return unauthorized or invented results.
+
+#### Practical walkthrough — Search: rebuild an index without downtime or stale overwrites
+
+##### Before the pattern
+
+Product writes update SQL and then call the search engine directly. If the second call fails, the systems diverge. A full rebuild deletes the live index first, so search is unavailable for hours. Older retry events can overwrite newer documents because events have no source version.
+
+##### After the pattern
+
+The SQL transaction writes the product and an outbox record atomically. Indexers consume events idempotently and compare source versions. A rebuild creates `products-v2`, reads a consistent source snapshot, catches up later events, validates document counts and a judged query suite, and atomically moves the `products-read` alias from `v1` to `v2`. `v1` remains available for rollback until the observation window closes.
+
+**What changed:** Search becomes a recoverable derived projection with an explicit freshness guarantee. Writes no longer depend synchronously on search availability, reindexing has a safe cutover, and ranking quality is tested as a product behavior rather than guessed from a few manual queries.
+
+**Practice:** Design search for a marketplace with per-seller visibility, price/availability changes, synonyms, autocomplete, and one million products. Specify the document, analyzer, filters, ranking signals, update path, deletion handling, freshness SLO, rebuild process, rollback, and five relevance test queries.
 
 ---
 

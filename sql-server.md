@@ -166,6 +166,27 @@ FROM Employees;
 
 **Answer:** ROLLUP produces subtotals along a hierarchy: it generates a row for each prefix of the column list plus a grand total, making it ideal for year/quarter/month reporting. CUBE generates subtotals for every possible combination of the listed columns — 2^n combinations. GROUPING SETS lets you specify exactly which grouping combinations you want, avoiding unnecessary computation. The GROUPING(col) function returns 1 when a column is NULL because it is a super-aggregate row, helping distinguish real NULLs from rollup placeholders.
 
+**Are these part of SQL Server?** Yes. `ROLLUP`, `CUBE`, `GROUPING SETS`, `GROUPING()`, and `GROUPING_ID()` are native T-SQL features in SQL Server. They are also available in Azure SQL Database and Azure SQL Managed Instance. For modern SQL Server code, prefer the ISO-style syntax shown below instead of the older `GROUP BY ... WITH ROLLUP` or `GROUP BY ... WITH CUBE` syntax.
+
+| T-SQL feature | What SQL Server returns | Best use |
+|---|---|---|
+| `ROLLUP(a, b)` | `(a,b)`, `(a)`, and `()` | Hierarchical subtotals followed by a grand total |
+| `CUBE(a, b)` | `(a,b)`, `(a)`, `(b)`, and `()` | Every subtotal combination |
+| `GROUPING SETS (...)` | Only the combinations explicitly listed | Reports that need selected totals without the full cube |
+| `GROUPING(column)` | `1` when that column was aggregated away; otherwise `0` | Distinguish a subtotal placeholder from a real `NULL` value |
+| `GROUPING_ID(a, b)` | Integer bitmap describing the grouping level | Label, filter, or order detail/subtotal/grand-total rows |
+
+The empty grouping set `()` means “aggregate all input rows” and therefore produces the grand total. These equivalences make the behavior easier to remember:
+
+```sql
+-- These are conceptual equivalents in SQL Server.
+ROLLUP(Region, Product)
+-- = GROUPING SETS ((Region, Product), (Region), ())
+
+CUBE(Region, Product)
+-- = GROUPING SETS ((Region, Product), (Region), (Product), ())
+```
+
 ❌ **Violates:**
 ```sql
 -- Wrong: UNION ALL approach duplicates table scans unnecessarily
@@ -193,11 +214,65 @@ FROM SalesData
 GROUP BY GROUPING SETS ((Region, Product), (Region), ());
 ```
 
+**Complete SQL Server `CUBE` example with safe labels:**
+
+```sql
+SELECT
+    CASE
+        WHEN GROUPING(Region) = 1 THEN 'ALL REGIONS'
+        ELSE COALESCE(Region, '(Unknown region)')
+    END AS RegionLabel,
+    CASE
+        WHEN GROUPING(Product) = 1 THEN 'ALL PRODUCTS'
+        ELSE COALESCE(Product, '(Unknown product)')
+    END AS ProductLabel,
+    SUM(Sales) AS TotalSales,
+    GROUPING(Region) AS RegionWasAggregated,
+    GROUPING(Product) AS ProductWasAggregated,
+    GROUPING_ID(Region, Product) AS GroupingLevel
+FROM SalesData
+GROUP BY CUBE(Region, Product)
+ORDER BY GROUPING_ID(Region, Product), Region, Product;
+```
+
+For `GROUPING_ID(Region, Product)`, the common values are:
+
+| `GroupingLevel` | Meaning |
+|---:|---|
+| `0` | Detail group: both `Region` and `Product` participate |
+| `1` | Region subtotal: `Product` was aggregated away |
+| `2` | Product subtotal: `Region` was aggregated away |
+| `3` | Grand total: both columns were aggregated away |
+
+Do not label every `NULL` with only `COALESCE(Region, 'ALL')`. A real row can contain a `NULL` region, and that is different from the `NULL` placeholder SQL Server creates for a subtotal. Check `GROUPING(Region)` first, as the example does.
+
+**Choosing the correct operator:**
+
+- Use `ROLLUP(Year, Quarter, Month)` when the columns form a hierarchy. Column order matters: reversing the columns changes which subtotals SQL Server creates.
+- Use `CUBE(Region, Product)` when the report genuinely needs totals by region, totals by product, region-product detail, and a grand total.
+- Prefer `GROUPING SETS` when only a few combinations are useful. A cube grows quickly because `n` columns can produce `2^n` grouping combinations before considering the rows within each group.
+- Inspect the actual execution plan and memory grant for large reports. These queries may sort or hash a large input and can spill to `tempdb` when estimates or available memory are poor.
+- Add a date or tenant filter before grouping when the report does not need all historical data. Pre-aggregated summary tables can be better for frequently requested, expensive dashboards.
+
+**Official SQL Server references:** [GROUP BY](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-group-by-transact-sql), [GROUPING](https://learn.microsoft.com/en-us/sql/t-sql/functions/grouping-transact-sql), and [GROUPING_ID](https://learn.microsoft.com/en-us/sql/t-sql/functions/grouping-id-transact-sql).
+
 ---
 
 ### Q6. How do TOP and OFFSET-FETCH differ for pagination?
 
 **Answer:** TOP N returns the first N rows and is simple but not suitable for true pagination because there is no built-in "skip" mechanism — you would need a subquery workaround. OFFSET-FETCH (introduced in SQL Server 2012) provides proper page-based pagination by skipping a calculated number of rows and then fetching the next page. OFFSET-FETCH requires an ORDER BY clause; TOP does not, though using TOP without ORDER BY gives non-deterministic results. For server-side paging in applications, OFFSET-FETCH is the correct choice.
+
+**Are these part of SQL Server?** Yes. `TOP` is T-SQL row-limiting syntax. `OFFSET ... FETCH` is supported by SQL Server 2012 and later and is written as part of `ORDER BY`. `FETCH FIRST` and `FETCH NEXT` are synonyms, as are `ROW` and `ROWS`.
+
+| Requirement | Prefer | Reason |
+|---|---|---|
+| First 10 ordered rows | `TOP (10)` | Direct and readable |
+| Include every row tied at the boundary | `TOP (10) WITH TIES` | May intentionally return more than 10 rows |
+| Jump to a numbered page | `OFFSET ... FETCH` | Expresses skip/take paging directly |
+| Infinite scroll or very deep pages | Keyset/seek pagination with `TOP` | Seeks from the last key instead of discarding all earlier rows |
+| Ordered batch update/delete | `TOP` inside an ordered CTE or subquery | Direct `UPDATE TOP`/`DELETE TOP` does not define which rows are affected |
+
+The existing rule “use `OFFSET-FETCH` for server-side paging” needs one production qualification: it is a good fit for small or moderate numbered pages, but it is not automatically the best choice for a large, changing table. A deep offset still has to process and discard earlier rows, and concurrent inserts or deletes can shift row positions between requests. Keyset pagination is usually safer for next-page APIs and infinite scrolling.
 
 ❌ **Violates:**
 ```sql
@@ -218,6 +293,100 @@ ORDER BY ProductID                          -- deterministic ordering required
 OFFSET (@PageNumber - 1) * @PageSize ROWS  -- skip previous pages
 FETCH NEXT @PageSize ROWS ONLY;            -- take current page
 ```
+
+**SQL Server `TOP` examples:**
+
+```sql
+-- Always pair TOP with ORDER BY when "top" has business meaning.
+SELECT TOP (10)
+       ProductID, Name, Price
+FROM Products
+ORDER BY Price DESC, ProductID ASC;  -- ProductID makes ties deterministic
+
+-- Return all products tied with the tenth-highest price.
+-- This can return more than ten rows by design.
+SELECT TOP (10) WITH TIES
+       ProductID, Name, Price
+FROM Products
+ORDER BY Price DESC;
+
+-- TOP also supports a percentage. Fractions are rounded up.
+SELECT TOP (5) PERCENT
+       ProductID, Name, Price
+FROM Products
+ORDER BY Price DESC, ProductID ASC;
+```
+
+Use parentheses—`TOP (10)`—in new code. SQL Server accepts `TOP 10` in a `SELECT` statement for backward compatibility, but the parenthesized form is clearer and also works naturally with a variable such as `TOP (@PageSize)`.
+
+**Stable `OFFSET-FETCH` pagination:**
+
+```sql
+DECLARE @PageNumber INT = 3;
+DECLARE @PageSize   INT = 10;
+
+-- Validate in the application or procedure:
+-- @PageNumber >= 1 and @PageSize BETWEEN 1 AND a safe maximum.
+SELECT ProductID, Name, Price
+FROM Products
+ORDER BY Price DESC, ProductID ASC  -- unique final tie-breaker is essential
+OFFSET (@PageNumber - 1) * @PageSize ROWS
+FETCH NEXT @PageSize ROWS ONLY;
+```
+
+`ORDER BY Price DESC` alone is not stable when many products share a price. Adding the unique `ProductID` tie-breaker gives SQL Server a total order, so a row does not move arbitrarily between equal-price positions. Even with a unique order, changes committed between separate page requests can still cause page drift. Snapshot or serializable isolation can provide a consistent multi-query view, but keeping a long transaction open across web requests is normally a poor design; keyset pagination is usually the practical API solution.
+
+**Keyset/seek equivalent for the next page:**
+
+```sql
+DECLARE @PageSize      INT = 10;
+DECLARE @LastPrice     DECIMAL(18, 2) = 199.99;
+DECLARE @LastProductID INT = 842;
+
+SELECT TOP (@PageSize)
+       ProductID, Name, Price
+FROM Products
+WHERE Price < @LastPrice
+   OR (Price = @LastPrice AND ProductID > @LastProductID)
+ORDER BY Price DESC, ProductID ASC;
+
+-- A supporting index can make this a seek-oriented access pattern:
+-- CREATE INDEX IX_Products_Price_ProductID
+-- ON Products (Price DESC, ProductID ASC) INCLUDE (Name);
+```
+
+The client sends the last row's `(Price, ProductID)` values as its cursor. This cannot jump directly to page 500, but its work does not grow linearly with the page number in the way a deep offset often does.
+
+**Deterministic batch modification:**
+
+```sql
+-- Wrong: SQL Server may choose any 100 qualifying rows.
+DELETE TOP (100)
+FROM AuditEvents
+WHERE IsArchived = 1;
+
+-- Better: choose the oldest 100 rows in an ordered CTE, then delete those rows.
+WITH Batch AS
+(
+    SELECT TOP (100) *
+    FROM AuditEvents
+    WHERE IsArchived = 1
+    ORDER BY CreatedAt, AuditEventID
+)
+DELETE FROM Batch;
+```
+
+**Important SQL Server rules and pitfalls:**
+
+- `OFFSET` must be zero or greater; `FETCH` must be one or greater.
+- `OFFSET-FETCH` requires `ORDER BY`. `TOP` is syntactically allowed without it, but the chosen rows are then undefined.
+- SQL Server does not allow `TOP` and `OFFSET-FETCH` in the same query scope. A nested query is a separate scope, but combine them only when the intent is clear.
+- `WITH TIES` requires `ORDER BY` and may return more rows than the requested `TOP` count.
+- `TOP` also works with `INSERT`, `UPDATE`, `MERGE`, and `DELETE`, but direct DML does not guarantee which qualifying rows are affected. Select the ordered batch in a CTE/subquery first.
+- Cap page size to protect memory, network bandwidth, and API latency. Return whether another page exists by requesting `@PageSize + 1` rows when appropriate, rather than always running an expensive full `COUNT(*)`.
+- Examine the actual execution plan and logical reads. A matching composite index should follow the filter and ordering columns and include the projected columns when that trade-off is justified.
+
+**Official SQL Server references:** [TOP](https://learn.microsoft.com/en-us/sql/t-sql/queries/top-transact-sql) and [ORDER BY with OFFSET/FETCH](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-order-by-clause-transact-sql).
 
 ---
 
